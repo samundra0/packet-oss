@@ -20,6 +20,10 @@ let sessionCookie: string | null = null;
 let sessionExpiry: number | null = null;
 const SESSION_BUFFER_MS = 5 * 60 * 1000; // Refresh 5 min before expiry
 
+// In-memory cache for GET responses (reduces load on admin-console.packet.ai)
+const adminCache = new Map<string, { data: unknown; timestamp: number }>();
+const ADMIN_CACHE_TTL_MS = 120 * 1000; // 2 minutes
+
 /**
  * Resolve HAI admin credentials from DB → env → legacy env.
  */
@@ -115,6 +119,15 @@ export async function gpuaasAdminRequest<T>(
   endpoint: string,
   data?: Record<string, unknown>
 ): Promise<T> {
+  // Cache GET requests to reduce load on admin-console.packet.ai
+  if (method === "GET") {
+    const cacheKey = endpoint;
+    const cached = adminCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp) < ADMIN_CACHE_TTL_MS) {
+      return cached.data as T;
+    }
+  }
+
   const cookie = await ensureSession();
   const creds = await getAdminCredentials();
   const url = `${creds.url}/api${endpoint}`;
@@ -190,6 +203,10 @@ export async function gpuaasAdminRequest<T>(
   try {
     const parsed = JSON.parse(text);
     console.log(`[HAI Admin] Response:`, JSON.stringify(parsed, null, 2));
+    // Cache successful GET responses
+    if (method === "GET") {
+      adminCache.set(endpoint, { data: parsed, timestamp: Date.now() });
+    }
     return parsed;
   } catch {
     console.log(`[HAI Admin] Non-JSON response:`, text);

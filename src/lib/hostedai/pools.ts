@@ -48,16 +48,18 @@ export async function createSharedVolume(params: CreateSharedVolumeParams): Prom
 }
 
 // Get shared volumes for a team
-// IMPORTANT: The hosted.ai API ignores team_id filter and returns ALL volumes,
-// so we MUST filter on our side to prevent data leakage between customers
+// HAI 2.2 returns paginated { items: [...] } shape with query filter syntax.
+// We also filter client-side as a safety net.
 export async function getSharedVolumes(teamId: string): Promise<SharedVolume[]> {
-  const allVolumes = await hostedaiRequest<SharedVolume[]>(
+  const response = await hostedaiRequest<SharedVolume[] | { items: SharedVolume[] }>(
     "GET",
-    `/shared-volumes?team_id=${teamId}`
+    `/shared-volumes?team_id%5Beqstr%5D=${encodeURIComponent(teamId)}&per_page=100&page=0`
   );
 
-  // CRITICAL: Filter to only this team's volumes - API doesn't do this!
-  // Use String() comparison because API may return team_id as number
+  // Handle both flat array (legacy) and paginated { items: [...] } (HAI 2.2)
+  const allVolumes = Array.isArray(response) ? response : (response?.items || []);
+
+  // CRITICAL: Filter to only this team's volumes as a safety net
   const teamVolumes = allVolumes.filter(v => String(v.team_id) === String(teamId));
 
   if (allVolumes.length !== teamVolumes.length) {
@@ -65,6 +67,31 @@ export async function getSharedVolumes(teamId: string): Promise<SharedVolume[]> 
   }
 
   return teamVolumes;
+}
+
+// Get available storage blocks for creating shared volumes in a region
+export async function getSharedStorageBlocks(
+  regionId: number,
+  teamId: string
+): Promise<Array<{ id: string; name: string; size: number; cost: string }>> {
+  return hostedaiRequest<Array<{ id: string; name: string; size: number; cost: string }>>(
+    "GET",
+    `/shared-volumes/shared-storage-blocks?region_id=${regionId}&team_id=${teamId}`
+  );
+}
+
+// Get shared volumes compatible with a service for attaching during provisioning
+export async function getServiceSharedVolumes(
+  teamId: string,
+  serviceId: string,
+  gpuCount: number,
+  regionId: number,
+  poolId: number
+): Promise<Array<{ id: number; name: string; region_id: number; size_in_gb: number }>> {
+  return hostedaiRequest<Array<{ id: number; name: string; region_id: number; size_in_gb: number }>>(
+    "GET",
+    `/service/i/shared-volumes?team_id=${teamId}&service_id=${serviceId}&requested_gpu_count=${gpuCount}&region_id=${regionId}&pool_id=${poolId}`
+  );
 }
 
 // Delete a shared volume
@@ -179,6 +206,7 @@ export async function getAvailablePools(
 }
 
 // Get pool subscriptions for a team
+// HAI 2.2: Uses unified instances API and maps to PoolSubscription shape for backward compatibility
 export async function getPoolSubscriptions(
   teamId: string,
   metricWindow?: MetricWindow,
@@ -189,34 +217,71 @@ export async function getPoolSubscriptions(
   const cached = getCached<PoolSubscription[]>(cacheKey);
   if (cached) return cached;
 
-  // Endpoint from hosted.ai dashboard - returns paginated response
-  // metric_window controls the time range for tflops_usage and vram_usage metrics
-  const windowParam = metricWindow ? `&metric_window=${metricWindow}` : "";
-  const response = await hostedaiRequest<PoolSubscriptionResponse>(
+  // HAI 2.2: Use unified instances API instead of dead pool-subscription endpoint
+  const response = await hostedaiRequest<{ items: Array<{
+    id: string;
+    name: string;
+    status: string;
+    ip: string[];
+    service?: { id: string; name: string; type: string };
+    team?: { id: string; name: string };
+    region?: { id: number; region_name: string; city?: string; country?: string };
+    pod_info?: {
+      model?: string;
+      vendor?: string;
+      pool_id?: number;
+      pool_name?: string;
+      pool_label?: string;
+      provisioned_service_name?: string;
+      exposed_count?: number;
+    };
+  }>; total_items: number }>(
     "GET",
-    `/gpuaas/pool-subscription?team_id=${teamId}&page=0&per_page=100${windowParam}`,
+    `/instances/unified?page=0&per_page=100&team_id=${teamId}`,
     undefined,
-    timeoutMs
+    timeoutMs || 60000
   );
-  const allItems = response.items || [];
 
-  // CRITICAL: Filter to only this team's subscriptions - API may return items from other teams!
-  // Same pattern as getSharedVolumes() - the hosted.ai API doesn't reliably filter by team_id
-  // Also resolve pool_label → pool_name so downstream code can just use pool_name
-  const items = allItems.filter(item => {
-    if (!item.team_id) return true; // If no team_id on item, can't filter (keep it)
-    return String(item.team_id) === String(teamId);
-  }).map(item => ({
-    ...item,
-    pool_name: item.pool_label || item.pool_name,
-  }));
+  const instances = response.items || [];
 
-  if (allItems.length !== items.length) {
-    console.warn(`[getPoolSubscriptions] SECURITY: Filtered ${allItems.length - items.length} subscriptions from other teams for team ${teamId}`);
+  // Map unified instances to PoolSubscription shape for backward compatibility
+  const items: PoolSubscription[] = instances.map(instance => {
+    const status = (instance.status || "").toLowerCase();
+    // Map HAI 2.2 billable statuses to "subscribed" so they pass billing gates.
+    // The raw status is preserved in pod_status for full-rate vs stopped-rate decisions.
+    // Ref: Confluence HP/600178689 — Status for VM/Pod Instances
+    const BILLABLE_STATUSES = [
+      "running", "active", "restarting", "stopping", "stopped",
+      "resizing", "succeeded",
+    ];
+    const mappedStatus = BILLABLE_STATUSES.includes(status) ? "subscribed" : status;
+
+    return {
+      id: instance.id, // i-{uuid}
+      pool_id: String(instance.pod_info?.pool_id || instance.region?.id || ""),
+      team_id: instance.team?.id || teamId,
+      pool_name: instance.pod_info?.pool_label || instance.pod_info?.pool_name || instance.name,
+      pool_label: instance.pod_info?.pool_label,
+      status: mappedStatus,
+      region: instance.region ? {
+        region_name: instance.region.region_name,
+        city: instance.region.city,
+      } : undefined,
+      pods: [{
+        pod_name: instance.pod_info?.provisioned_service_name || instance.name,
+        pod_status: status,
+        gpu_count: 1,
+      }],
+      per_pod_info: {
+        vgpu_count: 1,
+      },
+    };
+  });
+
+  // Only cache non-empty results
+  if (items.length > 0) {
+    setCache(cacheKey, items);
   }
-
-  // Cache the result
-  setCache(cacheKey, items);
   return items;
 }
 

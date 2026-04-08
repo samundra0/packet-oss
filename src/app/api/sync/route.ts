@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
-import { getSharedVolumes, getPoolSubscriptions, unsubscribeFromPool, deleteSharedVolume } from "@/lib/hostedai";
+import { getSharedVolumes, getPoolSubscriptions, deleteSharedVolume } from "@/lib/hostedai";
 import { checkAndRefillWallet, WALLET_CONFIG } from "@/lib/wallet";
 import { getStoragePricePerGBHourCents, getStoppedInstanceRatePercent } from "@/lib/pricing";
 import { getProductByPoolId } from "@/lib/products";
@@ -24,7 +24,7 @@ interface PodBillingResult {
   subscriptionId: string;
   customerId: string;
   email?: string;
-  status: "billed" | "not_due" | "error";
+  status: "billed" | "not_due" | "error" | "skipped_stopped";
   amountCents?: number;
   nextBillingAt?: Date;
   error?: string;
@@ -133,9 +133,10 @@ export async function POST(request: NextRequest) {
             // Check if all pods for this team have PodMetadata
             const existingMeta = await prisma.podMetadata.findMany({
               where: { stripeCustomerId: customerCache.id },
-              select: { subscriptionId: true, hourlyRateCents: true },
+              select: { subscriptionId: true, instanceId: true, hourlyRateCents: true },
             });
             const metaSubIds = new Set(existingMeta.map(m => m.subscriptionId));
+            const metaInstanceIds = new Set(existingMeta.filter(m => m.instanceId).map(m => m.instanceId!));
             const hasGaps = existingMeta.some(m => !m.hourlyRateCents);
 
             // If all pods have metadata with rates, skip this team
@@ -148,7 +149,8 @@ export async function POST(request: NextRequest) {
                 if (sub.status !== "subscribed" && sub.status !== "active") continue;
 
                 const subId = String(sub.id);
-                const existing = existingMeta.find(m => m.subscriptionId === subId);
+                // Match by subscriptionId OR instanceId (HAI 2.2 returns i-uuid as sub.id)
+                const existing = existingMeta.find(m => m.subscriptionId === subId || m.instanceId === subId);
 
                 if (!existing || !existing.hourlyRateCents) {
                   const product = await getProductByPoolId(sub.pool_id);
@@ -230,6 +232,22 @@ export async function POST(request: NextRequest) {
 
     console.log(`[Sync] Found ${podsDue.length} pods due for billing`);
 
+    // Build product -> poolId lookup for HAI 2.2 pods that have no poolId
+    const productPoolMap = new Map<string, number>();
+    const podsNeedPoolId = podsDue.some(p => !p.poolId && p.productId);
+    if (podsNeedPoolId) {
+      const products = await prisma.gpuProduct.findMany({
+        where: { active: true },
+        select: { id: true, poolIds: true },
+      });
+      for (const p of products) {
+        try {
+          const pids: number[] = JSON.parse(p.poolIds);
+          if (pids.length > 0) productPoolMap.set(p.id, pids[0]);
+        } catch { /* skip malformed */ }
+      }
+    }
+
     for (const pod of podsDue) {
       try {
         // Get customer email for logging
@@ -258,20 +276,44 @@ export async function POST(request: NextRequest) {
 
         // Check if subscription still exists and is active (uses per-run cache)
         const subscriptions = await getCachedSubs(teamId);
-        const subscription = subscriptions.find(s => String(s.id) === pod.subscriptionId);
+        // Match by instanceId first (HAI 2.2), fall back to subscriptionId (legacy)
+        const subscription = pod.instanceId
+          ? subscriptions.find(s => s.id === pod.instanceId)
+          : subscriptions.find(s => String(s.id) === pod.subscriptionId);
 
         if (!subscription || (subscription.status !== "subscribed" && subscription.status !== "active")) {
           console.log(`[Sync] Skipping pod ${pod.subscriptionId}: subscription not active (status: ${subscription?.status || "not found"})`);
-          // Clean up the pod metadata if subscription is gone
-          if (!subscription) {
-            await prisma.podMetadata.delete({ where: { subscriptionId: pod.subscriptionId } }).catch(() => {});
-          }
+          // SAFETY: Never delete pod_metadata — just skip billing
           podResults.push({
             subscriptionId: pod.subscriptionId,
             customerId: pod.stripeCustomerId,
             email: customerEmail,
             status: "error",
             error: `Subscription not active: ${subscription?.status || "not found"}`,
+          });
+          continue;
+        }
+
+        // Check if pod is actually running — stopped/paused pods are billed separately at reduced rate
+        // Ref: Confluence HP/600178689 — billable-at-full-rate statuses
+        const FULL_RATE_STATUSES = ["running", "active", "restarting", "stopping", "resizing", "succeeded"];
+        const podStatuses = (subscription.pods || []).map((p: { pod_status?: string }) => (p.pod_status || "").toLowerCase());
+        const hasRunningPod = podStatuses.some((s: string) => FULL_RATE_STATUSES.includes(s));
+        if (!hasRunningPod && podStatuses.length > 0) {
+          console.log(`[Sync] Skipping pod ${pod.subscriptionId}: no running pods (statuses: ${podStatuses.join(", ")}). Will be billed at stopped rate.`);
+          // Still advance prepaidUntil so we don't re-check every cycle
+          const currentPrepaidUntil = pod.prepaidUntil || now;
+          const nextBillingAt = new Date(currentPrepaidUntil.getTime() + BILLING_INTERVAL_MINUTES * 60 * 1000);
+          await prisma.podMetadata.update({
+            where: { subscriptionId: pod.subscriptionId },
+            data: { prepaidUntil: nextBillingAt },
+          });
+          podResults.push({
+            subscriptionId: pod.subscriptionId,
+            customerId: pod.stripeCustomerId,
+            email: customerEmail,
+            status: "skipped_stopped",
+            amountCents: 0,
           });
           continue;
         }
@@ -323,6 +365,19 @@ export async function POST(request: NextRequest) {
           },
         });
 
+        // Resolve poolId: prefer pod.poolId, fall back to product's poolIds[0]
+        let resolvedPoolId: number | null = pod.poolId ? parseInt(pod.poolId, 10) || null : null;
+        if (resolvedPoolId === null && pod.productId) {
+          resolvedPoolId = productPoolMap.get(pod.productId) ?? null;
+          // Backfill PodMetadata so future cycles don't need the lookup
+          if (resolvedPoolId !== null) {
+            prisma.podMetadata.update({
+              where: { subscriptionId: pod.subscriptionId },
+              data: { poolId: String(resolvedPoolId) },
+            }).catch(e => console.error(`[Sync] Failed to backfill poolId for ${pod.subscriptionId}:`, e));
+          }
+        }
+
         // Log to local WalletTransaction table
         await prisma.walletTransaction.create({
           data: {
@@ -332,7 +387,7 @@ export async function POST(request: NextRequest) {
             amountCents,
             description: chargeDescription,
             subscriptionId: pod.subscriptionId,
-            poolId: pod.poolId ? parseInt(pod.poolId, 10) || null : null,
+            poolId: resolvedPoolId,
             gpuCount,
             hourlyRateCents: pod.hourlyRateCents!,
             billingMinutes: BILLING_INTERVAL_MINUTES,
@@ -585,7 +640,17 @@ export async function POST(request: NextRequest) {
 
         if (balanceCents > 0) {
           // Customer has negative wallet balance - they owe us money
-          console.log(`[Sync] Customer ${customerId} has negative balance: owes $${(balanceCents / 100).toFixed(2)}`);
+          // But only enforce if they actually have hourly-billed pods (hourly_rate_cents > 0)
+          // Monthly-only customers may have stale billing_type metadata in Stripe
+          const hourlyPods = await prisma.podMetadata.count({
+            where: { stripeCustomerId: customerId, hourlyRateCents: { gt: 0 } },
+          });
+          if (hourlyPods === 0) {
+            // No hourly pods — skip enforcement (likely monthly customer with stale Stripe metadata)
+            continue;
+          }
+
+          console.log(`[Sync] Customer ${customerId} has negative balance: owes $${(balanceCents / 100).toFixed(2)} (${hourlyPods} hourly pod(s))`);
 
           const teamId = customer.metadata?.hostedai_team_id;
           if (!teamId) continue;
@@ -677,21 +742,19 @@ export async function POST(request: NextRequest) {
               }
             }
 
-            // Second pass: terminate all pods (unchanged logic)
+            // Second pass: terminate all pods
+            // HAI 2.2: use deleteInstance instead of dead unsubscribeFromPool
             for (const sub of subscriptions) {
               if (sub.status === "subscribed" || sub.status === "active" || sub.status === "subscribing") {
-                const poolId = sub.pool_id;
                 try {
-                  console.log(`[Sync] Terminating pod subscription ${sub.id} for negative balance customer ${customerId}`);
-                  await unsubscribeFromPool(String(sub.id), teamId, String(poolId));
+                  console.log(`[Sync] Terminating instance ${sub.id} for negative balance customer ${customerId}`);
+                  const { deleteInstance } = await import("@/lib/hostedai");
+                  await deleteInstance(String(sub.id));
                   terminatedPods.push(String(sub.id));
 
-                  // Clean up PodMetadata
-                  await prisma.podMetadata.delete({
-                    where: { subscriptionId: String(sub.id) }
-                  }).catch(() => {});
+                  // SAFETY: Never delete pod_metadata — mark it as terminated instead
                 } catch (termErr) {
-                  console.error(`[Sync] Failed to terminate subscription ${sub.id}:`, termErr);
+                  console.error(`[Sync] Failed to terminate instance ${sub.id}:`, termErr);
                 }
               }
             }
@@ -699,25 +762,28 @@ export async function POST(request: NextRequest) {
             console.error(`[Sync] Failed to get subscriptions for ${customerId}:`, subErr);
           }
 
-          // Delete storage volumes — BUT preserve those referenced by auto-preserved snapshots
-          try {
-            const volumes = await getCachedVolumes(teamId);
-            const teamVolumes = volumes.filter(v => v.team_id === teamId);
-            for (const vol of teamVolumes) {
-              if (preservedVolumeIds.has(vol.id)) {
-                console.log(`[Sync] Preserving storage volume ${vol.id} (${vol.name}) — referenced by auto-preserved snapshot, expires ${expiresAt.toISOString()}`);
-                continue; // Skip deletion — snapshot references this volume
+          // Only delete volumes if we actually terminated pods
+          // If HAI was unreachable (no terminations), don't delete storage
+          if (terminatedPods.length > 0) {
+            try {
+              const volumes = await getCachedVolumes(teamId);
+              const teamVolumes = volumes.filter(v => v.team_id === teamId);
+              for (const vol of teamVolumes) {
+                if (preservedVolumeIds.has(vol.id)) {
+                  console.log(`[Sync] Preserving storage volume ${vol.id} (${vol.name}) — referenced by auto-preserved snapshot, expires ${expiresAt.toISOString()}`);
+                  continue;
+                }
+                try {
+                  console.log(`[Sync] Deleting storage volume ${vol.id} (${vol.name}) for negative balance customer ${customerId}`);
+                  await deleteSharedVolume(vol.id);
+                  deletedVolumes.push(vol.id);
+                } catch (volErr) {
+                  console.error(`[Sync] Failed to delete volume ${vol.id}:`, volErr);
+                }
               }
-              try {
-                console.log(`[Sync] Deleting storage volume ${vol.id} (${vol.name}) for negative balance customer ${customerId}`);
-                await deleteSharedVolume(vol.id);
-                deletedVolumes.push(vol.id);
-              } catch (volErr) {
-                console.error(`[Sync] Failed to delete volume ${vol.id}:`, volErr);
-              }
+            } catch (volErr) {
+              console.error(`[Sync] Failed to get volumes for ${customerId}:`, volErr);
             }
-          } catch (volErr) {
-            console.error(`[Sync] Failed to get volumes for ${customerId}:`, volErr);
           }
 
           // Send notification email

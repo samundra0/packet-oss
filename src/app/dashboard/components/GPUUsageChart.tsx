@@ -45,7 +45,7 @@ export function GPUUsageChart({
         let currentTflops = 0;
         let currentVram = 0;
         subs.forEach((sub: PoolSubscription) => {
-          if (sub.status === "subscribed" || sub.status === "active") {
+          if (sub.status === "subscribed" || sub.status === "active" || sub.status === "running") {
             currentTflops += sub.metrics?.tflops_usage || 0;
             currentVram += sub.metrics?.vram_usage || 0;
           }
@@ -114,7 +114,7 @@ export function GPUUsageChart({
   };
 
   const activeGpus = subscriptions.filter(
-    (s) => s.status === "subscribed" || s.status === "active"
+    (s) => s.status === "subscribed" || s.status === "active" || s.status === "running"
   );
 
   if (activeGpus.length === 0) {

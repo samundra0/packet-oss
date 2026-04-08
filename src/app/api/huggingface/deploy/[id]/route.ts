@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
 import {
-  getConnectionInfo,
-  getPoolSubscriptions,
-  unsubscribeFromPool,
+  getUnifiedInstances,
+  getInstanceCredentials,
+  deleteInstance,
 } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
 import {
@@ -243,62 +243,59 @@ export async function GET(
       );
     }
 
-    // Check subscription status
+    // Check instance status via HAI 2.2 unified instances
     let subscriptionStatus = "unknown";
     let connectionInfo: ConnectionInfo | null = null;
     let subscriptionError: string | null = null;
 
     try {
-      const subscriptions = await getPoolSubscriptions(teamId);
-      const sub = subscriptions.find(
-        (s: { id: string }) => String(s.id) === String(deployment!.subscriptionId)
+      // Look up instanceId from PodMetadata, fall back to subscriptionId
+      const podMeta = await prisma.podMetadata.findFirst({
+        where: {
+          OR: [
+            { instanceId: deployment!.subscriptionId },
+            { subscriptionId: deployment!.subscriptionId },
+          ],
+        },
+      });
+      const instanceId = podMeta?.instanceId || deployment!.subscriptionId;
+
+      const instancesResult = await getUnifiedInstances(teamId);
+      const instance = instancesResult.items.find(
+        (i) => i.id === instanceId || i.id === deployment!.subscriptionId
       );
 
-      if (!sub) {
+      if (!instance) {
         subscriptionStatus = "not_found";
-        console.log(`[HF Deploy] Subscription ${deployment!.subscriptionId} not found`);
+        console.log(`[HF Deploy] Instance ${instanceId} not found`);
       } else {
-        subscriptionStatus = (sub as { status?: string; subscription_status?: string }).status ||
-                            (sub as { status?: string; subscription_status?: string }).subscription_status ||
-                            "unknown";
-        console.log(`[HF Deploy] Subscription status: ${subscriptionStatus}`);
-      }
+        subscriptionStatus = (instance.status || "unknown").toLowerCase();
+        console.log(`[HF Deploy] Instance status: ${subscriptionStatus}`);
 
-      // Get connection info if subscribed
-      if (subscriptionStatus === "subscribed" || subscriptionStatus === "active") {
-        const connInfo = await getConnectionInfo(
-          teamId,
-          deployment!.subscriptionId
-        );
-
-        if (connInfo && connInfo.length > 0) {
-          const subscription = connInfo.find(
-            (s) => String(s.id) === String(deployment!.subscriptionId)
-          );
-
-          if (subscription?.pods && subscription.pods.length > 0) {
-            const pod = subscription.pods[0];
-
-            console.log(`[HF Deploy] Pod: ${pod.pod_name}, Status: ${pod.pod_status}`);
-
-            if (pod.ssh_info?.cmd && pod.ssh_info?.pass) {
-              const sshDetails = parseSSHCommand(pod.ssh_info.cmd);
+        // Get SSH credentials if instance is running/active
+        if (["running", "active", "subscribed"].includes(subscriptionStatus)) {
+          try {
+            const credentials = await getInstanceCredentials(instance.id);
+            if (credentials?.ip && credentials?.password) {
               connectionInfo = {
-                ...sshDetails,
-                password: pod.ssh_info.pass,
-                podName: pod.pod_name,
-                podStatus: pod.pod_status,
+                host: credentials.ip,
+                port: credentials.port || 22,
+                username: credentials.username || "ubuntu",
+                password: credentials.password,
+                podName: instance.name || instance.id,
+                podStatus: instance.status || "unknown",
               };
+              console.log(`[HF Deploy] Pod: ${connectionInfo.podName}, Status: ${connectionInfo.podStatus}`);
             } else {
-              console.log("[HF Deploy] SSH info not available yet");
+              console.log("[HF Deploy] SSH credentials not available yet");
             }
-          } else {
-            console.log("[HF Deploy] No pods found in subscription");
+          } catch {
+            console.log("[HF Deploy] Could not fetch instance credentials yet");
           }
         }
       }
     } catch (error) {
-      console.error("[HF Deploy] Error fetching subscription status:", error);
+      console.error("[HF Deploy] Error fetching instance status:", error);
       subscriptionError = error instanceof Error ? error.message : "Unknown error";
     }
 
@@ -549,24 +546,23 @@ export async function DELETE(
 
     console.log(`[HF Deploy] Deleting deployment ${id} for ${deployment.hfItemName}`);
 
-    // Unsubscribe from GPU pool
+    // Delete the HAI instance
     try {
-      const subscriptions = await getPoolSubscriptions(teamId);
-      const sub = subscriptions.find(
-        (s: { id: string }) => String(s.id) === String(deployment!.subscriptionId)
-      );
+      const podMeta = await prisma.podMetadata.findFirst({
+        where: {
+          OR: [
+            { instanceId: deployment!.subscriptionId },
+            { subscriptionId: deployment!.subscriptionId },
+          ],
+        },
+      });
+      const instanceId = podMeta?.instanceId || deployment!.subscriptionId;
 
-      if (sub && sub.pool_id) {
-        console.log(`[HF Deploy] Unsubscribing from pool ${sub.pool_id}`);
-        await unsubscribeFromPool(
-          deployment!.subscriptionId,
-          teamId,
-          sub.pool_id
-        );
-      }
+      console.log(`[HF Deploy] Deleting instance ${instanceId}`);
+      await deleteInstance(instanceId);
     } catch (error) {
-      console.error("[HF Deploy] Error unsubscribing:", error);
-      // Continue with deleting the record even if unsubscribe fails
+      console.error("[HF Deploy] Error deleting instance:", error);
+      // Continue with deleting the record even if instance delete fails
     }
 
     // Delete deployment record

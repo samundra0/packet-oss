@@ -43,6 +43,8 @@ import {
   Wallet,
   Wrench,
   Boxes,
+  Bell,
+  Send,
 } from "lucide-react";
 
 interface AdminSidebarProps {
@@ -110,6 +112,7 @@ const navGroups: NavGroup[] = [
       { id: "referrals", label: "Referrals", icon: Share2 },
       { id: "vouchers", label: "Vouchers", icon: Tag },
       { id: "banners", label: "Banners", icon: Megaphone },
+      { id: "announcements", label: "Announcements", icon: Bell },
     ],
   },
   {
@@ -119,6 +122,7 @@ const navGroups: NavGroup[] = [
       { id: "batches", label: "Batch Jobs", icon: Database },
       { id: "emails", label: "Email Templates", icon: Mail },
       { id: "email-log", label: "Email Log", icon: Mail },
+      { id: "broadcast", label: "Email Broadcast", icon: Send },
       { id: "drip", label: "Drip Campaigns", icon: Mail },
       { id: "game", label: "Game Stats", icon: Gamepad2 },
       { id: "activity", label: "Activity", icon: Activity },

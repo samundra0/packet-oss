@@ -113,7 +113,63 @@ export interface UnifiedInstance {
     pool_display_mode?: string;
     provisioned_service_name?: string;
     exposed_count?: number;
+    vram_gb?: string;
+    max_tflops?: string;
+    vgpu_count?: number;
   };
+  instance_type?: {
+    id: string;
+    name: string;
+    cpu_cores: number;
+    ram_mb: number;
+    scale?: number;
+  };
+}
+
+// HAI 2.2 detailed instance (from GET /instances/unified/{id})
+export interface UnifiedInstanceDetail extends UnifiedInstance {
+  region?: {
+    id: number;
+    region_name: string;
+    city?: string;
+    country?: string;
+    country_code?: string;
+    has_shared_storage_support?: boolean;
+  };
+  root_disk?: { id: string; name: string; size_gb: number };
+  shared_volumes?: Array<{
+    id: number;
+    name: string;
+    mount_point: string;
+    size_in_gb: number;
+    status: string;
+    mount_operation?: string;
+    mount_status?: string;
+    mount_error?: string;
+  }>;
+}
+
+// Get a single unified instance by ID (HAI 2.2)
+export async function getUnifiedInstanceDetail(
+  instanceId: string
+): Promise<UnifiedInstanceDetail> {
+  return hostedaiRequest<UnifiedInstanceDetail>(
+    "GET",
+    `/instances/unified/${instanceId}`
+  );
+}
+
+// Attach or detach shared volumes on a running pod
+export async function podVolumeAction(
+  podName: string,
+  action: "attach_volume" | "detach_volume",
+  volumeIds: number[]
+): Promise<void> {
+  await hostedaiRequest("POST", "/pods/volume-action", {
+    pod_name: podName,
+    action,
+    volumes: volumeIds,
+  });
 }
 
 // Get unified instances for a team (HAI 2.2)
@@ -128,6 +184,37 @@ export async function getUnifiedInstances(
     undefined,
     60000
   );
+}
+
+// Status count entry from HAI 2.2 /instances/unified response
+export interface InstanceStatusCount {
+  status: string;
+  count: number;
+}
+
+// Global instance summary (no team_id filter)
+export interface GlobalInstanceSummary {
+  statusCounts: InstanceStatusCount[];
+  totalItems: number;
+}
+
+// Get global instance summary from HAI 2.2 (all teams, all statuses)
+// Uses per_page=1 to minimize payload — we only need status_counts and total_items
+export async function getGlobalInstanceSummary(): Promise<GlobalInstanceSummary> {
+  const response = await hostedaiRequest<{
+    items: unknown[];
+    status_counts: InstanceStatusCount[];
+    total_items: number;
+  }>(
+    "GET",
+    `/instances/unified?page=0&per_page=1`,
+    undefined,
+    30000
+  );
+  return {
+    statusCounts: response.status_counts || [],
+    totalItems: response.total_items || 0,
+  };
 }
 
 // Get workspaces for a team (every team has at least one default workspace)
@@ -257,6 +344,15 @@ export async function addDisksToInstance(
 // ============================================
 // Scenario Management
 // ============================================
+
+// List all scenarios in HAI
+export async function listScenarios(): Promise<ServiceScenario[]> {
+  const res = await hostedaiRequest<{ scenarios: ServiceScenario[] } | ServiceScenario[]>(
+    "GET",
+    "/scenario"
+  );
+  return Array.isArray(res) ? res : res.scenarios;
+}
 
 // Create a scenario in HAI
 export async function createScenario(opts: {

@@ -20,3 +20,5 @@ export { BusinessTab } from "./BusinessTab";
 export { BannersTab } from "./BannersTab";
 export { UptimeTab } from "./UptimeTab";
 export { PlatformSettingsTab } from "./PlatformSettingsTab";
+export { AnnouncementsTab } from "./AnnouncementsTab";
+export { BroadcastTab } from "./BroadcastTab";

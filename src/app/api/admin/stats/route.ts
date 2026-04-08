@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
-import { readPoolOverviewCache } from "@/lib/pool-overview";
+import { getGlobalInstanceSummary } from "@/lib/hostedai/instances";
 
 export async function GET(request: NextRequest) {
   const sessionToken = request.cookies.get("admin_session")?.value;
@@ -34,18 +34,20 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Use live pool cache for active pods (refreshed every 2 min) instead of daily snapshot
+    // Use HAI 2.2 /instances/unified for live active pod count
+    // The status_counts field gives us an accurate breakdown without fetching all items
+    // Count running + transitional states (pending, starting, restarting) as "active"
+    // Ref: Confluence HP/600178689 — Status for VM/Pod Instances
+    const ACTIVE_STATUSES = ["running", "pending", "starting", "restarting"];
     let liveActivePods = latest.activeGPUs; // fallback to snapshot
-    const poolCache = readPoolOverviewCache();
-    if (poolCache?.pools) {
-      liveActivePods = 0;
-      for (const pool of poolCache.pools) {
-        for (const pod of pool.pods || []) {
-          if (pod.status === "subscribed" || pod.status === "active") {
-            liveActivePods++;
-          }
-        }
-      }
+    try {
+      const summary = await getGlobalInstanceSummary();
+      const activeCount = summary.statusCounts
+        .filter((s) => ACTIVE_STATUSES.includes(s.status.toLowerCase()))
+        .reduce((sum, s) => sum + s.count, 0);
+      liveActivePods = activeCount;
+    } catch (err) {
+      console.warn("[Stats] Failed to fetch live instance summary, using snapshot:", err);
     }
 
     const current = {

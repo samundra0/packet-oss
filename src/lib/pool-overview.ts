@@ -100,7 +100,7 @@ export interface PoolOverviewResponse {
 // Cache config
 const CACHE_DIR = path.join(process.cwd(), "data", "cache");
 const CACHE_FILE = path.join(CACHE_DIR, "pool-overview.json");
-const CACHE_TTL_MS = 5 * 60 * 1000; // Serve cache up to 5 minutes (cron refreshes every 2)
+const CACHE_TTL_MS = 30 * 60 * 1000; // Serve cache up to 30 minutes (cron refreshes every 2, but GPUaaS may be down)
 
 /** Read cached pool overview. Returns null if no cache or expired. */
 export function readPoolOverviewCache(): PoolOverviewResponse | null {
@@ -128,8 +128,9 @@ export function writePoolOverviewCache(data: PoolOverviewResponse): void {
   }
 }
 
-/** Compute full pool overview from live API data. */
-export async function computePoolOverview(): Promise<PoolOverviewResponse> {
+/** Compute full pool overview from live API data.
+ *  When existingCache is provided, per-pool pod data is preserved if the API call fails. */
+export async function computePoolOverview(existingCache?: PoolOverviewResponse | null): Promise<PoolOverviewResponse> {
   const [regions, clusters, stripeTeamMap, policyTeams] = await Promise.all([
     gpuaasAdmin.listRegions(),
     gpuaasAdmin.listClusters(),
@@ -187,6 +188,14 @@ export async function computePoolOverview(): Promise<PoolOverviewResponse> {
       }
 
       // Fetch subscribed teams for all pools in this cluster (parallel)
+      // Build a map of existing cache pods by pool ID for fallback
+      const existingPoolPods = new Map<number, PoolPod[]>();
+      if (existingCache?.pools) {
+        for (const p of existingCache.pools) {
+          if (p.pods.length > 0) existingPoolPods.set(p.id, p.pods);
+        }
+      }
+
       const poolSubscriberMap = new Map<number, PoolPod[]>();
       await Promise.all(
         pools.map(async (pool) => {
@@ -207,8 +216,16 @@ export async function computePoolOverview(): Promise<PoolOverviewResponse> {
               };
             });
             poolSubscriberMap.set(pool.id, pods);
-          } catch {
-            poolSubscriberMap.set(pool.id, []);
+          } catch (err) {
+            console.warn(`[Pool Overview] Failed to fetch subscribers for pool ${pool.id}:`, err instanceof Error ? err.message : err);
+            // Preserve existing cache data for this pool instead of writing empty
+            const cached = existingPoolPods.get(pool.id);
+            if (cached && cached.length > 0) {
+              console.log(`[Pool Overview] Using cached ${cached.length} pods for pool ${pool.id}`);
+              poolSubscriberMap.set(pool.id, cached);
+            } else {
+              poolSubscriberMap.set(pool.id, []);
+            }
           }
         })
       );

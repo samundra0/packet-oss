@@ -42,6 +42,7 @@ export async function GET(request: NextRequest) {
       dbProducts,
       walletBalance,
       sharedVolumes,
+      sshKeys,
     ] = await Promise.all([
       getGpuScenarioId(),
       prisma.gpuProduct.findMany({
@@ -50,6 +51,11 @@ export async function GET(request: NextRequest) {
       }),
       getWalletBalance(payload.customerId).then(w => w.availableBalance).catch(() => 0),
       getSharedVolumes(teamId).catch(() => []),
+      prisma.sSHKey.findMany({
+        where: { stripeCustomerId: payload.customerId },
+        select: { id: true, name: true, fingerprint: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
+      }).catch(() => []),
     ]);
 
     // === ENTITLEMENT CHECK ===
@@ -181,6 +187,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       products: productsWithRegions,
       existingSharedVolumes,
+      sshKeys,
       teamId,
       walletBalanceCents,
     });

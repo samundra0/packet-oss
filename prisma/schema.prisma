@@ -1367,6 +1367,50 @@ model CampaignBanner {
   @@map("campaign_banner")
 }
 
+// ─── Email Broadcasts (admin mass email) ───
+model EmailBroadcast {
+  id             String    @id @default(cuid())
+  subject        String
+  htmlBody       String    @map("html_body")
+  textBody       String?   @map("text_body")
+  useLayout      Boolean   @default(true) @map("use_layout") // wrap in emailLayout() or send raw HTML
+  segmentType    String    @default("all") @map("segment_type") // all | active | pool | node | billing | product | custom
+  segmentFilter  String?   @map("segment_filter") // JSON: {"poolIds":[59]}, {"billingType":"monthly"}, {"emails":["a@b.com"]}
+  recipientCount Int       @default(0) @map("recipient_count")
+  sentCount      Int       @default(0) @map("sent_count")
+  failedCount    Int       @default(0) @map("failed_count")
+  status         String    @default("draft") // draft | sending | sent | failed
+  createdBy      String?   @map("created_by")
+  sentAt         DateTime? @map("sent_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("email_broadcast")
+}
+
+// ─── Dashboard Announcements (admin → customer messages) ───
+model DashboardAnnouncement {
+  id            String    @id @default(cuid())
+  title         String
+  message       String
+  displayType   String    @default("banner") @map("display_type") // banner | modal | both
+  targetType    String    @default("all") @map("target_type") // all | pools
+  targetPoolIds String?   @map("target_pool_ids") // JSON array of pool IDs, e.g. "[45,46,59]"
+  active        Boolean   @default(true)
+  dismissible   Boolean   @default(true)
+  startsAt      DateTime? @map("starts_at")
+  expiresAt     DateTime? @map("expires_at")
+  createdBy     String?   @map("created_by")
+  updatedBy     String?   @map("updated_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@index([active])
+  @@map("dashboard_announcement")
+}
+
 // ─── Marketing: anonymous page-view tracking (cookie-free) ───
 model PageView {
   id                  String   @id @default(cuid())

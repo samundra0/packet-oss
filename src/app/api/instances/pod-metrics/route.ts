@@ -239,7 +239,7 @@ export async function GET(request: NextRequest) {
 
     for (const sub of filteredSubs) {
       const subId = String(sub.id);
-      const isActive = sub.status === "subscribed" || sub.status === "active";
+      const isActive = sub.status === "subscribed" || sub.status === "active" || sub.status === "running";
 
       // Find connection info for this subscription
       const conn = connInfo.find((c) => String(c.id) === subId);

@@ -18,7 +18,7 @@ import { join, dirname } from "path";
 const CRON_SECRET = process.env.CRON_SECRET;
 const PORT = process.env.PORT || "3001";
 const BASE_URL = `http://localhost:${PORT}`;
-const STATE_FILE = join(process.cwd(), ".cron-state.json");
+const STATE_FILE = join(process.cwd(), "data", ".cron-state.json");
 
 interface CronJob {
   name: string;

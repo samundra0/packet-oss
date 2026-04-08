@@ -36,9 +36,24 @@ interface SharedVolume {
   cost: string | number;
 }
 
+interface StorageBlockOption {
+  id: string;
+  name: string;
+  size: number;
+  cost: string;
+}
+
+interface SSHKeyOption {
+  id: string;
+  name: string;
+  fingerprint: string;
+  createdAt: string;
+}
+
 interface LaunchOptionsData {
   products: LaunchProduct[];
   existingSharedVolumes: SharedVolume[];
+  sshKeys: SSHKeyOption[];
   teamId: string;
   walletBalanceCents: number;
 }
@@ -79,13 +94,17 @@ export function LaunchGPUModal({
   const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedRegion, setSelectedRegion] = useState<number | null>(null);
   const [instanceName, setInstanceName] = useState("");
-  const [storageMode, setStorageMode] = useState<"auto" | "existing">("auto");
+  const [storageMode, setStorageMode] = useState<"none" | "create" | "existing">("none");
   const [selectedExistingVolume, setSelectedExistingVolume] = useState<number | null>(null);
+  const [storageBlocks, setStorageBlocks] = useState<StorageBlockOption[]>([]);
+  const [selectedStorageBlock, setSelectedStorageBlock] = useState<string>("");
+  const [storageBlocksLoading, setStorageBlocksLoading] = useState(false);
   const [selectedStartupScript, setSelectedStartupScript] = useState<string>("");
   const [customScript, setCustomScript] = useState("");
   const [showCustomScript, setShowCustomScript] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showFundWallet, setShowFundWallet] = useState(false);
+  const [selectedSSHKeyIds, setSelectedSSHKeyIds] = useState<Set<string>>(new Set());
 
   const selectedProductDetails = options?.products?.find((p) => p.id === selectedProduct);
 
@@ -97,6 +116,41 @@ export function LaunchGPUModal({
       setSelectedRegion(null);
     }
   }, [selectedProduct, selectedProductDetails?.regions]);
+
+  // Fetch storage blocks when region changes — reset storage selection
+  useEffect(() => {
+    setStorageMode("none");
+    setSelectedExistingVolume(null);
+    if (!selectedRegion || !token) {
+      setStorageBlocks([]);
+      setSelectedStorageBlock("");
+      return;
+    }
+    let cancelled = false;
+    async function fetchStorageBlocks() {
+      setStorageBlocksLoading(true);
+      try {
+        const res = await fetch(
+          `/api/instances/shared-volumes/storage-blocks?region_id=${selectedRegion}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          setStorageBlocks(data.blocks || []);
+          // Auto-select the smallest block
+          if (data.blocks?.length > 0) {
+            setSelectedStorageBlock(data.blocks[0].id);
+          }
+        }
+      } catch {
+        if (!cancelled) setStorageBlocks([]);
+      } finally {
+        if (!cancelled) setStorageBlocksLoading(false);
+      }
+    }
+    fetchStorageBlocks();
+    return () => { cancelled = true; };
+  }, [selectedRegion, token]);
 
   // Countdown timer while loading GPU options
   useEffect(() => {
@@ -135,6 +189,11 @@ export function LaunchGPUModal({
         if (response.ok) {
           const data: LaunchOptionsData = await response.json();
           setOptions(data);
+
+          // Auto-select all SSH keys
+          if (data.sshKeys?.length > 0) {
+            setSelectedSSHKeyIds(new Set(data.sshKeys.map(k => k.id)));
+          }
 
           // Auto-select product
           if (data.products?.length > 0) {
@@ -178,8 +237,11 @@ export function LaunchGPUModal({
       setShowCustomScript(false);
       setShowAdvanced(false);
       setShowFundWallet(false);
-      setStorageMode("auto");
+      setStorageMode("none");
       setSelectedExistingVolume(null);
+      setStorageBlocks([]);
+      setSelectedStorageBlock("");
+      setSelectedSSHKeyIds(new Set());
     }
   }, [isOpen]);
 
@@ -235,21 +297,50 @@ export function LaunchGPUModal({
       startupScriptPresetId = preset?.id;
     }
 
-    // Optimistic close — modal closes immediately, API fires in background
-    import("@/lib/plerdy")
-      .then(({ trackPlerdy, PLERDY_EVENTS }) => trackPlerdy(PLERDY_EVENTS.GPU_DEPLOYED))
-      .catch(() => {});
-    if (typeof (window as any).my_analytics !== "undefined") {
-      (window as any).my_analytics.goal("dc2zgi7efaqu6o3h");
-    }
-    if (typeof (window as any).lintrk === "function") {
-      (window as any).lintrk("track", { conversion_id: 24436340 });
-    }
-    onSuccess({ name: instanceName.trim(), poolName: productName });
-    onClose();
+    setLaunching(true);
+    setError("");
 
-    // Fire the API call in the background
     try {
+      // If "create" storage mode, create the shared volume first
+      let sharedVolumeIds: number[] | undefined;
+
+      if (storageMode === "create" && selectedStorageBlock && selectedRegion) {
+        const volumeName = `${instanceName.trim()}-storage`;
+        const volRes = await fetch("/api/instances/shared-volumes", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: volumeName,
+            region_id: selectedRegion,
+            storage_block_id: selectedStorageBlock,
+          }),
+        });
+        if (!volRes.ok) {
+          const volErr = await volRes.json();
+          setError(volErr.error || "Failed to create storage volume");
+          setLaunching(false);
+          return;
+        }
+        const { volume } = await volRes.json();
+        sharedVolumeIds = [volume.id];
+      } else if (storageMode === "existing" && selectedExistingVolume) {
+        sharedVolumeIds = [selectedExistingVolume];
+      }
+
+      // Optimistic close — modal closes immediately, API fires in background
+      import("@/lib/plerdy")
+        .then(({ trackPlerdy, PLERDY_EVENTS }) => trackPlerdy(PLERDY_EVENTS.GPU_DEPLOYED))
+        .catch(() => {});
+      if (typeof (window as any).my_analytics !== "undefined") {
+        (window as any).my_analytics.goal("dc2zgi7efaqu6o3h");
+      }
+      if (typeof (window as any).lintrk === "function") {
+        (window as any).lintrk("track", { conversion_id: 24436340 });
+      }
+      onSuccess({ name: instanceName.trim(), poolName: productName });
+      onClose();
+
+      // Fire the instance creation in the background
       const response = await fetch("/api/instances", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -259,8 +350,8 @@ export function LaunchGPUModal({
           region_id: selectedRegion,
           startup_script: startupScript || undefined,
           startup_script_preset_id: startupScriptPresetId || undefined,
-          existing_shared_volume_id: storageMode === "existing" ? selectedExistingVolume : undefined,
-          skip_auto_storage: storageMode === "auto" ? undefined : true,
+          shared_volume_ids: sharedVolumeIds,
+          ssh_key_ids: selectedSSHKeyIds.size > 0 ? Array.from(selectedSSHKeyIds) : undefined,
           billingType: selectedProductDetails?.billingType || undefined,
           vgpus: 1,
         }),
@@ -274,6 +365,8 @@ export function LaunchGPUModal({
       // Network timeout — the server likely processed the request (GPU spins up)
       // but the response took longer than the proxy timeout. Don't alarm the user.
       console.warn("Launch request network error (GPU likely provisioning):", err);
+    } finally {
+      setLaunching(false);
     }
   };
 
@@ -673,6 +766,11 @@ export function LaunchGPUModal({
                             ?.name || "Custom script"}
                         </span>
                       )}
+                      {storageMode === "create" && selectedStorageBlock && (
+                        <span className="px-2 py-0.5 text-xs bg-teal-100 text-teal-700 rounded-full">
+                          +{storageBlocks.find(b => b.id === selectedStorageBlock)?.size || ""}GB storage
+                        </span>
+                      )}
                       {storageMode === "existing" && selectedExistingVolume && (
                         <span className="px-2 py-0.5 text-xs bg-teal-100 text-teal-700 rounded-full">
                           Storage attached
@@ -785,72 +883,138 @@ export function LaunchGPUModal({
                     </div>
 
                     {/* Persistent Storage */}
-                    {options?.existingSharedVolumes && options.existingSharedVolumes.length > 0 && (
+                    {selectedRegion && (
                       <div>
                         <label className="block text-xs font-medium text-[var(--muted)] mb-2">
-                          Storage
+                          Persistent Storage
                         </label>
-                        <div className="space-y-2">
-                          <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
-                            <input
-                              type="radio"
-                              name="storage-mode"
-                              checked={storageMode === "auto"}
-                              onChange={() => {
-                                setStorageMode("auto");
-                                setSelectedExistingVolume(null);
-                              }}
-                              className="w-4 h-4 accent-teal-500"
-                            />
-                            <div>
-                              <span className="text-sm font-medium text-[var(--ink)]">Auto</span>
-                              <p className="text-xs text-[var(--muted)]">
-                                Default storage configuration
-                              </p>
-                            </div>
-                          </label>
+                        {storageBlocksLoading ? (
+                          <div className="flex items-center gap-2 p-3 text-sm text-[var(--muted)]">
+                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                            </svg>
+                            Loading storage options...
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {/* No persistent storage */}
+                            <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
+                              <input
+                                type="radio"
+                                name="storage-mode"
+                                checked={storageMode === "none"}
+                                onChange={() => {
+                                  setStorageMode("none");
+                                  setSelectedExistingVolume(null);
+                                }}
+                                className="w-4 h-4 accent-teal-500"
+                              />
+                              <div>
+                                <span className="text-sm font-medium text-[var(--ink)]">None</span>
+                                <p className="text-xs text-[var(--muted)]">
+                                  Ephemeral storage only (data lost on termination)
+                                </p>
+                              </div>
+                            </label>
 
-                          <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
-                            <input
-                              type="radio"
-                              name="storage-mode"
-                              checked={storageMode === "existing"}
-                              onChange={() => {
-                                setStorageMode("existing");
-                                if (
-                                  options.existingSharedVolumes &&
-                                  options.existingSharedVolumes.length > 0
-                                ) {
-                                  setSelectedExistingVolume(options.existingSharedVolumes[0].id);
-                                }
-                              }}
-                              className="w-4 h-4 accent-teal-500"
-                            />
-                            <div className="flex-1">
-                              <span className="text-sm font-medium text-[var(--ink)]">
-                                Use existing storage
-                              </span>
-                              <p className="text-xs text-[var(--muted)]">
-                                Attach a volume you already own
-                              </p>
-                            </div>
-                            <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">
-                              {options.existingSharedVolumes.length} available
-                            </span>
-                          </label>
-                        </div>
+                            {/* Create new volume */}
+                            {storageBlocks.length > 0 && (
+                              <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
+                                <input
+                                  type="radio"
+                                  name="storage-mode"
+                                  checked={storageMode === "create"}
+                                  onChange={() => {
+                                    setStorageMode("create");
+                                    setSelectedExistingVolume(null);
+                                    if (storageBlocks.length > 0 && !selectedStorageBlock) {
+                                      setSelectedStorageBlock(storageBlocks[0].id);
+                                    }
+                                  }}
+                                  className="w-4 h-4 accent-teal-500"
+                                />
+                                <div>
+                                  <span className="text-sm font-medium text-[var(--ink)]">Create new volume</span>
+                                  <p className="text-xs text-[var(--muted)]">
+                                    Persistent storage that survives termination
+                                  </p>
+                                </div>
+                              </label>
+                            )}
 
-                        {storageMode === "existing" && (
+                            {/* Use existing volume — only show volumes in the selected region */}
+                            {(() => {
+                              const regionVolumes = options?.existingSharedVolumes?.filter(
+                                (v) => v.region_id === selectedRegion
+                              ) || [];
+                              if (regionVolumes.length === 0) return null;
+                              return (
+                                <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
+                                  <input
+                                    type="radio"
+                                    name="storage-mode"
+                                    checked={storageMode === "existing"}
+                                    onChange={() => {
+                                      setStorageMode("existing");
+                                      setSelectedExistingVolume(regionVolumes[0].id);
+                                    }}
+                                    className="w-4 h-4 accent-teal-500"
+                                  />
+                                  <div className="flex-1">
+                                    <span className="text-sm font-medium text-[var(--ink)]">
+                                      Use existing volume
+                                    </span>
+                                    <p className="text-xs text-[var(--muted)]">
+                                      Attach a volume you already own
+                                    </p>
+                                  </div>
+                                  <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">
+                                    {regionVolumes.length} available
+                                  </span>
+                                </label>
+                              );
+                            })()}
+                          </div>
+                        )}
+
+                        {/* Block size picker for "create" mode */}
+                        {storageMode === "create" && storageBlocks.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {storageBlocks.map((block) => (
+                              <button
+                                key={block.id}
+                                type="button"
+                                onClick={() => setSelectedStorageBlock(block.id)}
+                                className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
+                                  selectedStorageBlock === block.id
+                                    ? "border-teal-500 bg-teal-50 text-teal-700 font-medium"
+                                    : "border-[var(--line)] text-[var(--muted)] hover:border-zinc-300"
+                                }`}
+                              >
+                                {block.size}GB
+                                {block.cost !== "0" && block.cost !== "0.00" && (
+                                  <span className="text-xs ml-1">(${block.cost}/hr)</span>
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Existing volume picker — filtered by selected region */}
+                        {storageMode === "existing" && options?.existingSharedVolumes && (
                           <select
                             value={selectedExistingVolume || ""}
                             onChange={(e) => setSelectedExistingVolume(Number(e.target.value))}
                             className="w-full mt-2 px-4 py-3 rounded-xl border border-[var(--line)] bg-white text-sm focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 outline-none"
                           >
-                            {options.existingSharedVolumes.map((vol) => (
-                              <option key={vol.id} value={vol.id}>
-                                {vol.name} ({vol.size_in_gb}GB) - {vol.status}
-                              </option>
-                            ))}
+                            {options.existingSharedVolumes
+                              .filter((vol) => vol.region_id === selectedRegion)
+                              .map((vol) => (
+                                <option key={vol.id} value={vol.id}>
+                                  {vol.name} ({vol.size_in_gb}GB) - {vol.status}
+                                </option>
+                              ))}
                           </select>
                         )}
                       </div>
@@ -876,6 +1040,75 @@ export function LaunchGPUModal({
                   </div>
                 </div>
               )}
+
+              {/* SSH Keys (optional) */}
+              <div className="mt-5">
+                <label className="block text-sm font-medium text-zinc-700 mb-2">
+                  SSH Keys <span className="text-zinc-400 font-normal">(optional)</span>
+                </label>
+                {!options?.sshKeys ? (
+                  <div className="space-y-2">
+                    <div className="h-4 bg-zinc-100 rounded animate-pulse" />
+                    <div className="h-4 bg-zinc-100 rounded animate-pulse w-3/4" />
+                  </div>
+                ) : options.sshKeys.length === 0 ? (
+                  <p className="text-sm text-zinc-500">
+                    No SSH keys saved.{" "}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        const url = new URL(window.location.href);
+                        url.searchParams.set("tab", "settings");
+                        window.location.href = url.toString();
+                      }}
+                      className="text-teal-600 hover:text-teal-700 hover:underline"
+                    >
+                      Add keys in Account Settings &rarr;
+                    </button>
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {options.sshKeys.map((key) => (
+                      <label
+                        key={key.id}
+                        className="flex items-center gap-3 p-3 bg-zinc-50 rounded-lg cursor-pointer hover:bg-zinc-100 transition-colors"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedSSHKeyIds.has(key.id)}
+                          onChange={(e) => {
+                            const next = new Set(selectedSSHKeyIds);
+                            if (e.target.checked) {
+                              next.add(key.id);
+                            } else {
+                              next.delete(key.id);
+                            }
+                            setSelectedSSHKeyIds(next);
+                          }}
+                          className="w-4 h-4 accent-teal-500 rounded"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <span className="text-sm font-medium text-zinc-900">{key.name}</span>
+                          <span className="text-xs text-zinc-400 font-mono ml-2 truncate">{key.fingerprint}</span>
+                        </div>
+                      </label>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        const url = new URL(window.location.href);
+                        url.searchParams.set("tab", "settings");
+                        window.location.href = url.toString();
+                      }}
+                      className="block text-xs text-teal-600 hover:text-teal-700 hover:underline mt-1"
+                    >
+                      Manage keys in Account Settings &rarr;
+                    </button>
+                  </div>
+                )}
+              </div>
 
               {error && (
                 <div className="bg-red-50 border border-red-200 rounded-xl p-3 mt-4">

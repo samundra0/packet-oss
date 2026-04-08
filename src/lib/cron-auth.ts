@@ -19,6 +19,7 @@ function getCronSecret(): string {
  * Accepts secret via:
  *   - Authorization: Bearer <secret>
  *   - x-cron-secret header
+ *   - ?secret= query parameter (for cron-job.org compatibility)
  *
  * Uses timing-safe comparison to prevent timing attacks.
  * Returns null if authorized, or a NextResponse with 401/500 if not.
@@ -35,11 +36,11 @@ export function verifyCronAuth(request: NextRequest): NextResponse | null {
     );
   }
 
-  // Extract secret from headers only (query params removed for security)
   const authHeader = request.headers.get("authorization");
   const cronSecretHeader = request.headers.get("x-cron-secret");
+  const querySecret = request.nextUrl.searchParams.get("secret");
 
-  const provided = cronSecretHeader || authHeader?.replace("Bearer ", "");
+  const provided = cronSecretHeader || authHeader?.replace("Bearer ", "") || querySecret;
 
   if (!provided) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

@@ -68,6 +68,7 @@ export {
   factoryResetInstance,
   getAddDiskPricing,
   addDisksToInstance,
+  listScenarios,
   createScenario,
   assignServiceToScenario,
   unassignServiceFromScenario,
@@ -78,9 +79,11 @@ export {
   updateHAIService,
   getTeamWorkspaces,
   getUnifiedInstances,
+  getUnifiedInstanceDetail,
+  podVolumeAction,
 } from "./instances";
 
-export type { UnifiedInstance } from "./instances";
+export type { UnifiedInstance, UnifiedInstanceDetail } from "./instances";
 
 export type { AddDiskParams, AddDiskPricing } from "./instances";
 
@@ -108,6 +111,8 @@ export {
   // Shared volume management
   createSharedVolume,
   getSharedVolumes,
+  getSharedStorageBlocks,
+  getServiceSharedVolumes,
   deleteSharedVolume,
   // Optimal pool selection
   selectOptimalPool,

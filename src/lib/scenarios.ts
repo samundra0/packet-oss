@@ -11,6 +11,7 @@
 
 import { getSetting, setSetting } from "@/lib/settings";
 import {
+  listScenarios,
   createScenario,
   assignServiceToScenario,
   unassignServiceFromScenario,
@@ -20,27 +21,61 @@ const GPU_SCENARIO_KEY = "packet_gpu_scenario_id";
 const APPS_SCENARIO_KEY = "packet_apps_scenario_id";
 
 /**
+ * Find an existing scenario by name via the HAI list endpoint.
+ * Returns the scenario ID if found, null otherwise.
+ */
+async function findScenarioByName(name: string): Promise<string | null> {
+  const scenarios = await listScenarios();
+  const match = scenarios.find((s) => s.name === name);
+  return match?.id ?? null;
+}
+
+/**
+ * Get or create a scenario, handling the case where the scenario
+ * already exists in HAI but our DB lost the reference.
+ */
+async function getOrCreateScenario(
+  settingKey: string,
+  name: string,
+  description: string,
+  label: string
+): Promise<string> {
+  const existing = await getSetting(settingKey);
+  if (existing) return existing;
+
+  console.log(`[Scenarios] Creating ${label} scenario in HAI...`);
+  try {
+    const result = await createScenario({ name, description });
+    await setSetting(settingKey, result.id);
+    console.log(`[Scenarios] Created ${label} scenario: ${result.id}`);
+    return result.id;
+  } catch (error) {
+    // If the scenario already exists in HAI, look it up by name
+    if (error instanceof Error && error.message.includes("invalid scenario name")) {
+      console.log(`[Scenarios] ${label} scenario already exists in HAI, looking up by name...`);
+      const id = await findScenarioByName(name);
+      if (id) {
+        await setSetting(settingKey, id);
+        console.log(`[Scenarios] Found existing ${label} scenario: ${id}`);
+        return id;
+      }
+    }
+    console.error(`[Scenarios] Failed to create ${label} scenario:`, error);
+    throw error;
+  }
+}
+
+/**
  * Get or create the GPU provisioning scenario.
  * Returns the scenario UUID.
  */
 export async function getGpuScenarioId(): Promise<string> {
-  let scenarioId = await getSetting(GPU_SCENARIO_KEY);
-  if (scenarioId) return scenarioId;
-
-  console.log("[Scenarios] Creating GPU provisioning scenario in HAI...");
-  try {
-    const result = await createScenario({
-      name: "Packet GPU Provisioning",
-      description: "Bare GPU pod services managed by Packet.ai dashboard",
-    });
-    scenarioId = result.id;
-    await setSetting(GPU_SCENARIO_KEY, scenarioId);
-    console.log(`[Scenarios] Created GPU scenario: ${scenarioId}`);
-    return scenarioId;
-  } catch (error) {
-    console.error("[Scenarios] Failed to create GPU scenario:", error);
-    throw error;
-  }
+  return getOrCreateScenario(
+    GPU_SCENARIO_KEY,
+    "Packet GPU Provisioning",
+    "Bare GPU pod services managed by Packet.ai dashboard",
+    "GPU"
+  );
 }
 
 /**
@@ -48,23 +83,12 @@ export async function getGpuScenarioId(): Promise<string> {
  * Returns the scenario UUID.
  */
 export async function getAppsScenarioId(): Promise<string> {
-  let scenarioId = await getSetting(APPS_SCENARIO_KEY);
-  if (scenarioId) return scenarioId;
-
-  console.log("[Scenarios] Creating Apps scenario in HAI...");
-  try {
-    const result = await createScenario({
-      name: "Packet Apps",
-      description: "Recipe-backed app services managed by Packet.ai dashboard",
-    });
-    scenarioId = result.id;
-    await setSetting(APPS_SCENARIO_KEY, scenarioId);
-    console.log(`[Scenarios] Created Apps scenario: ${scenarioId}`);
-    return scenarioId;
-  } catch (error) {
-    console.error("[Scenarios] Failed to create Apps scenario:", error);
-    throw error;
-  }
+  return getOrCreateScenario(
+    APPS_SCENARIO_KEY,
+    "Packet Apps",
+    "Recipe-backed app services managed by Packet.ai dashboard",
+    "Apps"
+  );
 }
 
 /**

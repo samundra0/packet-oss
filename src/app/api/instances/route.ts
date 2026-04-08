@@ -5,10 +5,7 @@ import { resolveAllTeamsForEmail } from "@/lib/customer-resolver";
 import {
   createInstance,
   getUnifiedInstances,
-  getSharedVolumes,
-  getStorageBlocks,
-  getApiUrl,
-  getApiKey,
+  getUnifiedInstanceDetail,
   PoolSubscription,
 } from "@/lib/hostedai";
 import type { UnifiedInstance } from "@/lib/hostedai";
@@ -61,7 +58,6 @@ export async function GET(request: NextRequest) {
 
     // HAI 2.2: Fetch unified instances from ALL teams in parallel
     let poolSubscriptions: PoolSubscription[] = [];
-
     const teamFetchResults = await Promise.all(
       resolved.allTeamIds.map(async (teamId) => {
         try {
@@ -88,17 +84,61 @@ export async function GET(request: NextRequest) {
         } : undefined,
         per_pod_info: {
           image_name: ui.pod_info?.model ? `${ui.pod_info.vendor || ""} ${ui.pod_info.model}`.trim() : undefined,
-          vgpu_count: 1,
+          vgpu_count: ui.pod_info?.vgpu_count || 1,
+          vcpu_count: ui.instance_type?.cpu_cores,
+          ram_mb: ui.instance_type?.ram_mb,
         },
         pods: [{
           pod_name: ui.name,
           pod_status: ui.status.toLowerCase(),
-          gpu_count: 1,
+          gpu_count: ui.pod_info?.vgpu_count || 1,
         }],
       });
     }
 
     console.log(`[Instances GET] Fetched ${poolSubscriptions.length} unified instances across ${resolved.allTeamIds.length} team(s)`);
+
+    // Fetch instance details in parallel to get shared_volumes and root_disk info
+    if (poolSubscriptions.length > 0) {
+      const detailResults = await Promise.all(
+        poolSubscriptions.map(async (sub) => {
+          try {
+            return await getUnifiedInstanceDetail(String(sub.id));
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      for (let i = 0; i < poolSubscriptions.length; i++) {
+        const detail = detailResults[i];
+        if (!detail) continue;
+
+        const sharedVols = detail.shared_volumes || [];
+        const rootDisk = detail.root_disk;
+
+        poolSubscriptions[i].storage_details = {
+          ephemeral_storage_gb: rootDisk?.size_gb,
+          shared_volumes: sharedVols.map((v) => ({
+            id: String(v.id),
+            name: v.name,
+            size_in_gb: v.size_in_gb,
+            mount_point: v.mount_point,
+            mount_status: v.mount_status,
+            mount_operation: v.mount_operation,
+          })),
+        };
+
+        // Backfill CPU/RAM from detail if not already set from list response
+        if (detail.instance_type && !poolSubscriptions[i].per_pod_info?.vcpu_count) {
+          poolSubscriptions[i].per_pod_info = {
+            ...poolSubscriptions[i].per_pod_info,
+            vcpu_count: detail.instance_type.cpu_cores,
+            ram_mb: detail.instance_type.ram_mb,
+          };
+        }
+      }
+    }
 
     // Fetch pod metadata for unified instances
     const instanceIds = poolSubscriptions.map(s => String(s.id));
@@ -229,7 +269,7 @@ export async function POST(request: NextRequest) {
       ephemeral_storage_block_id,
       persistent_storage_block_id, // Create new volume with this storage block
       existing_shared_volume_id, // Attach existing shared volume by ID
-      skip_auto_storage, // User explicitly chose "no persistent storage"
+      shared_volume_ids, // Pre-created shared volume IDs to attach
       image_uuid,
       vgpus,
       startup_script, // Custom startup script to run after pod starts
@@ -332,13 +372,14 @@ async function handleUnifiedInstanceCreate({
     storage_block_id,
     persistent_storage_block_id,
     existing_shared_volume_id,
-    skip_auto_storage,
+    shared_volume_ids, // Pre-created shared volume IDs to attach via pod_opts
     startup_script,
     startup_script_preset_id,
     billingType: requestedBillingType,
     stripeSubscriptionId,
     app_service_id, // Optional: app's service (carries recipe). If set, used for create-instance instead of product's service.
-  } = body as Record<string, string | number | boolean | undefined>;
+    ssh_key_ids, // Optional: saved SSH key IDs to bake into the instance at deploy time
+  } = body as Record<string, string | number | boolean | number[] | string[] | undefined>;
 
   // Product's service — used for provisioning-info, compatible-pools, region checks
   const serviceId = gpuProduct.serviceId!;
@@ -460,42 +501,17 @@ async function handleUnifiedInstanceCreate({
       // Pool selection is optional — HAI will auto-select if service has gpu_pool_locked
     }
 
-    // Handle persistent storage (additional disks)
-    const additionalDisks: Array<{ storage_block_id: string; disk_position: number }> = [];
+    // Handle persistent storage — attach shared volumes via pod_opts.shared_volumes
+    const sharedVolumes: number[] = [];
 
-    if (existing_shared_volume_id) {
-      // Existing shared volumes are attached via workspace_id in 2.2
+    if (shared_volume_ids && Array.isArray(shared_volume_ids) && (shared_volume_ids as number[]).length > 0) {
+      // Frontend already created the volume(s) — just attach them
+      sharedVolumes.push(...(shared_volume_ids as number[]));
+      console.log("[HAI 2.2] Attaching pre-created shared volumes:", sharedVolumes);
+    } else if (existing_shared_volume_id) {
+      // Attach an existing shared volume by ID
+      sharedVolumes.push(Number(existing_shared_volume_id));
       console.log("[HAI 2.2] Attaching existing shared volume:", existing_shared_volume_id);
-    } else if (persistent_storage_block_id) {
-      additionalDisks.push({
-        storage_block_id: persistent_storage_block_id as string,
-        disk_position: 1,
-      });
-    } else if (!skip_auto_storage) {
-      // Auto-create workspace storage — find persistent storage blocks
-      try {
-        const existingVolumes = await getSharedVolumes(teamId);
-        if (existingVolumes.length === 0) {
-          const storageBlocks = await getStorageBlocks();
-          const persistent = storageBlocks.filter(b => b.shared_storage_usage !== false && b.is_available !== false);
-          const sorted = [...persistent].sort((a, b) => {
-            const aSize = a.size_gb || a.size_in_gb || 0;
-            const bSize = b.size_gb || b.size_in_gb || 0;
-            const aOk = aSize >= 100 ? 0 : 1;
-            const bOk = bSize >= 100 ? 0 : 1;
-            if (aOk !== bOk) return aOk - bOk;
-            return aSize - bSize;
-          });
-          if (sorted.length > 0) {
-            additionalDisks.push({
-              storage_block_id: sorted[0].id,
-              disk_position: 1,
-            });
-          }
-        }
-      } catch (autoStorageErr) {
-        console.error("[HAI 2.2] Auto-create workspace storage failed:", autoStorageErr);
-      }
     }
 
     // === MONTHLY BILLING FLOW ===
@@ -620,8 +636,27 @@ async function handleUnifiedInstanceCreate({
       root_storage_type_id: selectedStorage,
       team_id: teamId,
       workspace_id: workspaceId,
-      additional_disks: additionalDisks.length > 0 ? additionalDisks : undefined,
+      shared_volumes: sharedVolumes.length > 0 ? sharedVolumes : undefined,
     });
+
+    // Resolve SSH key IDs to public key strings for deploy-time injection
+    let publicKeys: string[] = [];
+    if (Array.isArray(ssh_key_ids) && ssh_key_ids.length > 0) {
+      const keyIds = (ssh_key_ids as string[]).filter(id => typeof id === "string" && id.length > 0);
+      if (keyIds.length > 0) {
+        const savedKeys = await prisma.sSHKey.findMany({
+          where: { id: { in: keyIds }, stripeCustomerId: payload.customerId },
+          select: { id: true, publicKey: true },
+        });
+        publicKeys = savedKeys.map(k => k.publicKey);
+        if (savedKeys.length < keyIds.length) {
+          console.warn(`[SSH Keys] ${keyIds.length - savedKeys.length} SSH key(s) not found, deploying with ${savedKeys.length} key(s)`);
+        }
+        if (publicKeys.length > 0) {
+          console.log(`[SSH Keys] Including ${publicKeys.length} SSH key(s) in instance creation`);
+        }
+      }
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let instance: any;
@@ -635,8 +670,12 @@ async function handleUnifiedInstanceCreate({
         root_storage_type_id: selectedStorage,
         team_id: teamId,
         workspace_id: workspaceId,
-        additional_disks: additionalDisks.length > 0 ? additionalDisks : undefined,
-        pod_opts: selectedPoolId ? { pool_id: selectedPoolId, vgpus: 1 } : undefined,
+        ...(publicKeys.length > 0 ? { public_keys: publicKeys } : {}),
+        pod_opts: {
+          ...(selectedPoolId ? { pool_id: selectedPoolId } : {}),
+          vgpus: 1,
+          shared_volumes: sharedVolumes.length > 0 ? sharedVolumes : [],
+        },
       });
     } catch (deployError) {
       if (!isMonthlyDeploy && prepaidAmountCents > 0) {
@@ -658,6 +697,11 @@ async function handleUnifiedInstanceCreate({
     const instanceId = typeof instance === "string" ? instance : instance.id;
     const metricsToken = randomBytes(32).toString("hex");
 
+    // Derive poolId for investor revenue attribution
+    // Use selectedPoolId from compatible-pools API; sync reconciliation will backfill
+    // the real HAI-confirmed pool_id if this is unavailable at deploy time
+    const derivedPoolId: string | null = selectedPoolId ? String(selectedPoolId) : null;
+
     // Save PodMetadata with instanceId
     try {
       await prisma.podMetadata.create({
@@ -669,7 +713,7 @@ async function handleUnifiedInstanceCreate({
           deployTime,
           prepaidUntil: isMonthlyDeploy ? null : prepaidUntil,
           prepaidAmountCents: isMonthlyDeploy ? 0 : prepaidAmountCents,
-          poolId: null,
+          poolId: derivedPoolId,
           productId: gpuProduct.id,
           hourlyRateCents: isMonthlyDeploy ? 0 : hourlyRateCents,
           metricsToken,
@@ -677,6 +721,7 @@ async function handleUnifiedInstanceCreate({
           startupScriptStatus: "pending",
           billingType: isMonthlyDeploy ? "monthly" : "hourly",
           stripeSubscriptionId: resolvedStripeSubId || null,
+          sharedVolumeId: sharedVolumes[0] || null,
         },
       });
       console.log(`[HAI 2.2] Saved PodMetadata for instance ${instanceId}`);
@@ -704,6 +749,7 @@ async function handleUnifiedInstanceCreate({
           amountCents: prepaidAmountCents,
           description: `GPU deploy: ${gpuProduct.name} @ $${(hourlyRateCents / 100).toFixed(2)}/hr`,
           subscriptionId: instanceId,
+          poolId: derivedPoolId ? parseInt(derivedPoolId, 10) || null : null,
           gpuCount,
           hourlyRateCents,
           billingMinutes: prepaidMinutes,

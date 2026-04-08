@@ -28,6 +28,8 @@ import {
   BannersTab,
   UptimeTab,
   PlatformSettingsTab,
+  AnnouncementsTab,
+  BroadcastTab,
 } from "./index";
 import { GpuAppsTab } from "./GpuAppsTab";
 import { OssAdminSupportTab } from "./OssAdminSupportTab";
@@ -419,6 +421,8 @@ export function AdminDashboard() {
       payouts: "Investor Payouts",
       "platform-settings": "Platform Settings",
       "gpu-apps": "GPU Apps",
+      announcements: "Dashboard Announcements",
+      broadcast: "Email Broadcast",
     };
     return labels[tab];
   };
@@ -693,6 +697,10 @@ export function AdminDashboard() {
         {activeTab === "payouts" && <PayoutsTab />}
 
         {activeTab === "platform-settings" && <PlatformSettingsTab />}
+
+        {activeTab === "announcements" && <AnnouncementsTab />}
+
+        {activeTab === "broadcast" && <BroadcastTab />}
 
         {activeTab === "node-revenue" && (
           <NodeRevenueTab

@@ -13,7 +13,7 @@ import { getSetting } from "@/lib/settings";
 
 // In-memory cache for API responses (10 second TTL)
 const apiCache = new Map<string, { data: unknown; timestamp: number }>();
-const CACHE_TTL_MS = 30 * 1000; // 30 seconds (reduced API pressure for teams with many GPUs)
+const CACHE_TTL_MS = 120 * 1000; // 2 minutes — shared across cron jobs to reduce hosted.ai API load
 
 /**
  * Get cached API response

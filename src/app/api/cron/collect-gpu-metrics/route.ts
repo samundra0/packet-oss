@@ -14,8 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getPoolSubscriptions, getConnectionInfo } from "@/lib/hostedai";
-import { getDefaultResourcePolicy } from "@/lib/hostedai/policies";
-import { getStripe } from "@/lib/stripe";
+import { readPoolOverviewCache } from "@/lib/pool-overview";
 import { spawn } from "child_process";
 import { validateSSHParams } from "@/lib/ssh-validation";
 import { verifyCronAuth } from "@/lib/cron-auth";
@@ -318,37 +317,38 @@ export async function GET(request: NextRequest) {
     // (e.g. HuggingFace deployments). SSH collection ensures we always have VRAM data
     // for pool selection (selectOptimalPool needs GpuHardwareMetrics).
 
-    // Step 1: Get all teams from the default resource policy (same as admin pods)
-    const policy = await getDefaultResourcePolicy();
-    const teams = policy.teams || [];
-    results.teams = teams.length;
-
-    console.log(`[GPU Metrics] Found ${teams.length} teams in resource policy`);
-
-    // Step 2: Build a map of teamId -> customer info from Stripe
-    const stripe = await getStripe();
-    const teamToCustomer: Map<string, string> = new Map();
-
-    let hasMore = true;
-    let startingAfter: string | undefined;
-
-    while (hasMore) {
-      const customers = await stripe.customers.list({
-        limit: 100,
-        starting_after: startingAfter,
-      });
-
-      for (const customer of customers.data) {
-        const teamId = customer.metadata?.hostedai_team_id;
-        if (teamId) {
-          teamToCustomer.set(teamId, customer.id);
+    // Step 1: Get teams with active pods from pool overview cache (0 hosted.ai API calls)
+    // This narrows from ~70 teams to ~20-30 that actually have running pods.
+    const poolCache = readPoolOverviewCache();
+    const activeTeamIds = new Set<string>();
+    if (poolCache?.pools) {
+      for (const pool of poolCache.pools) {
+        for (const pod of pool.pods || []) {
+          if (pod.teamId && ["subscribed", "active", "running"].includes(pod.status)) {
+            activeTeamIds.add(pod.teamId);
+          }
         }
       }
+    }
 
-      hasMore = customers.has_more;
-      if (customers.data.length > 0) {
-        startingAfter = customers.data[customers.data.length - 1].id;
-      }
+    const teams = Array.from(activeTeamIds).map(id => ({ id }));
+    results.teams = teams.length;
+
+    if (teams.length === 0) {
+      console.log("[GPU Metrics] No active teams found in pool overview cache, skipping");
+      return NextResponse.json({ success: true, duration: `${Date.now() - startTime}ms`, results });
+    }
+
+    console.log(`[GPU Metrics] Found ${teams.length} teams with active pods (from cache)`);
+
+    // Step 2: Build teamId -> customerId map from local CustomerCache (0 Stripe API calls)
+    const teamToCustomer: Map<string, string> = new Map();
+    const customerCacheList = await prisma.customerCache.findMany({
+      where: { teamId: { in: Array.from(activeTeamIds) }, isDeleted: false },
+      select: { id: true, teamId: true },
+    });
+    for (const c of customerCacheList) {
+      if (c.teamId) teamToCustomer.set(c.teamId, c.id);
     }
 
     // Step 3: Collect metrics from all teams in parallel batches

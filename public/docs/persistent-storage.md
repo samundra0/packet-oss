@@ -16,11 +16,11 @@ Persistent storage allows your data to survive pod restarts, reimaging, and scal
 
 ### Storage Tiers
 
-| Block Type | Size | Price/Hour | Use Case |
-|------------|------|------------|----------|
-| Block-10 | 10 GB | ~$0.002 | Small datasets, model checkpoints |
-| Block-20 | 20 GB | ~$0.004 | Medium datasets, multiple models |
-| Block-50 | 50 GB | ~$0.010 | Large datasets, training outputs |
+| Block Type | Size  | Price/Hour | Use Case                          |
+| ---------- | ----- | ---------- | --------------------------------- |
+| Block-10   | 10 GB | ~$0.002    | Small datasets, model checkpoints |
+| Block-20   | 20 GB | ~$0.004    | Medium datasets, multiple models  |
+| Block-50   | 50 GB | ~$0.010    | Large datasets, training outputs  |
 
 ## Using Persistent Storage
 
@@ -138,11 +138,11 @@ Persistent storage is billed per hour of usage:
 
 ### Example Billing
 
-| Resource | Hours | Cost |
-|----------|-------|------|
-| GPU (L40S) | 24h | $28.80 |
-| Storage (50GB) | 24h | $0.24 |
-| **Total** | - | **$29.04** |
+| Resource       | Hours | Cost       |
+| -------------- | ----- | ---------- |
+| GPU (L40S)     | 24h   | $28.80     |
+| Storage (50GB) | 24h   | $0.24      |
+| **Total**      | -     | **$29.04** |
 
 ## API Reference
 
@@ -255,6 +255,7 @@ Currently, storage volumes can only be attached to one pod at a time due to the 
 ### Can I resize my storage?
 
 To change storage size, you would need to:
+
 1. Copy data from current storage
 2. Terminate the current pod
 3. Launch a new pod with different storage size
@@ -271,4 +272,4 @@ Storage volumes are currently tied to pod subscriptions. When you terminate a po
 ---
 
 **Last Updated**: January 2025
-**Questions?** Contact support@packet.ai
+**Questions?** Contact help@packet.ai

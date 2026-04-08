@@ -9,9 +9,11 @@ Welcome to the Packet.ai documentation! This guide covers all features for deplo
 ## 🤖 AI Inference Features
 
 ### 5. [OpenAI-Compatible API Gateway](./openai-api-gateway.md)
+
 **🔌 Drop-in replacement for OpenAI APIs**
 
 Use your deployed models with existing OpenAI SDKs and tools:
+
 - Chat completions and text completions endpoints
 - Streaming responses with Server-Sent Events
 - Authentication and API key management
@@ -23,9 +25,11 @@ Use your deployed models with existing OpenAI SDKs and tools:
 ---
 
 ### 6. [Inference Playground](./inference-playground.md)
+
 **🎮 Interactive chat interface for testing models**
 
 Test and experiment with your deployed models without writing code:
+
 - Real-time streaming chat interface
 - Configurable system prompts and parameters
 - Temperature, max tokens, top-p controls
@@ -37,9 +41,11 @@ Test and experiment with your deployed models without writing code:
 ---
 
 ### 7. [GPU Metrics Dashboard](./gpu-metrics.md)
+
 **📊 Real-time GPU monitoring and analytics**
 
 Monitor your GPU instances for optimal performance:
+
 - GPU utilization, memory, temperature tracking
 - Inference metrics (tokens/sec, queue depth)
 - Historical data and trend analysis
@@ -51,9 +57,11 @@ Monitor your GPU instances for optimal performance:
 ---
 
 ### 8. [Token Usage Dashboard](./token-usage.md)
+
 **📈 Track and analyze token consumption**
 
 Comprehensive analytics on your AI model usage:
+
 - Prompt and completion token tracking
 - Usage by model, time period, API key
 - Cost estimation and comparisons
@@ -65,9 +73,11 @@ Comprehensive analytics on your AI model usage:
 ---
 
 ### 9. [Pro 6000 Blackwell Optimized Models](./pro-6000-blackwell.md)
+
 **⚡ One-click deploy for 48GB VRAM GPUs**
 
 Pre-configured templates for NVIDIA Pro 6000 Blackwell:
+
 - 70B+ parameter models (Llama 3.1, Qwen 2.5, DeepSeek)
 - AWQ/GPTQ quantized models for efficiency
 - Optimal vLLM configurations
@@ -81,9 +91,11 @@ Pre-configured templates for NVIDIA Pro 6000 Blackwell:
 ## 🌐 Service Exposure
 
 ### 1. [Service Exposure - Complete Guide](./service-exposure.md)
+
 **📘 Start here for comprehensive documentation**
 
 The complete guide covers everything you need to know about exposing ports and services from your GPU instances:
+
 - What is Service Exposure?
 - Common use cases (vLLM, Jupyter, TensorBoard, Gradio, etc.)
 - Step-by-step tutorials
@@ -97,9 +109,11 @@ The complete guide covers everything you need to know about exposing ports and s
 ---
 
 ### 2. [Quick Start Guide](./service-exposure-quickstart.md)
+
 **⚡ Get started in 5 minutes**
 
 A one-page cheat sheet with:
+
 - 5-minute setup guide
 - Common ports and commands
 - One-liner examples
@@ -111,9 +125,11 @@ A one-page cheat sheet with:
 ---
 
 ### 3. [Real-World Use Cases](./service-exposure-use-cases.md)
+
 **💡 Practical examples and scenarios**
 
 Real-world scenarios showing when and why to use Service Exposure:
+
 - Building AI-powered web applications
 - Team collaboration and demos
 - Production API deployment
@@ -126,9 +142,11 @@ Real-world scenarios showing when and why to use Service Exposure:
 ---
 
 ### 4. [Architecture & Diagrams](./service-exposure-architecture.md)
+
 **🏗️ Technical deep-dive**
 
 System architecture and technical details:
+
 - High-level architecture diagrams
 - Network traffic flow
 - Component architecture
@@ -144,7 +162,7 @@ System architecture and technical details:
 
 - **Live Documentation Site**: https://dash.packet.ai/docs
 - **Dashboard**: https://dash.packet.ai
-- **Support**: support@packet.ai
+- **Support**: help@packet.ai
 
 ---
 
@@ -153,39 +171,51 @@ System architecture and technical details:
 ### I want to...
 
 #### ...deploy a model quickly
+
 → Start with [Pro 6000 Blackwell Templates](./pro-6000-blackwell.md)
 
 #### ...test my model with a chat interface
+
 → Use the [Inference Playground](./inference-playground.md)
 
 #### ...integrate my model into an application
+
 → Read the [OpenAI API Gateway](./openai-api-gateway.md) docs
 
 #### ...monitor my GPU performance
+
 → Check the [GPU Metrics Dashboard](./gpu-metrics.md)
 
 #### ...track token usage and costs
+
 → See the [Token Usage Dashboard](./token-usage.md)
 
 #### ...expose my first service
+
 → Start with [Quick Start Guide](./service-exposure-quickstart.md)
 
 #### ...understand what Service Exposure is
+
 → Read [Complete Guide - Overview](./service-exposure.md#overview)
 
 #### ...see real examples
+
 → Check [Use Cases](./service-exposure-use-cases.md)
 
 #### ...deploy a vLLM API
+
 → See [Complete Guide - vLLM Example](./service-exposure.md#example-1-exposing-vllm-api)
 
 #### ...troubleshoot a problem
+
 → See [Complete Guide - Troubleshooting](./service-exposure.md#troubleshooting)
 
 #### ...use the API programmatically
+
 → See [Complete Guide - API Reference](./service-exposure.md#api-reference)
 
 #### ...understand the architecture
+
 → Read [Architecture Diagrams](./service-exposure-architecture.md)
 
 ---
@@ -220,6 +250,7 @@ docs/
 ## 🆕 What's New
 
 ### January 2025
+
 - ⚡ **Pro 6000 Blackwell support** - Deploy 70B+ models on 48GB GPUs
 - 🔌 **OpenAI-Compatible API Gateway** - Drop-in replacement for OpenAI
 - 🎮 **Inference Playground** - Interactive model testing
@@ -239,7 +270,7 @@ Found a typo or want to improve the docs?
 
 1. Edit the markdown files in `/docs`
 2. Submit a pull request
-3. Or contact us at support@packet.ai
+3. Or contact us at help@packet.ai
 
 ---
 

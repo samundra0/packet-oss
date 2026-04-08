@@ -178,7 +178,7 @@ export interface CreateInstanceParams {
   team_id: string;
   workspace_id?: string;
   network_assignment?: string;
-  additional_disks?: Array<{ storage_block_id: string; disk_position: number }>;
+  public_keys?: string[];
   pod_opts?: { pool_id?: number; vgpus?: number; shared_volumes?: number[] };
 }
 
@@ -245,6 +245,9 @@ export interface PoolSubscription {
       name?: string;
       size_gb?: number;
       size_in_gb?: number; // Alternative field name from API
+      mount_point?: string;
+      mount_status?: string; // "SUCCEEDED", "RUNNING", "FAILED"
+      mount_operation?: string; // "ATTACH", "DETACH"
     }> | null;
   };
   pods?: Array<{

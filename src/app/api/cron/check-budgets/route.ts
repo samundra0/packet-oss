@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getStripe } from "@/lib/stripe";
-import { getTeamBillingSummaryV2, formatBillingDatetime, getPoolSubscriptions, podAction } from "@/lib/hostedai";
+import { getPoolSubscriptions, podAction } from "@/lib/hostedai";
 import { sendBudgetAlertEmail, sendAutoShutdownNotificationEmail } from "@/lib/email";
 import { verifyCronAuth } from "@/lib/cron-auth";
 
@@ -136,26 +136,32 @@ async function checkCustomerBudget(
     return result;
   }
 
-  // Get current billing data
+  // Get current billing data from LOCAL WalletTransaction table (0 hosted.ai API calls)
   const now = new Date();
   const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
   const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
 
-  // Get monthly billing
-  const monthlyBilling = await getTeamBillingSummaryV2(
-    teamId,
-    formatBillingDatetime(startOfMonth),
-    formatBillingDatetime(now)
-  );
-  result.monthlySpendCents = Math.round((Number(monthlyBilling.total_cost) || 0) * 100);
+  // Monthly spend from local wallet transactions (gpu_usage + gpu_deploy charges)
+  const monthlySpend = await prisma.walletTransaction.aggregate({
+    _sum: { amountCents: true },
+    where: {
+      stripeCustomerId: settings.stripeCustomerId,
+      type: { in: ["gpu_usage", "gpu_deploy"] },
+      createdAt: { gte: startOfMonth },
+    },
+  });
+  result.monthlySpendCents = monthlySpend._sum.amountCents || 0;
 
-  // Get daily billing
-  const dailyBilling = await getTeamBillingSummaryV2(
-    teamId,
-    formatBillingDatetime(startOfDay),
-    formatBillingDatetime(now)
-  );
-  result.dailySpendCents = Math.round((Number(dailyBilling.total_cost) || 0) * 100);
+  // Daily spend from local wallet transactions
+  const dailySpend = await prisma.walletTransaction.aggregate({
+    _sum: { amountCents: true },
+    where: {
+      stripeCustomerId: settings.stripeCustomerId,
+      type: { in: ["gpu_usage", "gpu_deploy"] },
+      createdAt: { gte: startOfDay },
+    },
+  });
+  result.dailySpendCents = dailySpend._sum.amountCents || 0;
 
   // Calculate percentages
   if (settings.monthlyLimitCents && settings.monthlyLimitCents > 0) {
@@ -214,7 +220,7 @@ async function checkCustomerBudget(
       const runningPods: { name: string; subscriptionId: string | number }[] = [];
 
       for (const sub of subscriptions) {
-        if (sub.status === "subscribed" || sub.status === "active") {
+        if (sub.status === "subscribed" || sub.status === "active" || sub.status === "running") {
           if (sub.pods && sub.pods.length > 0) {
             for (const pod of sub.pods) {
               const podStatus = (pod.pod_status || "").toLowerCase();

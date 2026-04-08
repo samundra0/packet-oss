@@ -24,7 +24,7 @@ const PRO_DEFAULTS = {
   appUrl: "https://packet.ai",
   dashboardUrl: "https://dash.packet.ai",
   apiBaseUrl: "https://api.packet.ai",
-  supportEmail: "support@packet.ai",
+  supportEmail: "help@packet.ai",
   logoUrl: "/packet-logo.png",
   faviconUrl: "/favicon.ico",
   primaryColor: "#1a4fff",
@@ -72,7 +72,8 @@ function env(key: string): string | undefined {
   if (typeof window === "undefined") {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getSettingSync } = require("./settings") as typeof import("./settings");
+      const { getSettingSync } =
+        require("./settings") as typeof import("./settings");
       const dbVal = getSettingSync(key);
       if (dbVal) return dbVal;
     } catch {
@@ -96,7 +97,11 @@ export function getAppUrl(): string {
 
 /** Dashboard base URL (may differ from marketing site). */
 export function getDashboardUrl(): string {
-  return env("NEXT_PUBLIC_DASHBOARD_URL") || env("NEXT_PUBLIC_APP_URL") || defaults().dashboardUrl;
+  return (
+    env("NEXT_PUBLIC_DASHBOARD_URL") ||
+    env("NEXT_PUBLIC_APP_URL") ||
+    defaults().dashboardUrl
+  );
 }
 
 /** Inference API base URL. */

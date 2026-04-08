@@ -332,7 +332,10 @@ export async function POST(request: NextRequest) {
       console.log(`Admin login email sent successfully to ${email}`);
     } catch (emailError) {
       console.error(`Failed to send admin login email to ${email}:`, emailError);
-      throw emailError;
+      return NextResponse.json(
+        { error: "Email delivery failed. Please try again in a moment." },
+        { status: 503 }
+      );
     }
 
     return NextResponse.json({

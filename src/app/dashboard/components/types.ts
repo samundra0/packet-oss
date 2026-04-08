@@ -121,6 +121,8 @@ export interface PoolSubscription {
       name: string;
       mount_point: string;
       size_in_gb: number;
+      mount_status?: string;
+      mount_operation?: string;
     }>;
   };
   metrics?: {

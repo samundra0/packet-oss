@@ -130,7 +130,7 @@ else
 fi
 
 if $NEED_NODE; then
-  run_with_progress "Installing Node.js 20" bash -c "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y -qq nodejs"
+  run_with_progress "Installing Node.js 20" bash -c "export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y -qq nodejs"
 fi
 success "Node.js $(node -v)"
 
@@ -180,7 +180,7 @@ if [[ -z "${HOSTEDAI_API_URL:-}" ]]; then
 
   if [[ "$SAME_NODE" =~ ^[Yy]$ ]]; then
     HOSTEDAI_API_URL="http://localhost:8055"
-    HOSTEDAI_ADMIN_URL="http://localhost:8999"
+    GPUAAS_ADMIN_URL="http://localhost:8999"
     success "Using local HostedAI APIs (user: :8055, admin: :8999)"
   else
     echo ""
@@ -191,7 +191,7 @@ if [[ -z "${HOSTEDAI_API_URL:-}" ]]; then
     echo ""
     echo "  HostedAI Admin Panel API URL (port 8999):"
     echo "    Example: https://admin-panel.example.com"
-    read -rp "  HOSTEDAI_ADMIN_URL: " HOSTEDAI_ADMIN_URL < /dev/tty
+    read -rp "  GPUAAS_ADMIN_URL: " GPUAAS_ADMIN_URL < /dev/tty
   fi
 fi
 
@@ -206,11 +206,11 @@ fi
 # Admin Panel credentials (login/password auth — no API key)
 echo ""
 echo "  HostedAI Admin Panel login credentials (used for pod management)."
-if [[ -z "${HOSTEDAI_ADMIN_USERNAME:-}" ]]; then
-  read -rp "  HOSTEDAI_ADMIN_USERNAME: " HOSTEDAI_ADMIN_USERNAME < /dev/tty
+if [[ -z "${GPUAAS_ADMIN_USER:-}" ]]; then
+  read -rp "  GPUAAS_ADMIN_USER: " GPUAAS_ADMIN_USER < /dev/tty
 fi
-if [[ -z "${HOSTEDAI_ADMIN_PASSWORD:-}" ]]; then
-  read -srp "  HOSTEDAI_ADMIN_PASSWORD: " HOSTEDAI_ADMIN_PASSWORD < /dev/tty
+if [[ -z "${GPUAAS_ADMIN_PASSWORD:-}" ]]; then
+  read -srp "  GPUAAS_ADMIN_PASSWORD: " GPUAAS_ADMIN_PASSWORD < /dev/tty
   echo ""
 fi
 
@@ -333,18 +333,14 @@ if [[ -f "$ENV_FILE" ]]; then
   HOSTEDAI_API_KEY=$(get_existing HOSTEDAI_API_KEY)
   HOSTEDAI_API_KEY="${HOSTEDAI_API_KEY:-${HOSTEDAI_API_KEY}}"
 
-  # Support both new and legacy env var names (legacy: GPUAAS_ADMIN_*)
-  HOSTEDAI_ADMIN_URL=$(get_existing HOSTEDAI_ADMIN_URL)
-  [[ -z "$HOSTEDAI_ADMIN_URL" ]] && HOSTEDAI_ADMIN_URL=$(get_existing GPUAAS_ADMIN_URL)
-  HOSTEDAI_ADMIN_URL="${HOSTEDAI_ADMIN_URL:-http://localhost:8999}"
+  GPUAAS_ADMIN_URL=$(get_existing GPUAAS_ADMIN_URL)
+  GPUAAS_ADMIN_URL="${GPUAAS_ADMIN_URL:-http://localhost:8999}"
 
-  HOSTEDAI_ADMIN_USERNAME=$(get_existing HOSTEDAI_ADMIN_USERNAME)
-  [[ -z "$HOSTEDAI_ADMIN_USERNAME" ]] && HOSTEDAI_ADMIN_USERNAME=$(get_existing GPUAAS_ADMIN_USER)
-  HOSTEDAI_ADMIN_USERNAME="${HOSTEDAI_ADMIN_USERNAME:-${HOSTEDAI_ADMIN_USERNAME}}"
+  GPUAAS_ADMIN_USER=$(get_existing GPUAAS_ADMIN_USER)
+  GPUAAS_ADMIN_USER="${GPUAAS_ADMIN_USER:-${GPUAAS_ADMIN_USER}}"
 
-  HOSTEDAI_ADMIN_PASSWORD=$(get_existing HOSTEDAI_ADMIN_PASSWORD)
-  [[ -z "$HOSTEDAI_ADMIN_PASSWORD" ]] && HOSTEDAI_ADMIN_PASSWORD=$(get_existing GPUAAS_ADMIN_PASSWORD)
-  HOSTEDAI_ADMIN_PASSWORD="${HOSTEDAI_ADMIN_PASSWORD:-${HOSTEDAI_ADMIN_PASSWORD}}"
+  GPUAAS_ADMIN_PASSWORD=$(get_existing GPUAAS_ADMIN_PASSWORD)
+  GPUAAS_ADMIN_PASSWORD="${GPUAAS_ADMIN_PASSWORD:-${GPUAAS_ADMIN_PASSWORD}}"
 
   STRIPE_SECRET_KEY=$(get_existing STRIPE_SECRET_KEY)
   STRIPE_SECRET_KEY="${STRIPE_SECRET_KEY:-${STRIPE_SECRET_KEY}}"
@@ -378,9 +374,9 @@ HOSTEDAI_API_URL=${HOSTEDAI_API_URL:-}
 HOSTEDAI_API_KEY=${HOSTEDAI_API_KEY:-}
 
 # HostedAI Admin Panel (port 8999) — cookie-based login auth
-HOSTEDAI_ADMIN_URL=${HOSTEDAI_ADMIN_URL:-http://localhost:8999}
-HOSTEDAI_ADMIN_USERNAME=${HOSTEDAI_ADMIN_USERNAME:-}
-HOSTEDAI_ADMIN_PASSWORD=${HOSTEDAI_ADMIN_PASSWORD:-}
+GPUAAS_ADMIN_URL=${GPUAAS_ADMIN_URL:-http://localhost:8999}
+GPUAAS_ADMIN_USER=${GPUAAS_ADMIN_USER:-}
+GPUAAS_ADMIN_PASSWORD=${GPUAAS_ADMIN_PASSWORD:-}
 
 # Stripe (optional — configure in admin UI if not set here)
 STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
@@ -460,8 +456,8 @@ if ! $SKIP_APACHE; then
   # Install Apache2 if not present
   if ! command -v apache2 &>/dev/null; then
     log "Installing Apache2..."
-    apt-get update -qq
-    apt-get install -y -qq apache2
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq apache2
   fi
   success "Apache2 installed"
 
@@ -559,7 +555,7 @@ APACHE
 
     if ! command -v certbot &>/dev/null; then
       log "Installing certbot..."
-      apt-get install -y -qq certbot python3-certbot-apache
+      DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq certbot python3-certbot-apache
     fi
 
     CERTBOT_EMAIL_FLAG=""

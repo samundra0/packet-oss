@@ -2,17 +2,28 @@
 
 import { useState, useEffect } from "react";
 
-interface StorageBlock {
-  id: string;
-  name: string;
-  size_gb?: number;
-  price_per_hour?: number;
-}
-
-interface SharedVolumeInfo {
+interface AttachedVolume {
+  id: number;
   name: string;
   mount_point: string;
   size_in_gb: number;
+  status: string;
+  mount_status?: string;
+}
+
+interface AvailableVolume {
+  id: number;
+  name: string;
+  size_in_gb: number;
+  mount_point: string;
+  cost: string | number;
+}
+
+interface StorageBlockOption {
+  id: string;
+  name: string;
+  size: number;
+  cost: string;
 }
 
 interface AddStorageModalProps {
@@ -25,7 +36,7 @@ interface AddStorageModalProps {
     ephemeral_storage_gb?: number;
     persistent_storage_gb?: number;
     persistent_storage_block_id?: string;
-    shared_volumes?: SharedVolumeInfo[];
+    shared_volumes?: Array<{ name: string; mount_point: string; size_in_gb: number }>;
   };
 }
 
@@ -35,14 +46,21 @@ export function AddStorageModal({
   subscriptionId,
   token,
   onSuccess,
-  existingStorage,
 }: AddStorageModalProps) {
   const [loading, setLoading] = useState(true);
-  const [adding, setAdding] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const [attachSuccess, setAttachSuccess] = useState(false);
   const [error, setError] = useState("");
-  const [storageBlocks, setStorageBlocks] = useState<StorageBlock[]>([]);
-  const [selectedStorage, setSelectedStorage] = useState("");
-  const [hasPersistentStorage, setHasPersistentStorage] = useState(false);
+
+  // Data from API
+  const [attachedVolumes, setAttachedVolumes] = useState<AttachedVolume[]>([]);
+  const [availableVolumes, setAvailableVolumes] = useState<AvailableVolume[]>([]);
+  const [storageBlocks, setStorageBlocks] = useState<StorageBlockOption[]>([]);
+
+  // Form state
+  const [mode, setMode] = useState<"existing" | "create">("existing");
+  const [selectedVolumeId, setSelectedVolumeId] = useState<number | null>(null);
+  const [selectedBlockId, setSelectedBlockId] = useState<string>("");
 
   useEffect(() => {
     if (!isOpen) return;
@@ -53,30 +71,30 @@ export function AddStorageModal({
       try {
         const response = await fetch(
           `/api/instances/pool-subscription/${subscriptionId}/add-storage`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
+          { headers: { Authorization: `Bearer ${token}` } }
         );
 
         if (response.ok) {
           const data = await response.json();
-          setStorageBlocks(data.persistentStorageBlocks || []);
-          setHasPersistentStorage(data.hasPersistentStorage);
-          if (data.persistentStorageBlocks?.length > 0) {
-            setSelectedStorage(data.persistentStorageBlocks[0].id);
+          setAttachedVolumes(data.attachedVolumes || []);
+          setAvailableVolumes(data.availableVolumes || []);
+          setStorageBlocks(data.storageBlocks || []);
+
+          // Default to existing if there are available volumes
+          if (data.availableVolumes?.length > 0) {
+            setMode("existing");
+            setSelectedVolumeId(data.availableVolumes[0].id);
+          } else if (data.storageBlocks?.length > 0) {
+            setMode("create");
+            setSelectedBlockId(data.storageBlocks[0].id);
           }
         } else {
-          // Try to parse JSON error, but handle HTML error pages gracefully
           const text = await response.text();
           try {
             const errData = JSON.parse(text);
             setError(errData.error || "Failed to load storage options");
           } catch {
-            if (response.status === 502 || response.status === 504) {
-              setError("Server is temporarily unavailable. Please try again.");
-            } else {
-              setError(`Failed to load storage options (HTTP ${response.status})`);
-            }
+            setError(`Failed to load storage options (HTTP ${response.status})`);
           }
         }
       } catch {
@@ -89,60 +107,72 @@ export function AddStorageModal({
     fetchStorageOptions();
   }, [isOpen, subscriptionId, token]);
 
-  const handleAddStorage = async () => {
-    if (!selectedStorage) {
-      setError("Please select a storage option");
-      return;
+  // Reset on close
+  useEffect(() => {
+    if (!isOpen) {
+      setSelectedVolumeId(null);
+      setSelectedBlockId("");
+      setError("");
+      setAttaching(false);
+      setAttachSuccess(false);
     }
+  }, [isOpen]);
 
-    setAdding(true);
+  const handleAttach = async () => {
+    setAttaching(true);
     setError("");
 
     try {
+      const body: Record<string, unknown> = {};
+      if (mode === "existing" && selectedVolumeId) {
+        body.volume_id = selectedVolumeId;
+      } else if (mode === "create" && selectedBlockId) {
+        body.storage_block_id = selectedBlockId;
+      } else {
+        setError("Please select a storage option");
+        setAttaching(false);
+        return;
+      }
+
       const response = await fetch(
         `/api/instances/pool-subscription/${subscriptionId}/add-storage`,
         {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            persistent_storage_block_id: selectedStorage,
-          }),
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
         }
       );
 
       if (response.ok) {
+        setAttachSuccess(true);
+        setAttaching(false);
+        // Trigger dashboard refresh so the card shows "Attaching..." state
         onSuccess();
-        onClose();
+        // Auto-close after a brief pause
+        setTimeout(() => onClose(), 2000);
+        return;
       } else {
-        // Try to parse JSON error, but handle HTML error pages gracefully
         const text = await response.text();
         try {
           const data = JSON.parse(text);
-          setError(data.error || "Failed to add storage");
+          setError(data.error || "Failed to attach storage");
         } catch {
-          // Response wasn't JSON (likely HTML error page)
-          if (response.status === 502 || response.status === 504) {
-            setError("Server is temporarily unavailable. Please try again.");
-          } else if (response.status === 401) {
-            setError("Session expired. Please refresh the page.");
-          } else {
-            setError(`Failed to add storage (HTTP ${response.status})`);
-          }
+          setError(`Failed to attach storage (HTTP ${response.status})`);
         }
       }
     } catch {
-      setError("Failed to add storage. Please check your connection.");
+      setError("Failed to attach storage. Please check your connection.");
     } finally {
-      setAdding(false);
+      setAttaching(false);
     }
   };
 
   if (!isOpen) return null;
 
-  const selectedBlock = storageBlocks.find((b) => b.id === selectedStorage);
+  const canAttach =
+    (mode === "existing" && selectedVolumeId !== null) ||
+    (mode === "create" && selectedBlockId !== "");
+  const noOptions = availableVolumes.length === 0 && storageBlocks.length === 0;
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
@@ -151,200 +181,205 @@ export function AddStorageModal({
         <div className="border-b border-[var(--line)] px-6 py-4">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-lg font-semibold text-[var(--ink)]">
-                Add Persistent Storage
-              </h2>
+              <h2 className="text-lg font-semibold text-[var(--ink)]">Storage</h2>
               <p className="text-xs text-[var(--muted)]">
-                Data persists across restarts
+                Manage persistent storage volumes
               </p>
             </div>
             <button
               onClick={onClose}
               className="p-1.5 text-zinc-400 hover:text-zinc-600 transition-colors"
             >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
           </div>
         </div>
 
         {/* Content */}
-        <div className="p-6">
-          {loading ? (
+        <div className="p-6 overflow-y-auto max-h-[calc(90vh-180px)]">
+          {attachSuccess ? (
+            <div className="flex flex-col items-center justify-center py-8 gap-3">
+              <div className="w-12 h-12 bg-teal-100 rounded-full flex items-center justify-center">
+                <svg className="w-6 h-6 text-teal-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <p className="text-sm font-medium text-[var(--ink)]">Volume is being attached</p>
+              <p className="text-xs text-[var(--muted)]">The GPU will restart briefly. Check the card for status.</p>
+            </div>
+          ) : loading ? (
             <div className="flex items-center justify-center py-12">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-zinc-900"></div>
             </div>
-          ) : hasPersistentStorage ? (
-            <div className="py-4">
-              <div className="space-y-3">
-                {/* Show ephemeral storage */}
-                {existingStorage?.ephemeral_storage_gb && (
-                  <div className="flex items-center gap-3 p-3 bg-zinc-50 rounded-xl border border-[var(--line)]">
-                    <div className="w-10 h-10 bg-zinc-100 rounded-lg flex items-center justify-center shrink-0">
-                      <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-                      </svg>
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-[var(--ink)]">Ephemeral Storage</div>
-                      <div className="text-xs text-[var(--muted)]">{existingStorage.ephemeral_storage_gb}GB &middot; Cleared on restart</div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Show persistent block storage */}
-                {existingStorage?.persistent_storage_gb && (
-                  <div className="flex items-center gap-3 p-3 bg-teal-50 rounded-xl border border-teal-200">
-                    <div className="w-10 h-10 bg-teal-100 rounded-lg flex items-center justify-center shrink-0">
-                      <svg className="w-5 h-5 text-teal-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-                      </svg>
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-teal-800">Persistent Storage</div>
-                      <div className="text-xs text-teal-600">{existingStorage.persistent_storage_gb}GB &middot; Survives restarts</div>
-                    </div>
-                    <span className="ml-auto px-2 py-0.5 bg-teal-100 text-teal-700 text-xs rounded-full">attached</span>
-                  </div>
-                )}
-
-                {/* Show shared volumes */}
-                {existingStorage?.shared_volumes?.map((vol, idx) => (
-                  <div key={idx} className="flex items-center gap-3 p-3 bg-teal-50 rounded-xl border border-teal-200">
-                    <div className="w-10 h-10 bg-teal-100 rounded-lg flex items-center justify-center shrink-0">
-                      <svg className="w-5 h-5 text-teal-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-                      </svg>
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-teal-800 truncate">{vol.name}</div>
-                      <div className="text-xs text-teal-600">
-                        {vol.size_in_gb}GB &middot; Mount: <code className="bg-teal-100 px-1 rounded">{vol.mount_point}</code>
-                      </div>
-                    </div>
-                    <span className="ml-auto px-2 py-0.5 bg-teal-100 text-teal-700 text-xs rounded-full shrink-0">attached</span>
-                  </div>
-                ))}
-
-                {/* No storage details available */}
-                {!existingStorage?.ephemeral_storage_gb && !existingStorage?.persistent_storage_gb && !existingStorage?.shared_volumes?.length && (
-                  <div className="text-center py-4">
-                    <p className="text-sm text-[var(--muted)]">
-                      This GPU has persistent storage attached.
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-4 p-3 bg-zinc-50 border border-zinc-100 rounded-xl">
-                <p className="text-xs text-[var(--muted)]">
-                  Manage your storage volumes in the <strong>Storage</strong> tab of the dashboard.
-                </p>
-              </div>
-            </div>
-          ) : storageBlocks.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm text-[var(--muted)]">
-                No persistent storage options available for this region.
-              </p>
-            </div>
           ) : (
             <>
-              <div className="mb-6">
-                <label className="block text-xs font-medium text-[var(--muted)] mb-3 uppercase tracking-wide">
-                  Select Storage Size
-                </label>
-                <div className="space-y-2">
-                  {storageBlocks.map((block) => (
-                    <button
-                      key={block.id}
-                      onClick={() => setSelectedStorage(block.id)}
-                      className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
-                        selectedStorage === block.id
-                          ? "border-teal-500 bg-teal-50"
-                          : "border-[var(--line)] hover:border-zinc-300"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="font-medium text-[var(--ink)]">
-                            {block.name}
-                          </div>
-                          <div className="text-sm text-[var(--muted)]">
-                            {block.size_gb && `${block.size_gb}GB`}
-                            {block.price_per_hour !== undefined &&
-                              ` · $${block.price_per_hour.toFixed(3)}/hr`}
+              {/* Attached Volumes */}
+              {attachedVolumes.length > 0 && (
+                <div className="mb-5">
+                  <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
+                    Attached
+                  </label>
+                  <div className="space-y-2">
+                    {attachedVolumes.map((vol) => (
+                      <div
+                        key={vol.id}
+                        className="flex items-center gap-3 p-3 bg-teal-50 rounded-xl border border-teal-200"
+                      >
+                        <div className="w-10 h-10 bg-teal-100 rounded-lg flex items-center justify-center shrink-0">
+                          <svg className="w-5 h-5 text-teal-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                          </svg>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-teal-800 truncate">{vol.name}</div>
+                          <div className="text-xs text-teal-600">
+                            {vol.size_in_gb}GB · <code className="bg-teal-100 px-1 rounded">{vol.mount_point}</code>
                           </div>
                         </div>
-                        {selectedStorage === block.id && (
-                          <div className="w-6 h-6 bg-teal-500 rounded-full flex items-center justify-center">
-                            <svg
-                              className="w-4 h-4 text-white"
-                              fill="none"
-                              viewBox="0 0 24 24"
-                              stroke="currentColor"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M5 13l4 4L19 7"
-                              />
-                            </svg>
-                          </div>
-                        )}
+                        <span className="px-2 py-0.5 bg-teal-100 text-teal-700 text-xs rounded-full shrink-0">
+                          {vol.mount_status === "SUCCEEDED" ? "attached" : vol.status?.toLowerCase()}
+                        </span>
                       </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Warning */}
-              <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl mb-6">
-                <div className="flex gap-2">
-                  <svg
-                    className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                    />
-                  </svg>
-                  <div className="text-sm text-amber-700">
-                    <strong>GPU will restart.</strong> Adding storage requires a
-                    quick restart. Unsaved data in ephemeral storage will be
-                    lost.
+                    ))}
                   </div>
                 </div>
-              </div>
+              )}
 
-              {/* Pricing summary */}
-              {selectedBlock && (
-                <div className="p-4 bg-teal-50 border border-teal-200 rounded-xl">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-teal-700">
-                      Additional Cost
-                    </span>
-                    <span className="text-lg font-bold text-teal-700">
-                      +${(selectedBlock.price_per_hour || 0).toFixed(3)}/hr
-                    </span>
+              {/* Attach New Volume */}
+              {!noOptions && (
+                <>
+                  <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
+                    Attach Volume
+                  </label>
+
+                  {/* Mode toggle */}
+                  <div className="flex gap-2 mb-3">
+                    {availableVolumes.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMode("existing");
+                          if (availableVolumes.length > 0 && selectedVolumeId === null) {
+                            setSelectedVolumeId(availableVolumes[0].id);
+                          }
+                        }}
+                        className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                          mode === "existing"
+                            ? "border-teal-500 bg-teal-50 text-teal-700 font-medium"
+                            : "border-[var(--line)] text-[var(--muted)] hover:border-zinc-300"
+                        }`}
+                      >
+                        Existing volume
+                      </button>
+                    )}
+                    {storageBlocks.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMode("create");
+                          if (storageBlocks.length > 0 && !selectedBlockId) {
+                            setSelectedBlockId(storageBlocks[0].id);
+                          }
+                        }}
+                        className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                          mode === "create"
+                            ? "border-teal-500 bg-teal-50 text-teal-700 font-medium"
+                            : "border-[var(--line)] text-[var(--muted)] hover:border-zinc-300"
+                        }`}
+                      >
+                        Create new
+                      </button>
+                    )}
                   </div>
+
+                  {/* Existing volume picker */}
+                  {mode === "existing" && availableVolumes.length > 0 && (
+                    <div className="space-y-2">
+                      {availableVolumes.map((vol) => (
+                        <button
+                          key={vol.id}
+                          type="button"
+                          onClick={() => setSelectedVolumeId(vol.id)}
+                          className={`w-full p-3 rounded-xl border-2 text-left transition-all ${
+                            selectedVolumeId === vol.id
+                              ? "border-teal-500 bg-teal-50"
+                              : "border-[var(--line)] hover:border-zinc-300"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="text-sm font-medium text-[var(--ink)]">{vol.name}</div>
+                              <div className="text-xs text-[var(--muted)]">
+                                {vol.size_in_gb}GB · {vol.mount_point}
+                              </div>
+                            </div>
+                            {selectedVolumeId === vol.id && (
+                              <div className="w-5 h-5 bg-teal-500 rounded-full flex items-center justify-center">
+                                <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                </svg>
+                              </div>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Block size picker for create mode */}
+                  {mode === "create" && storageBlocks.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {storageBlocks.map((block) => (
+                        <button
+                          key={block.id}
+                          type="button"
+                          onClick={() => setSelectedBlockId(block.id)}
+                          className={`px-4 py-2.5 text-sm rounded-lg border transition-colors ${
+                            selectedBlockId === block.id
+                              ? "border-teal-500 bg-teal-50 text-teal-700 font-medium"
+                              : "border-[var(--line)] text-[var(--muted)] hover:border-zinc-300"
+                          }`}
+                        >
+                          {block.size}GB
+                          {block.cost !== "0" && block.cost !== "0.00" && (
+                            <span className="text-xs ml-1">(${block.cost}/hr)</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Restart warning */}
+                  <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                    <div className="flex gap-2">
+                      <svg className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                      </svg>
+                      <div className="text-sm text-amber-700">
+                        <strong>GPU will restart briefly.</strong> Unsaved work in ephemeral storage may be lost.
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* No options */}
+              {noOptions && attachedVolumes.length === 0 && (
+                <div className="text-center py-8">
+                  <p className="text-sm text-[var(--muted)]">
+                    No storage options available for this region.
+                  </p>
+                </div>
+              )}
+
+              {/* Info when only showing attached */}
+              {noOptions && attachedVolumes.length > 0 && (
+                <div className="p-3 bg-zinc-50 border border-zinc-100 rounded-xl">
+                  <p className="text-xs text-[var(--muted)]">
+                    Manage your storage volumes in the <strong>Storage</strong> tab.
+                  </p>
                 </div>
               )}
 
@@ -363,35 +398,28 @@ export function AddStorageModal({
             onClick={onClose}
             className="flex-1 py-3 px-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-medium rounded-xl transition-colors"
           >
-            Cancel
+            {noOptions || loading ? "Close" : "Cancel"}
           </button>
-          {!hasPersistentStorage && storageBlocks.length > 0 && (
+          {!noOptions && !loading && (
             <button
-              onClick={handleAddStorage}
-              disabled={adding || !selectedStorage}
+              onClick={handleAttach}
+              disabled={attaching || !canAttach}
               className="flex-1 py-3 px-4 bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white font-medium rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              {adding ? (
+              {attaching ? (
                 <>
-                  <span className="animate-spin">&#x21bb;</span>
-                  Adding...
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  Attaching...
                 </>
               ) : (
                 <>
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M12 4v16m8-8H4"
-                    />
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                   </svg>
-                  Add Storage
+                  Attach Storage
                 </>
               )}
             </button>

@@ -78,10 +78,11 @@ export function StorageTab({ token }: StorageTabProps) {
         throw new Error(data.error || "Failed to delete volume");
       }
 
-      // Remove from local state
-      setVolumes((prev) => prev.filter((v) => v.id !== volume.id));
+      // Re-fetch volumes from API to reflect actual HAI state
+      // (don't optimistically remove — HAI may silently refuse the delete)
       setConfirmDelete(null);
       setAffectedSnapshots([]);
+      await fetchVolumes();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete volume");
     } finally {

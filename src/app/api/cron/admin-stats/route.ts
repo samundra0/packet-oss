@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCronAuth } from "@/lib/cron-auth";
 import { getStripe } from "@/lib/stripe";
 import { prisma } from "@/lib/prisma";
-import { readPoolOverviewCache } from "@/lib/pool-overview";
+import { getGlobalInstanceSummary, type UnifiedInstance } from "@/lib/hostedai/instances";
+import { hostedaiRequest } from "@/lib/hostedai/client";
 
 /**
  * POST /api/cron/admin-stats
@@ -29,55 +30,130 @@ export async function POST(request: NextRequest) {
       (c) => c.stripeCreatedAt >= sevenDaysAgo
     );
 
-    // Recent charges still need Stripe (no local cache for charges)
+    // Revenue this week = Stripe gross volume (successful charges minus refunded amounts)
+    // Use calendar-day boundary to match Stripe dashboard's "last 7 days" view
     const stripe = await getStripe();
-    const sevenDaysAgoUnix = Math.floor(sevenDaysAgo.getTime() / 1000);
-    const charges = await stripe.charges.list({
-      limit: 100,
-      created: { gte: sevenDaysAgoUnix },
-    });
-    const recentRevenue = charges.data
-      .filter((c) => c.status === "succeeded")
-      .reduce((sum, c) => sum + c.amount, 0);
+    const sevenDaysAgoMidnight = new Date(sevenDaysAgo);
+    sevenDaysAgoMidnight.setUTCHours(0, 0, 0, 0);
+    const sevenDaysAgoUnix = Math.floor(sevenDaysAgoMidnight.getTime() / 1000);
 
-    // Count active pods using pool overview cache (0 hosted.ai API calls)
+    // Paginate through all charges (not just first 100)
+    let recentRevenue = 0;
+    let hasMore = true;
+    let startingAfter: string | undefined;
+    while (hasMore) {
+      const charges = await stripe.charges.list({
+        limit: 100,
+        created: { gte: sevenDaysAgoUnix },
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      });
+      for (const c of charges.data) {
+        if (c.status === "succeeded") {
+          // Subtract refunded portion to match Stripe's gross volume calculation
+          recentRevenue += c.amount - (c.amount_refunded || 0);
+        }
+      }
+      hasMore = charges.has_more;
+      if (charges.data.length > 0) {
+        startingAfter = charges.data[charges.data.length - 1].id;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    // Count active pods from HAI 2.2 /instances/unified (authoritative source)
     let activePods = 0;
+
+    // Map teamId → customerId (for pod attribution)
     const teamToCustomerId = new Map<string, string>();
     for (const customer of allCustomers) {
       if (customer.teamId) teamToCustomerId.set(customer.teamId, customer.id);
     }
 
-    const podCountByCustomer = new Map<string, number>();
-    const poolCache = readPoolOverviewCache();
-    if (poolCache?.pools) {
-      for (const pool of poolCache.pools) {
-        for (const pod of pool.pods || []) {
-          if (pod.teamId && ["subscribed", "active", "running"].includes(pod.status)) {
-            activePods++;
-            const customerId = teamToCustomerId.get(pod.teamId);
-            if (customerId) {
-              podCountByCustomer.set(customerId, (podCountByCustomer.get(customerId) || 0) + 1);
-            }
-          }
-        }
+    // Group customers by email to find primary customer per email
+    // (a customer may have separate hourly + monthly Stripe accounts)
+    const emailToPrimary = new Map<string, string>();
+    const customerIdToPrimary = new Map<string, string>();
+    for (const customer of allCustomers) {
+      if (!customer.email) continue;
+      const emailKey = customer.email.toLowerCase();
+      const existing = emailToPrimary.get(emailKey);
+      if (!existing ||
+          (customer.billingType === "hourly" && customer.teamId)) {
+        emailToPrimary.set(emailKey, customer.id);
       }
-    } else {
-      console.warn("[Admin Stats] Pool overview cache not available, pod counts will be 0");
+    }
+    for (const customer of allCustomers) {
+      if (!customer.email) continue;
+      const primary = emailToPrimary.get(customer.email.toLowerCase());
+      if (primary) customerIdToPrimary.set(customer.id, primary);
     }
 
-    // Update activePods count in CustomerCache for all customers
-    // First reset all to 0, then set actual counts
-    await prisma.customerCache.updateMany({
-      where: { isDeleted: false },
-      data: { activePods: 0 },
-    });
-    for (const [customerId, pods] of podCountByCustomer) {
-      await prisma.customerCache.update({
-        where: { id: customerId },
-        data: { activePods: pods },
-      }).catch(() => {}); // skip if customer not in cache
+    // Count running + transitional states as "active"
+    // Ref: Confluence HP/600178689 — Status for VM/Pod Instances
+    const ACTIVE_STATUSES = ["running", "pending", "starting", "restarting"];
+
+    const podCountByCustomer = new Map<string, number>();
+    try {
+      // Get summary first for the total active count
+      const summary = await getGlobalInstanceSummary();
+      activePods = summary.statusCounts
+        .filter((s) => ACTIVE_STATUSES.includes(s.status.toLowerCase()))
+        .reduce((sum, s) => sum + s.count, 0);
+
+      // Paginate through all instances for per-customer attribution
+      let page = 0;
+      const perPage = 100;
+      let fetched = 0;
+      while (fetched < summary.totalItems) {
+        const response = await hostedaiRequest<{
+          items: UnifiedInstance[];
+          total_items: number;
+        }>("GET", `/instances/unified?page=${page}&per_page=${perPage}`, undefined, 60000);
+
+        for (const instance of response.items || []) {
+          if (!ACTIVE_STATUSES.includes(instance.status.toLowerCase())) continue;
+          const teamId = instance.team?.id;
+          if (!teamId) continue;
+          const customerId = teamToCustomerId.get(teamId);
+          if (customerId) {
+            const primaryId = customerIdToPrimary.get(customerId) || customerId;
+            podCountByCustomer.set(primaryId, (podCountByCustomer.get(primaryId) || 0) + 1);
+          }
+        }
+
+        fetched += (response.items || []).length;
+        if ((response.items || []).length < perPage) break;
+        page++;
+      }
+    } catch (err) {
+      console.warn("[Admin Stats] Failed to fetch instances from HAI 2.2, pod counts will be 0:", err);
     }
-    console.log(`[Admin Stats] Updated pod counts for ${podCountByCustomer.size} customers`);
+
+    // Update activePods count in CustomerCache
+    // Only skip if HAI API returned 0 and we previously had pods (likely API failure)
+    const lastSnapshot = await prisma.adminStatsSnapshot.findFirst({
+      orderBy: { date: "desc" },
+    });
+    const lastActivePods = lastSnapshot?.activeGPUs ?? 0;
+    const shouldUpdatePodCounts = activePods > 0 || lastActivePods === 0;
+
+    if (shouldUpdatePodCounts) {
+      await prisma.customerCache.updateMany({
+        where: { isDeleted: false },
+        data: { activePods: 0 },
+      });
+      for (const [customerId, pods] of podCountByCustomer) {
+        await prisma.customerCache.update({
+          where: { id: customerId },
+          data: { activePods: pods },
+        }).catch(() => {});
+      }
+      console.log(`[Admin Stats] Updated pod counts for ${podCountByCustomer.size} customers (${activePods} running)`);
+    } else {
+      console.warn(`[Admin Stats] Skipping pod count update — HAI returned 0 pods vs snapshot ${lastActivePods} (likely API failure)`);
+      activePods = lastActivePods;
+    }
 
     // MRR = Stripe recurring subscriptions only (monthly contracts)
     const subscriptions = await stripe.subscriptions.list({ status: "active", limit: 100 });

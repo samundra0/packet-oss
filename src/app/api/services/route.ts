@@ -147,9 +147,16 @@ export async function POST(request: NextRequest) {
       service_type: normalizedServiceType,
     });
 
+    // Titan unified instances: pool_subscription_id is the instance ID (i-xxx).
+    // HAI expects pod_name to be the instance ID, not the user-given display name.
+    // For legacy pool subscriptions, pool_subscription_id is numeric.
+    const isUnifiedInstance = typeof pool_subscription_id === "string" && pool_subscription_id.startsWith("i-");
+    const resolvedPodName = isUnifiedInstance ? pool_subscription_id : pod_name;
+    const numericSubId = pool_subscription_id ? Number(pool_subscription_id) : NaN;
+
     const service = await exposeService({
-      pod_name,
-      pool_subscription_id: pool_subscription_id ? Number(pool_subscription_id) : undefined,
+      pod_name: resolvedPodName,
+      ...(Number.isFinite(numericSubId) ? { pool_subscription_id: numericSubId } : {}),
       port: Number(port),
       service_name,
       protocol: normalizedProtocol,

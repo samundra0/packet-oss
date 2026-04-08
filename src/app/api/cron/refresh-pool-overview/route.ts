@@ -7,7 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCronAuth } from "@/lib/cron-auth";
-import { computePoolOverview, writePoolOverviewCache } from "@/lib/pool-overview";
+import { computePoolOverview, writePoolOverviewCache, readPoolOverviewCache } from "@/lib/pool-overview";
 
 export async function GET(request: NextRequest) {
   const authError = verifyCronAuth(request);
@@ -16,8 +16,36 @@ export async function GET(request: NextRequest) {
   const startTime = Date.now();
 
   try {
+    // Read existing cache first — passed to computePoolOverview so it can
+    // preserve per-pool pod data when individual API calls fail
+    const existingCache = readPoolOverviewCache();
+
     console.log("[Pool Overview Cron] Computing pool overview...");
-    const data = await computePoolOverview();
+    const data = await computePoolOverview(existingCache);
+
+    // Don't overwrite good cache when GPUaaS API is partially or fully down.
+    // If pod count drops by more than 50%, it's likely API failures, not real terminations.
+    if (existingCache && existingCache.summary.activePods > 0) {
+      const dropPercent = Math.round(
+        ((existingCache.summary.activePods - data.summary.activePods) / existingCache.summary.activePods) * 100
+      );
+      if (dropPercent > 50) {
+        const elapsed = Date.now() - startTime;
+        console.warn(
+          `[Pool Overview Cron] Pod count dropped ${dropPercent}% (${existingCache.summary.activePods} → ${data.summary.activePods}) — likely API failures, keeping existing cache`
+        );
+        return NextResponse.json({
+          ok: true,
+          pools: data.pools.length,
+          activePods: data.summary.activePods,
+          keptExistingCache: true,
+          existingActivePods: existingCache.summary.activePods,
+          dropPercent,
+          elapsedMs: elapsed,
+        });
+      }
+    }
+
     writePoolOverviewCache(data);
 
     const elapsed = Date.now() - startTime;

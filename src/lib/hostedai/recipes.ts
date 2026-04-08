@@ -15,7 +15,7 @@
  */
 
 import { execSync } from "child_process";
-import { existsSync, statSync, readFileSync, mkdirSync } from "fs";
+import { existsSync, statSync, readFileSync } from "fs";
 import path from "path";
 import { getAdminCredentials } from "@/lib/gpuaas-admin/client";
 import { hostedaiRequest } from "./client";
@@ -87,20 +87,18 @@ export async function findRecipeByName(name: string): Promise<number | null> {
  * Compress a recipe directory into a tar.gz archive.
  * Returns the path to the archive file.
  */
-export function compressRecipe(slug: string): { archivePath: string; fileSize: number } {
+export function compressRecipe(slug: string): { archivePath: string; fileSize: number; tmpDir: string } {
   const repoRoot = process.cwd();
   const recipePath = path.join(repoRoot, "recipes", "packet_recipes", slug);
-  const outputDir = path.join(repoRoot, "recipes", "builds");
 
   if (!existsSync(recipePath)) {
     throw new Error(`Recipe directory not found: recipes/packet_recipes/${slug}`);
   }
 
-  mkdirSync(outputDir, { recursive: true });
-  const archivePath = path.join(outputDir, `${slug}.tar.gz`);
-
-  // Create temp dir, copy recipe, ensure infra JSON matches slug name
+  // Use /tmp for builds — process.cwd() may be read-only in production (.deb installs to /usr/share)
   const tmpDir = execSync("mktemp -d").toString().trim();
+  const archivePath = path.join(tmpDir, `${slug}.tar.gz`);
+
   try {
     execSync(`cp -R "${recipePath}" "${tmpDir}/${slug}"`);
 
@@ -121,13 +119,14 @@ export function compressRecipe(slug: string): { archivePath: string; fileSize: n
 
     // Create archive
     execSync(`tar -czf "${archivePath}" -C "${tmpDir}" "${slug}"`);
-  } finally {
+  } catch (e) {
     execSync(`rm -rf "${tmpDir}"`);
+    throw e;
   }
 
   const fileSize = statSync(archivePath).size;
   console.log(`[Recipes] Compressed ${slug}: ${archivePath} (${fileSize} bytes)`);
-  return { archivePath, fileSize };
+  return { archivePath, fileSize, tmpDir };
 }
 
 // --- TUS Upload to HAI Admin Panel ---
@@ -146,9 +145,10 @@ export function compressRecipe(slug: string): { archivePath: string; fileSize: n
 export async function uploadRecipe(slug: string): Promise<number> {
   const { token, url: adminUrl } = await loginToAdmin();
 
-  // Compress recipe
-  const { archivePath, fileSize } = compressRecipe(slug);
+  // Compress recipe (archive is written to a temp dir)
+  const { archivePath, fileSize, tmpDir } = compressRecipe(slug);
 
+  try {
   // Check for existing template and delete if found
   const templatesResp = await fetch(`${adminUrl}/api/recipes/templates`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -261,6 +261,9 @@ export async function uploadRecipe(slug: string): Promise<number> {
   // If it never synced, return the admin ID anyway — service creation may still work
   console.warn(`[Recipes] Recipe ${slug} not yet visible on user panel after ${MAX_POLL_ATTEMPTS} attempts (~${(MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 1000)}s). Proceeding with admin ID.`);
   return recipeId;
+  } finally {
+    execSync(`rm -rf "${tmpDir}"`);
+  }
 }
 
 // --- Service Creation for Apps ---

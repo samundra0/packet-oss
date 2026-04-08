@@ -62,8 +62,10 @@ import { getBrandName, getAppUrl, getLogoUrl } from "@/lib/branding";
 import { useBranding } from "@/hooks/useBranding";
 import { RateLimitSettings } from "./RateLimitSettings";
 import { SessionSettings } from "./SessionSettings";
+import SSHKeys from "@/components/SSHKeys";
 import { useDashboardData, useDashboardActions, useModals, TabType } from "./hooks";
 import { OnboardingChecklist } from "./OnboardingChecklist";
+import { DashboardAnnouncements } from "./DashboardAnnouncements";
 
 export function DashboardContent() {
   // Use extracted hooks
@@ -214,7 +216,7 @@ export function DashboardContent() {
   // Calculate values needed for live cost ticker (must be before any early returns)
   // Treat users as hourly if they have wallet credit (e.g. voucher users with billing_type "free")
   const isHourlyEarly = data?.customer?.billingType === "hourly" || (data?.wallet?.balance || 0) > 0;
-  const activeSubscriptionsEarly = poolSubscriptions.filter((s) => s.status === "subscribed" || s.status === "active");
+  const activeSubscriptionsEarly = poolSubscriptions.filter((s) => s.status === "subscribed" || s.status === "active" || s.status === "running" || s.status === "pending" || s.status === "starting" || s.status === "restarting");
   const totalRunningEarly = instances.filter((i) => i.status === "running" || i.status === "active").length + activeSubscriptionsEarly.length;
   let totalHourlyRateEarly = 0;
   activeSubscriptionsEarly.forEach((sub) => {
@@ -465,7 +467,7 @@ export function DashboardContent() {
   // Treat users as hourly if they have wallet credit (e.g. voucher users with billing_type "free")
   const isHourly = data.customer.billingType === "hourly" || (data.wallet?.balance || 0) > 0;
   const isFree = data.customer.billingType === "free" || data.customer.billingType === "free_trial";
-  const activeSubscriptions = poolSubscriptions.filter((s) => s.status === "subscribed" || s.status === "active");
+  const activeSubscriptions = poolSubscriptions.filter((s) => s.status === "subscribed" || s.status === "active" || s.status === "running" || s.status === "pending" || s.status === "starting" || s.status === "restarting");
   const totalRunning = instances.filter((i) => i.status === "running" || i.status === "active").length + activeSubscriptions.length;
 
   // Calculate current GPU metrics from active subscriptions
@@ -804,6 +806,9 @@ export function DashboardContent() {
                   </button>
                 </div>
               </div>
+
+              {/* Dashboard announcements from admin */}
+              {token && <DashboardAnnouncements token={token} />}
 
               {/* Onboarding checklist for new users */}
               <OnboardingChecklist
@@ -1338,6 +1343,9 @@ export function DashboardContent() {
               {/* API Keys Section */}
               <ApiKeysSettings token={token!} />
 
+              {/* SSH Keys Section */}
+              <SSHKeys token={token!} />
+
               {/* Two-Factor Authentication Section */}
               <TwoFactorSettings
                 userType="customer"
@@ -1473,6 +1481,7 @@ export function DashboardContent() {
         userName={data.customer.name || data.customer.email.split("@")[0]}
         userEmail={data.customer.email}
         isOwner={data.isOwner}
+        bareMetalEnabled={isPro() && data.bareMetalEnabled}
         onTabChange={(tab) => {
           setActiveTab(tab as TabType);
           setShowMobileMenu(false);
@@ -1494,6 +1503,7 @@ export function DashboardContent() {
           setShowMoreSheet(false);
         }}
         hasUnreadSupport={hasUnreadSupport}
+        bareMetalEnabled={isPro() && data.bareMetalEnabled}
       />
 
       {/* Top-up success toast */}

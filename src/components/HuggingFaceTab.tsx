@@ -268,7 +268,7 @@ export default function HuggingFaceTab({
         const running = (data.poolSubscriptions || [])
           .filter(
             (sub: { status?: string }) =>
-              sub.status === "subscribed" || sub.status === "active"
+              sub.status === "subscribed" || sub.status === "active" || sub.status === "running"
           )
           .map(
             (sub: {

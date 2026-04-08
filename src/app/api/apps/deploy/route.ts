@@ -64,8 +64,11 @@ export async function POST(request: NextRequest) {
     // - product_id: drives provisioning-info (instance type, image, storage, pools)
     // - app_service_id: the app's thin service (carries the recipe + ports)
     // The instances route uses product's service for infra, app's service for create-instance.
-    const instancesUrl = new URL("/api/instances", request.url);
-    const instancesResp = await fetch(instancesUrl.toString(), {
+    // Use the internal origin (localhost) to avoid routing through the reverse proxy,
+    // which would cause SSL errors when the proxy terminates TLS.
+    const port = process.env.PORT || "3000";
+    const instancesUrl = `http://127.0.0.1:${port}/api/instances`;
+    const instancesResp = await fetch(instancesUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

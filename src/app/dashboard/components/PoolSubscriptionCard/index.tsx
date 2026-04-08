@@ -14,7 +14,6 @@ import {
 import { GPUCardSSHInfo } from "./GPUCardSSHInfo";
 import { GPUCardServices } from "./GPUCardServices";
 import { GPUCardHfDeployment } from "./GPUCardHfDeployment";
-import { SSHKeyModal } from "./SSHKeyModal";
 import { AddStorageModal } from "./AddStorageModal";
 import { SaveSnapshotModal } from "./SaveSnapshotModal";
 
@@ -54,7 +53,6 @@ export function PoolSubscriptionCard({
   // Modal state
   const [showTerminal, setShowTerminal] = useState(false);
   const [showRunScript, setShowRunScript] = useState(false);
-  const [showSSHKeyModal, setShowSSHKeyModal] = useState(false);
   const [showAddStorageModal, setShowAddStorageModal] = useState(false);
   const [showSaveSnapshotModal, setShowSaveSnapshotModal] = useState(false);
 
@@ -693,18 +691,36 @@ export function PoolSubscriptionCard({
                   {subscription.storage_details.persistent_storage_gb}GB Persistent
                 </span>
               )}
-              {subscription.storage_details?.shared_volumes?.map((vol, idx) => (
-                <span
-                  key={idx}
-                  className="inline-flex items-center gap-1 px-2 py-1 bg-teal-50 border border-teal-200 text-teal-700 text-xs rounded-lg"
-                  title={`Mount: ${vol.mount_point}`}
-                >
-                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-                  </svg>
-                  {vol.size_in_gb}GB Persistent
-                </span>
-              ))}
+              {subscription.storage_details?.shared_volumes?.map((vol, idx) => {
+                const isAttaching = vol.mount_status === "RUNNING" && vol.mount_operation === "ATTACH";
+                const isDetaching = vol.mount_status === "RUNNING" && vol.mount_operation === "DETACH";
+                const isFailed = vol.mount_status === "FAILED";
+                return (
+                  <span
+                    key={idx}
+                    className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-lg ${
+                      isFailed
+                        ? "bg-red-50 border border-red-200 text-red-700"
+                        : isAttaching || isDetaching
+                          ? "bg-amber-50 border border-amber-200 text-amber-700"
+                          : "bg-teal-50 border border-teal-200 text-teal-700"
+                    }`}
+                    title={`Mount: ${vol.mount_point}${vol.mount_status ? ` · ${vol.mount_status}` : ""}`}
+                  >
+                    {isAttaching ? (
+                      <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                      </svg>
+                    )}
+                    {vol.size_in_gb}GB {isAttaching ? "Attaching..." : isDetaching ? "Detaching..." : isFailed ? "Failed" : "Persistent"}
+                  </span>
+                );
+              })}
               <span className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-[var(--line)] text-zinc-600 text-xs rounded-lg">
                 {gpuCount} GPU · {subscription.per_pod_info?.vcpu_count || 4} vCPU · {Math.round((subscription.per_pod_info?.ram_mb || 8192) / 1024)}GB RAM
               </span>
@@ -801,9 +817,6 @@ export function PoolSubscriptionCard({
             {/* Show these links when running */}
             {isActive && !isStopped && (
               <>
-                <button onClick={() => setShowSSHKeyModal(true)} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
-                  SSH Key
-                </button>
                 <button onClick={() => setShowAddStorageModal(true)} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
                   Storage
                 </button>
@@ -842,16 +855,6 @@ export function PoolSubscriptionCard({
         onClose={() => setShowRunScript(false)}
         subscriptionId={String(subscription.id)}
         token={token}
-      />
-
-      {/* SSH Key Modal */}
-      <SSHKeyModal
-        isOpen={showSSHKeyModal}
-        onClose={() => setShowSSHKeyModal(false)}
-        token={token}
-        subscriptionId={String(subscription.id)}
-        podName={subscription.pods?.[0]?.pod_name}
-        poolName={displayName || subscription.pool_name}
       />
 
       {/* Add Storage Modal */}

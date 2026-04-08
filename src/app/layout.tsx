@@ -130,9 +130,9 @@ export default async function RootLayout({
               strategy="afterInteractive"
             />
             <Script id="google-ads-gtag" strategy="afterInteractive">
-              {`gtag('js',new Date());gtag('config','AW-17978041064');`}
+              {`gtag('js',new Date());gtag('config','AW-17978041064');gtag('config','G-KT2GT6JC01');`}
             </Script>
-            {/* End Google Ads */}
+            {/* End Google Ads + GA4 */}
 
             {/* Growify Pixel v2 — sendBeacon→fetch shim ensures reliable delivery */}
             <script

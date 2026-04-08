@@ -114,7 +114,7 @@ async function waitForPodReady(
       const subscriptions = await getPoolSubscriptions(teamId);
       const sub = subscriptions.find(s =>
         String(s.pool_id) === String(poolId) &&
-        (s.status === "subscribed" || s.status === "active")
+        (s.status === "subscribed" || s.status === "active" || s.status === "running")
       );
 
       if (!sub) continue;
@@ -509,7 +509,7 @@ du -sh "$SNAPSHOT_DIR"
         const currentSubs = await getPoolSubscriptions(teamId);
         const currentSub = currentSubs.find(s =>
           String(s.pool_id) === poolId &&
-          (s.status === "subscribed" || s.status === "active")
+          (s.status === "subscribed" || s.status === "active" || s.status === "running")
         );
         if (currentSub) {
           await unsubscribeFromPool(String(currentSub.id), teamId, poolId);

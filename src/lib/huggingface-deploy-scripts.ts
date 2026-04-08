@@ -213,20 +213,59 @@ if [ -f "venv/bin/python" ] && "$WORKSPACE/venv/bin/python" -c "import vllm" 2>/
   ${hfTokenExport}
   export HF_HOME="$WORKSPACE/cache"
 
-  nohup "$WORKSPACE/venv/bin/python" -m vllm.entrypoints.openai.api_server \\
-    --model "${safeModelId}" \\
-    --host 0.0.0.0 \\
-    --port ${port} \\
-    --tensor-parallel-size ${gpuCount} \\
-    --max-model-len \$MAX_MODEL_LEN \\
-    --gpu-memory-utilization \$GPU_UTIL \\
-    --enforce-eager \\
-    --disable-frontend-multiprocessing \\
-    --trust-remote-code \\
-    --dtype float16 \\
-    > "$WORKSPACE/vllm.log" 2>&1 &
+  # Try V1 engine first (faster), fall back to V0 if engine init fails
+  start_vllm() {
+    local use_v1=\$1
+    if [ "\$use_v1" = "0" ]; then
+      export VLLM_USE_V1=0
+      echo "Starting vLLM with V0 engine (fallback)..."
+    else
+      unset VLLM_USE_V1
+      echo "Starting vLLM with V1 engine..."
+    fi
 
-  sleep 3
+    "$WORKSPACE/venv/bin/python" -m vllm.entrypoints.openai.api_server \\
+      --model "${safeModelId}" \\
+      --host 0.0.0.0 \\
+      --port ${port} \\
+      --tensor-parallel-size ${gpuCount} \\
+      --max-model-len \$MAX_MODEL_LEN \\
+      --gpu-memory-utilization \$GPU_UTIL \\
+      --enforce-eager \\
+      --disable-frontend-multiprocessing \\
+      --trust-remote-code \\
+      --dtype float16 \\
+      > "$WORKSPACE/vllm.log" 2>&1 &
+    VLLM_PID=\$!
+
+    # Wait up to 120s for startup or failure
+    for i in \$(seq 1 24); do
+      sleep 5
+      if ! kill -0 \$VLLM_PID 2>/dev/null; then
+        # Process died — check if engine init failed
+        if grep -qiE "Engine core initialization failed|Failed core proc|EngineCore failed to start|Failed to initialize engine" "$WORKSPACE/vllm.log" 2>/dev/null; then
+          return 1  # Signal engine init failure
+        fi
+        return 2  # Some other failure
+      fi
+      # Check if server is ready
+      if grep -q "Uvicorn running on" "$WORKSPACE/vllm.log" 2>/dev/null; then
+        return 0  # Success
+      fi
+    done
+    return 0  # Still running after 120s, assume OK (model download may be slow)
+  }
+
+  start_vllm 1
+  RESULT=\$?
+  if [ \$RESULT -eq 1 ]; then
+    echo "V1 engine init failed, retrying with V0 engine..."
+    pkill -f "vllm.entrypoints" 2>/dev/null || true
+    sleep 2
+    echo "" > "$WORKSPACE/vllm.log"
+    start_vllm 0
+  fi
+
   echo ""
   echo "=== Server Starting ==="
   tail -10 "$WORKSPACE/vllm.log" 2>/dev/null || echo "Waiting for log..."
@@ -398,18 +437,56 @@ export HF_HOME="$HOME/hf-workspace/cache"
 log "Starting vLLM server for ${safeModelId}..."
 log "Using max-model-len=$MAX_MODEL_LEN, gpu-memory-utilization=$GPU_UTIL"
 
-python -m vllm.entrypoints.openai.api_server \\
-  --model "${safeModelId}" \\
-  --host 0.0.0.0 \\
-  --port ${port} \\
-  --tensor-parallel-size ${gpuCount} \\
-  --max-model-len $MAX_MODEL_LEN \\
-  --gpu-memory-utilization $GPU_UTIL \\
-  --enforce-eager \\
-  --disable-frontend-multiprocessing \\
-  --trust-remote-code \\
-  --dtype float16 \\
-  >> vllm.log 2>&1 &
+# Try V1 engine first (faster), fall back to V0 if engine init fails
+start_vllm_server() {
+  local use_v1=$1
+  if [ "$use_v1" = "0" ]; then
+    export VLLM_USE_V1=0
+    log "Starting with V0 engine (fallback)..."
+  else
+    unset VLLM_USE_V1
+    log "Starting with V1 engine..."
+  fi
+
+  python -m vllm.entrypoints.openai.api_server \\
+    --model "${safeModelId}" \\
+    --host 0.0.0.0 \\
+    --port ${port} \\
+    --tensor-parallel-size ${gpuCount} \\
+    --max-model-len $MAX_MODEL_LEN \\
+    --gpu-memory-utilization $GPU_UTIL \\
+    --enforce-eager \\
+    --disable-frontend-multiprocessing \\
+    --trust-remote-code \\
+    --dtype float16 \\
+    >> vllm.log 2>&1 &
+  VLLM_PID=$!
+
+  # Wait up to 120s for startup or failure
+  for i in $(seq 1 24); do
+    sleep 5
+    if ! kill -0 $VLLM_PID 2>/dev/null; then
+      if grep -qiE "Engine core initialization failed|Failed core proc|EngineCore failed to start|Failed to initialize engine" vllm.log 2>/dev/null; then
+        return 1
+      fi
+      return 2
+    fi
+    if grep -q "Uvicorn running on" vllm.log 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 0
+}
+
+start_vllm_server 1
+RESULT=$?
+if [ $RESULT -eq 1 ]; then
+  log "V1 engine init failed, retrying with V0..."
+  pkill -f "vllm.entrypoints" 2>/dev/null || true
+  sleep 2
+  echo "" > vllm.log
+  start_vllm_server 0
+fi
 
 log "SERVER_STARTED"
 

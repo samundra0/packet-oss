@@ -138,7 +138,7 @@ export interface AdminActivity {
   created: number;
 }
 
-export type AdminTab = "customers" | "admins" | "investors" | "clusters" | "quotes" | "referrals" | "vouchers" | "activity" | "settings" | "calculator" | "qa" | "providers" | "landing" | "game" | "products" | "pods" | "emails" | "email-log" | "drip" | "nodes" | "pools" | "business" | "demand" | "batches" | "token-providers" | "skypilot" | "support" | "spheron" | "node-revenue" | "banners" | "marketing" | "tenants" | "pixel-factory" | "uptime" | "payouts" | "platform-settings" | "gpu-apps";
+export type AdminTab = "customers" | "admins" | "investors" | "clusters" | "quotes" | "referrals" | "vouchers" | "activity" | "settings" | "calculator" | "qa" | "providers" | "landing" | "game" | "products" | "pods" | "emails" | "email-log" | "drip" | "nodes" | "pools" | "business" | "demand" | "batches" | "token-providers" | "skypilot" | "support" | "spheron" | "node-revenue" | "banners" | "marketing" | "tenants" | "pixel-factory" | "uptime" | "payouts" | "platform-settings" | "gpu-apps" | "announcements" | "broadcast";
 
 /**
  * Admin tabs that are only available in the Pro edition.
@@ -170,7 +170,6 @@ export const PREMIUM_ADMIN_TABS: ReadonlySet<AdminTab> = new Set([
  * render branches are skipped.
  */
 export const OSS_ONLY_ADMIN_TABS: ReadonlySet<AdminTab> = new Set([
-  "platform-settings",
 ]);
 
 // Infrastructure Request types (demand for GPU supply)
