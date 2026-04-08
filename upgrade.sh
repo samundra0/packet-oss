@@ -337,6 +337,23 @@ log "Building application..."
 sudo -u "$APP_USER" env ${ENV_VARS} pnpm build
 success "Application built"
 
+# ── Step 6b: Update cron jobs ──────────────────────────────────────────────
+
+log "Updating cron jobs..."
+if [ -f "${INSTALL_DIR}/cron.d/gpu-cloud-dashboard" ]; then
+  cp "${INSTALL_DIR}/cron.d/gpu-cloud-dashboard" /etc/cron.d/gpu-cloud-dashboard
+  chmod 644 /etc/cron.d/gpu-cloud-dashboard
+  success "Cron jobs updated"
+else
+  warn "Cron file not found in repo — skipping"
+fi
+
+if [ -f "${INSTALL_DIR}/bin/packetai-cron" ]; then
+  cp "${INSTALL_DIR}/bin/packetai-cron" /usr/bin/packetai-cron
+  chmod 755 /usr/bin/packetai-cron
+  success "Cron wrapper updated"
+fi
+
 # ── Step 7: Start service ───────────────────────────────────────────────────
 
 log "Starting service..."

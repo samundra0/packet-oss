@@ -84,6 +84,16 @@ if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
   success "Service file removed"
 fi
 
+# Remove cron jobs and wrapper
+if [[ -f /etc/cron.d/gpu-cloud-dashboard ]]; then
+  rm -f /etc/cron.d/gpu-cloud-dashboard
+  success "Cron jobs removed"
+fi
+if [[ -f /usr/bin/packetai-cron ]]; then
+  rm -f /usr/bin/packetai-cron
+  success "Cron wrapper removed"
+fi
+
 # ── Step 2: Optionally drop database ────────────────────────────────────────
 
 if ! $KEEP_DB; then

@@ -629,6 +629,23 @@ APACHE
   fi
 fi
 
+# ── Step 7b: Install cron jobs ─────────────────────────────────────────────
+
+log "Setting up cron jobs..."
+if [ -f "${INSTALL_DIR}/cron.d/gpu-cloud-dashboard" ]; then
+  cp "${INSTALL_DIR}/cron.d/gpu-cloud-dashboard" /etc/cron.d/gpu-cloud-dashboard
+  chmod 644 /etc/cron.d/gpu-cloud-dashboard
+  success "Cron jobs installed"
+else
+  warn "Cron file not found — scheduled jobs (billing, metrics) will not run automatically"
+fi
+
+if [ -f "${INSTALL_DIR}/bin/packetai-cron" ]; then
+  cp "${INSTALL_DIR}/bin/packetai-cron" /usr/bin/packetai-cron
+  chmod 755 /usr/bin/packetai-cron
+  success "Cron wrapper installed"
+fi
+
 # ── Step 8: Start service ───────────────────────────────────────────────────
 
 log "Starting service..."

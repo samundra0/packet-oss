@@ -9,7 +9,7 @@ export function StatusDot({ status }: { status: string }) {
   const isTerminating = normalizedStatus === "un_subscribing" || normalizedStatus === "unsubscribing" || normalizedStatus === "terminating";
   const isPending = normalizedStatus === "pending" || normalizedStatus === "starting" || normalizedStatus === "stopping" || normalizedStatus === "subscribing";
   const isSettingUp = normalizedStatus === "setting-up";
-  const isSetupFailed = normalizedStatus === "setup-failed";
+  const isSetupFailed = normalizedStatus === "setup-failed" || normalizedStatus === "failed";
 
   return (
     <span className="relative flex h-2 w-2">

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getBrandName, getAppUrl, getLogoUrl } from "@/lib/branding";
+import { getBrandName, getLogoUrl } from "@/lib/branding";
 import { useBranding } from "@/hooks/useBranding";
 
 function SuccessContent() {
@@ -302,7 +302,7 @@ function SuccessContent() {
               Resend Login Link
             </Link>
             <Link
-              href={`${getAppUrl()}/support/`}
+              href="/contact"
               className="px-6 py-3 border border-zinc-200 hover:border-zinc-300 text-zinc-700 rounded-lg text-sm font-medium transition-colors"
             >
               Contact Support

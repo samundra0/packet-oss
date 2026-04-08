@@ -394,6 +394,7 @@ export function PoolSubscriptionCard({
   // Check if pod is stopped (pod_status will be "Stopped" or similar)
   const podStatus = subscription.pods?.[0]?.pod_status?.toLowerCase() || "";
   const isStopped = podStatus === "stopped" || podStatus === "exited";
+  const isFailed = podStatus === "failed" || podStatus === "error";
   const isStarting = podStatus === "starting" || podStatus === "containerizing";
 
   const getDisplayStatus = () => {
@@ -402,6 +403,7 @@ export function PoolSubscriptionCard({
     if (loading === "stop") return { status: "stopping", label: "Stopping..." };
     if (loading === "start") return { status: "starting", label: "Starting up..." };
     if (isPending) return { status: "pending", label: getGpuStatusText(subscription.status, false) };
+    if (isFailed) return { status: "failed", label: "Failed" };
     if (isStopped) return { status: "stopped", label: "Stopped" };
     if (isStarting) return { status: "starting", label: "Starting..." };
 
@@ -444,7 +446,7 @@ export function PoolSubscriptionCard({
   const getCardBackground = () => {
     if (isTerminating) return "bg-gradient-to-br from-amber-400 to-amber-500";
     if (displayStatus.status === "setting-up") return "bg-gradient-to-br from-blue-400 to-blue-500";
-    if (displayStatus.status === "setup-failed") return "bg-gradient-to-br from-rose-400 to-rose-500";
+    if (displayStatus.status === "setup-failed" || displayStatus.status === "failed") return "bg-gradient-to-br from-rose-400 to-rose-500";
     if (isActive) return "bg-gradient-to-br from-teal-500 to-teal-600";
     return "bg-zinc-200";
   };
@@ -455,7 +457,7 @@ export function PoolSubscriptionCard({
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-medium text-white/80">{subscription.pool_name || "GPU"}</span>
           <span className={`text-xs px-2 py-0.5 rounded-full ${
-            displayStatus.status === "setting-up" || displayStatus.status === "setup-failed" || isActive
+            displayStatus.status === "setting-up" || displayStatus.status === "setup-failed" || displayStatus.status === "failed" || isActive
               ? "bg-white/20 text-white"
               : "bg-zinc-300 text-zinc-600"
           }`}>
@@ -480,13 +482,13 @@ export function PoolSubscriptionCard({
             <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
               isTerminating ? "bg-amber-100" :
               displayStatus.status === "setting-up" ? "bg-blue-100" :
-              displayStatus.status === "setup-failed" ? "bg-rose-100" :
+              displayStatus.status === "setup-failed" || displayStatus.status === "failed" ? "bg-rose-100" :
               isActive ? "bg-teal-100" : "bg-zinc-100"
             }`}>
               <svg className={`w-5 h-5 ${
                 isTerminating ? "text-amber-600" :
                 displayStatus.status === "setting-up" ? "text-blue-600 animate-pulse" :
-                displayStatus.status === "setup-failed" ? "text-rose-600" :
+                displayStatus.status === "setup-failed" || displayStatus.status === "failed" ? "text-rose-600" :
                 isActive ? "text-teal-600" : "text-zinc-400"
               }`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
@@ -637,6 +639,35 @@ export function PoolSubscriptionCard({
           >
             Manage Subscription
           </a>
+        </div>
+      )}
+
+      {/* Failed State - Quick Restart Button */}
+      {isFailed && !isStopped && (
+        <div className="px-4 py-2 border-t border-[var(--line)] bg-rose-50/50 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={handleRestart}
+            disabled={!!loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            Restart Instance
+          </button>
+          <span className="text-xs text-rose-600">
+            This instance has failed and needs a restart
+          </span>
+          <div className="flex-1" />
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="flex items-center gap-1 px-2 py-1.5 text-xs text-zinc-500 hover:text-zinc-700 transition-colors"
+          >
+            {expanded ? "Less" : "More"}
+            <svg className={`w-3.5 h-3.5 transition-transform ${expanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
         </div>
       )}
 
@@ -808,6 +839,12 @@ export function PoolSubscriptionCard({
 
           {/* Action Links */}
           <div className="px-4 py-3 border-t border-[var(--line)] flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+            {/* Show Restart link when failed */}
+            {isFailed && !isStopped && (
+              <button onClick={handleRestart} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
+                Restart
+              </button>
+            )}
             {/* Show Start link when stopped */}
             {isStopped && (
               <button onClick={handleStart} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
@@ -815,7 +852,7 @@ export function PoolSubscriptionCard({
               </button>
             )}
             {/* Show these links when running */}
-            {isActive && !isStopped && (
+            {isActive && !isStopped && !isFailed && (
               <>
                 <button onClick={() => setShowAddStorageModal(true)} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
                   Storage
