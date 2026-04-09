@@ -3,4 +3,4 @@
 
 export function getTicketsByCustomer(..._args: unknown[]) { return undefined as any; }
 export function getTicketArticles(..._args: unknown[]) { return undefined as any; }
-export function (..._args: unknown[]) { return undefined as any; }
+export function createTicket(..._args: unknown[]) { return undefined as any; }
