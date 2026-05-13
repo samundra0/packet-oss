@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken } from "@/lib/admin";
 import nodemailer from "nodemailer";
 import { autoDetectTls } from "@/lib/email/client";
+import { getSetting } from "@/lib/settings";
 
 /**
  * POST /api/admin/smtp/test-connection
@@ -24,7 +25,15 @@ export async function POST(request: NextRequest) {
     const host = body.host?.trim();
     const port = parseInt(body.port || "587", 10);
     const user = body.user?.trim() || undefined;
-    const pass = body.password || undefined;
+
+    // The password field in the UI shows a masked value (e.g. "somepass****") when
+    // the user hasn't re-typed it in the current editing session. If we detect a
+    // masked value, fall back to the stored password so the test succeeds — the
+    // user only changed the username, not the password.
+    let pass: string | undefined = body.password || undefined;
+    if (typeof pass === "string" && pass.endsWith("****")) {
+      pass = (await getSetting("SMTP_PASSWORD")) || undefined;
+    }
 
     if (!host) {
       return NextResponse.json(

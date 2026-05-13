@@ -71,6 +71,7 @@ export function BlackwellModal({
         body: JSON.stringify({
           productId: blackwellProduct.id,
           email: customerEmail,
+          termsAccepted: true,
         }),
       });
 

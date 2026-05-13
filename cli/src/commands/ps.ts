@@ -20,18 +20,18 @@ export const psCommand = new Command("ps")
       const data = await apiRequest<InstanceList>("/instances");
       spinner.stop();
 
-      let subs = data.poolSubscriptions || [];
+      let instances = data.instances || [];
 
       // Filter out terminated unless --all
       if (!options.all) {
-        subs = subs.filter(
+        instances = instances.filter(
           (s) => !["terminated", "deleted", "cancelled", "un_subscribed"].includes(
             (s.status || "").toLowerCase()
           )
         );
       }
 
-      if (subs.length === 0) {
+      if (instances.length === 0) {
         console.log(chalk.gray("\n  No running instances.\n"));
         console.log(chalk.gray("  Launch one with: gpu-cloud launch --gpu <type>\n"));
         return;
@@ -53,13 +53,12 @@ export const psCommand = new Command("ps")
         },
       });
 
-      for (const sub of subs) {
-        const gpuType = sub.pool_name || "Unknown";
-        const meta = data.podMetadata?.[String(sub.id)];
-        const displayName = meta?.displayName || "-";
+      for (const inst of instances) {
+        const gpuType = inst.gpu?.model || "Unknown";
+        const displayName = inst.metadata?.displayName || inst.name || "-";
 
         // Calculate uptime
-        const created = sub.created_at ? new Date(sub.created_at) : null;
+        const created = inst.created_at ? new Date(inst.created_at) : null;
         let uptime = "-";
         if (created) {
           const diffMs = Date.now() - created.getTime();
@@ -69,30 +68,24 @@ export const psCommand = new Command("ps")
         }
 
         // Status with color
-        const podStatus = sub.pods?.[0]?.pod_status;
         let statusDisplay: string;
-
-        const status = (sub.status || "").toLowerCase();
-        if (status === "running" || status === "active" || status === "subscribed") {
-          if (podStatus === "Running") {
-            statusDisplay = chalk.green("running");
-          } else if (podStatus === "Pending") {
-            statusDisplay = chalk.yellow("starting");
-          } else {
-            statusDisplay = chalk.yellow(sub.status);
-          }
-        } else if (status === "subscribing" || status === "pending") {
+        const status = (inst.status || "").toLowerCase();
+        if (status === "running" || status === "active") {
+          statusDisplay = chalk.green("running");
+        } else if (status === "starting" || status === "subscribing" || status === "pending") {
           statusDisplay = chalk.yellow("starting");
-        } else if (status === "un_subscribing" || status === "terminating") {
+        } else if (status === "stopping" || status === "un_subscribing" || status === "terminating") {
           statusDisplay = chalk.yellow("terminating");
-        } else if (status === "terminated" || status === "deleted" || status === "un_subscribed") {
+        } else if (status === "terminated" || status === "deleted" || status === "un_subscribed" || status === "stopped") {
           statusDisplay = chalk.gray("terminated");
+        } else if (status === "error") {
+          statusDisplay = chalk.red("error");
         } else {
-          statusDisplay = chalk.gray(sub.status);
+          statusDisplay = chalk.gray(inst.status);
         }
 
         table.push([
-          chalk.white(String(sub.id)),
+          chalk.white(String(inst.id)),
           chalk.white(displayName),
           chalk.white(gpuType),
           statusDisplay,

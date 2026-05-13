@@ -31,17 +31,6 @@ export function SnapshotCard({ snapshot, token, onRestore, onDelete }: SnapshotC
     });
   };
 
-  // Calculate days remaining for auto-preserved snapshots
-  const getDaysRemaining = (): number | null => {
-    if (!snapshot.autoPreserved || !snapshot.expiresAt) return null;
-    const now = new Date();
-    const expires = new Date(snapshot.expiresAt);
-    const diffMs = expires.getTime() - now.getTime();
-    return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
-  };
-
-  const daysRemaining = getDaysRemaining();
-
   const handleRestore = async () => {
     setIsRestoring(true);
     setError(null);
@@ -97,44 +86,16 @@ export function SnapshotCard({ snapshot, token, onRestore, onDelete }: SnapshotC
     }
   };
 
-  const isAutoPreserved = snapshot.autoPreserved;
-
   return (
     <>
-      <div className={`bg-white rounded-2xl border p-5 hover:shadow-sm transition-shadow ${
-        isAutoPreserved ? "border-amber-200" : "border-[var(--line)]"
-      }`}>
-        {/* Auto-preserved banner */}
-        {isAutoPreserved && daysRemaining !== null && (
-          <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-amber-50 rounded-xl text-sm">
-            <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-            </svg>
-            <span className="text-amber-700">
-              Auto-saved due to insufficient balance.{" "}
-              {daysRemaining > 0 ? (
-                <>Storage preserved for <strong>{daysRemaining} day{daysRemaining !== 1 ? "s" : ""}</strong>. Top up your wallet to re-deploy.</>
-              ) : (
-                <strong>Expiring today. Top up now to save your data.</strong>
-              )}
-            </span>
-          </div>
-        )}
+      <div className="bg-white rounded-2xl border border-[var(--line)] p-5 hover:shadow-sm transition-shadow">
 
         <div className="flex items-start gap-4">
           {/* Icon */}
-          <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
-            isAutoPreserved ? "bg-amber-100" : "bg-zinc-100"
-          }`}>
-            {isAutoPreserved ? (
-              <svg className="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-              </svg>
-            ) : (
-              <svg className="w-6 h-6 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            )}
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 bg-zinc-100">
+            <svg className="w-6 h-6 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
           </div>
 
           {/* Content */}
@@ -144,11 +105,6 @@ export function SnapshotCard({ snapshot, token, onRestore, onDelete }: SnapshotC
               <span className="px-2 py-0.5 bg-zinc-100 text-zinc-600 text-xs rounded-full">
                 {snapshot.snapshotType === "full" ? "Full" : "Template"}
               </span>
-              {isAutoPreserved && (
-                <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">
-                  Auto-saved
-                </span>
-              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--muted)]">
@@ -172,11 +128,6 @@ export function SnapshotCard({ snapshot, token, onRestore, onDelete }: SnapshotC
 
             <div className="text-xs text-zinc-400 mt-1">
               Saved {formatDate(snapshot.createdAt)}
-              {isAutoPreserved && daysRemaining !== null && (
-                <span className={`ml-2 ${daysRemaining <= 1 ? "text-rose-500 font-medium" : "text-amber-500"}`}>
-                  {daysRemaining > 0 ? `Expires in ${daysRemaining}d` : "Expires today"}
-                </span>
-              )}
             </div>
           </div>
 
@@ -220,12 +171,6 @@ export function SnapshotCard({ snapshot, token, onRestore, onDelete }: SnapshotC
             <p className="text-sm text-zinc-600 mb-4">
               Launch a new pod from &quot;{snapshot.displayName}&quot;
             </p>
-
-            {isAutoPreserved && (
-              <div className="mb-4 p-3 bg-blue-50 border border-blue-200 text-blue-700 text-sm rounded-xl">
-                This pod was auto-saved when your wallet ran out. Ensure you have sufficient balance before resuming — the first 30 minutes will be charged upfront.
-              </div>
-            )}
 
             {error && (
               <div className="mb-4 p-3 bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-xl">
@@ -278,10 +223,7 @@ export function SnapshotCard({ snapshot, token, onRestore, onDelete }: SnapshotC
               This will delete &quot;{snapshot.displayName}&quot;.
               {snapshot.hasStorage && (
                 <span className="block mt-2 text-amber-600">
-                  {isAutoPreserved
-                    ? "Warning: This will also delete the preserved storage volume and your data will be lost permanently."
-                    : "Note: Your persistent storage volume will NOT be deleted."
-                  }
+                  Note: Your persistent storage volume will NOT be deleted.
                 </span>
               )}
             </p>

@@ -54,6 +54,10 @@ export interface DashboardDataState {
   twoFactorRequired: boolean;
   twoFactorVerified: boolean;
   pendingUserEmail: string | null;
+
+  // TOS consent state
+  tosConsentRequired: boolean;
+  tosConsentVersion: string | null;
 }
 
 export interface DashboardDataActions {
@@ -65,6 +69,7 @@ export interface DashboardDataActions {
   setProvisioningGpu: (gpu: { name: string; poolName: string } | null) => void;
   setTwoFactorVerified: (verified: boolean) => void;
   setTwoFactorRequired: (required: boolean) => void;
+  setTosConsentRequired: (required: boolean) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string) => void;
 }
@@ -106,6 +111,10 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
   const [twoFactorRequired, setTwoFactorRequired] = useState(false);
   const [twoFactorVerified, setTwoFactorVerified] = useState(false);
   const [pendingUserEmail, setPendingUserEmail] = useState<string | null>(null);
+
+  // TOS consent state
+  const [tosConsentRequired, setTosConsentRequired] = useState(false);
+  const [tosConsentVersion, setTosConsentVersion] = useState<string | null>(null);
 
   // Fetch callbacks
   const fetchInstances = useCallback(async () => {
@@ -211,6 +220,12 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
           return;
         }
 
+        // Check if TOS consent is required (after 2FA passes)
+        if (result.tosConsent?.required) {
+          setTosConsentVersion(result.tosConsent.currentVersion || null);
+          setTosConsentRequired(true);
+        }
+
         setData(result);
       } catch {
         setError("Failed to load account data");
@@ -262,6 +277,8 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
     twoFactorRequired,
     twoFactorVerified,
     pendingUserEmail,
+    tosConsentRequired,
+    tosConsentVersion,
     ticketId, // Deep link to support ticket
 
     // Actions
@@ -273,6 +290,7 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
     setProvisioningGpu,
     setTwoFactorVerified,
     setTwoFactorRequired,
+    setTosConsentRequired,
     setLoading,
     setError,
   };

@@ -273,6 +273,21 @@ export const EMPTY_INFRASTRUCTURE_REQUEST_FORM: InfrastructureRequestFormData = 
   internalNotes: "",
 };
 
+// GPU Category for organizing products by GPU type
+export interface GpuCategory {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  scenarioId: string | null;
+  displayOrder: number;
+  active: boolean;
+  icon: string | null;
+  createdAt: string;
+  updatedAt: string;
+  _count?: { products: number };
+}
+
 // GPU Product types for pricing/product management
 export interface GpuProduct {
   id: string;
@@ -285,12 +300,14 @@ export interface GpuProduct {
   stripePriceId: string | null;
   poolIds: number[];
   serviceId: string | null;
+  categoryIds: string[];
   displayOrder: number;
   active: boolean;
   featured: boolean;
   badgeText: string | null;
   vramGb: number | null;
   cudaCores: number | null;
+  gpuFamily: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -310,6 +327,9 @@ export interface PricingContent {
   title: string;
   subtitle: string;
   features: string[];
+  cardSubtitle?: string; // Override for the under-price subtitle on the pricing card (defaults to "Pay as you go. No minimum commitment.")
+  ctaText?: string; // Override for the Deploy CTA button label (defaults to "Deploy Now")
+  ctaSubtext?: string; // Override for the small text under the CTA (defaults to "Pay as you go · Cancel anytime")
 }
 
 export interface GpuOffering {
@@ -326,6 +346,7 @@ export interface GpuOffering {
   active: boolean;
   soldOut?: boolean;
   popular?: boolean;
+  heroPrice?: number;
 }
 
 export interface ProofStat {

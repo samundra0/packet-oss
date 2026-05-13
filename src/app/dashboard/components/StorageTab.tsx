@@ -24,6 +24,7 @@ export function StorageTab({ token }: StorageTabProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<number | null>(null);
+  const [checkingSnapshots, setCheckingSnapshots] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<StorageVolume | null>(null);
   const [affectedSnapshots, setAffectedSnapshots] = useState<Array<{ id: string; name: string }>>([]);
 
@@ -51,6 +52,30 @@ export function StorageTab({ token }: StorageTabProps) {
     fetchVolumes();
   }, [fetchVolumes]);
 
+  // Check for affected snapshots before opening the delete modal, so the user
+  // sees the full warning immediately rather than discovering it after clicking.
+  const openDeleteModal = async (volume: StorageVolume) => {
+    setCheckingSnapshots(volume.id);
+    setError(null);
+    try {
+      const response = await fetch("/api/instances/shared-volumes", {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ volume_id: volume.id, dryRun: true }),
+      });
+      const data = await response.json();
+      setAffectedSnapshots(data.affectedSnapshots || []);
+    } catch {
+      setAffectedSnapshots([]);
+    } finally {
+      setCheckingSnapshots(null);
+      setConfirmDelete(volume);
+    }
+  };
+
   const handleDelete = async (volume: StorageVolume, deleteSnapshots = false) => {
     setDeleting(volume.id);
     setError(null);
@@ -66,13 +91,6 @@ export function StorageTab({ token }: StorageTabProps) {
       });
 
       const data = await response.json();
-
-      // API returns 409 when snapshots would be affected — show warning
-      if (response.status === 409 && data.requiresConfirmation) {
-        setAffectedSnapshots(data.affectedSnapshots || []);
-        setDeleting(null);
-        return;
-      }
 
       if (!response.ok) {
         throw new Error(data.error || "Failed to delete volume");
@@ -227,11 +245,11 @@ export function StorageTab({ token }: StorageTabProps) {
                     </span>
                   ) : (
                     <button
-                      onClick={() => setConfirmDelete(volume)}
-                      disabled={deleting === volume.id}
+                      onClick={() => openDeleteModal(volume)}
+                      disabled={deleting === volume.id || checkingSnapshots === volume.id}
                       className="px-3 py-1.5 text-sm text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors disabled:opacity-50"
                     >
-                      {deleting === volume.id ? "Deleting..." : "Delete"}
+                      {deleting === volume.id ? "Deleting..." : checkingSnapshots === volume.id ? "Checking..." : "Delete"}
                     </button>
                   )}
                 </div>

@@ -267,7 +267,8 @@ export async function POST(request: NextRequest) {
       instance_type_id,
       // GPUaaS fields
       ephemeral_storage_block_id,
-      persistent_storage_block_id, // Create new volume with this storage block
+      persistent_storage_block_id, // Create new volume with this storage block (legacy)
+      new_storage_block_id, // Create new volume with this block (from launch modal)
       existing_shared_volume_id, // Attach existing shared volume by ID
       shared_volume_ids, // Pre-created shared volume IDs to attach
       image_uuid,
@@ -371,6 +372,7 @@ async function handleUnifiedInstanceCreate({
     image_hash_id,
     storage_block_id,
     persistent_storage_block_id,
+    new_storage_block_id,
     existing_shared_volume_id,
     shared_volume_ids, // Pre-created shared volume IDs to attach via pod_opts
     startup_script,
@@ -512,6 +514,49 @@ async function handleUnifiedInstanceCreate({
       // Attach an existing shared volume by ID
       sharedVolumes.push(Number(existing_shared_volume_id));
       console.log("[HAI 2.2] Attaching existing shared volume:", existing_shared_volume_id);
+    } else if (new_storage_block_id || persistent_storage_block_id) {
+      // Create a new volume, wait for it to become ready, then attach
+      const blockId = String(new_storage_block_id || persistent_storage_block_id);
+      try {
+        const { createSharedVolume, getSharedVolumes } = await import("@/lib/hostedai");
+        const volumeName = `${name}-storage-${Date.now()}`;
+        const volume = await createSharedVolume({
+          team_id: teamId,
+          region_id: resolvedRegionId,
+          name: volumeName,
+          storage_block_id: blockId,
+        });
+        console.log(`[HAI 2.2] Created shared volume: ${volume.id}, waiting for readiness...`);
+
+        // Poll until volume is ready (max 60s, 3s intervals)
+        let volumeReady = false;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          try {
+            const volumes = await getSharedVolumes(teamId);
+            const vol = volumes.find(v => v.id === volume.id);
+            const status = (vol?.status || "").toLowerCase();
+            if (status === "available" || status === "ready" || status === "active") {
+              volumeReady = true;
+              break;
+            }
+            console.log(`[HAI 2.2] Volume ${volume.id} status: ${vol?.status || "unknown"} (attempt ${attempt + 1})`);
+          } catch {
+            // Ignore poll errors, keep trying
+          }
+        }
+
+        if (volumeReady) {
+          console.log(`[HAI 2.2] Volume ${volume.id} is ready, attaching to instance`);
+        } else {
+          console.warn(`[HAI 2.2] Volume ${volume.id} not confirmed ready after 60s, attaching anyway`);
+        }
+
+        sharedVolumes.push(volume.id);
+      } catch (err) {
+        console.error("[HAI 2.2] Failed to create shared volume:", err);
+        // Don't block instance creation — proceed without storage
+      }
     }
 
     // === MONTHLY BILLING FLOW ===
@@ -562,27 +607,40 @@ async function handleUnifiedInstanceCreate({
           { status: 400 }
         );
       }
-      // Check entitlement: 1 GPU per subscription
-      const existing = await prisma.podMetadata.findFirst({
+
+      // Entitlement: one pod per subscription slot (qty). Count existing pods
+      // whose HAI instance is actually running; delete metadata for pods that
+      // are already gone so the freed slot can be redeployed.
+      const subQty = stripeSub.items.data[0]?.quantity ?? 1;
+      const existingPods = await prisma.podMetadata.findMany({
         where: { stripeSubscriptionId: resolvedStripeSubId },
       });
-      if (existing) {
-        // Check if pod actually running via unified instances
-        let stillRunning = false;
+
+      if (existingPods.length > 0) {
+        let runningIds = new Set<string>();
         try {
           const result = await getUnifiedInstances(teamId);
-          stillRunning = result.items?.some(i => i.id === existing.instanceId) ?? false;
+          runningIds = new Set((result.items ?? []).map((i) => i.id));
         } catch {
-          stillRunning = true;
+          // On HAI lookup failure, treat all metadata as running to be safe
+          runningIds = new Set(existingPods.map((p) => p.instanceId).filter((x): x is string => !!x));
         }
-        if (stillRunning) {
+
+        const activePods = existingPods.filter((p) => p.instanceId && runningIds.has(p.instanceId));
+        const stalePods = existingPods.filter((p) => !p.instanceId || !runningIds.has(p.instanceId));
+
+        if (activePods.length >= subQty) {
           await clearDeployLock();
-          return NextResponse.json(
-            { error: "You already have a GPU deployed for this subscription. Terminate it first to redeploy." },
-            { status: 409 }
-          );
+          const msg = subQty === 1
+            ? "You already have a GPU deployed for this subscription. Terminate it first to redeploy."
+            : `You already have ${activePods.length} of ${subQty} GPU(s) deployed for this subscription. Terminate one first to redeploy.`;
+          return NextResponse.json({ error: msg }, { status: 409 });
         }
-        await prisma.podMetadata.delete({ where: { id: existing.id } });
+
+        // Free up stale metadata so the slot can be reused
+        for (const stale of stalePods) {
+          await prisma.podMetadata.delete({ where: { id: stale.id } });
+        }
       }
     } else {
       // Hourly billing — check wallet and pre-charge

@@ -37,7 +37,7 @@ echo "=== Installing Jupyter + PyTorch ==="
 sudo apt-get update -qq
 
 # Install Python and pip if not present
-sudo apt-get install -y python3-pip python3-venv > /dev/null 2>&1
+sudo apt-get install -y python3-pip python3-venv python3-dev > /dev/null 2>&1
 
 # Create virtual environment
 sudo mkdir -p /opt/jupyter-env
@@ -168,7 +168,7 @@ echo "PORT=8080"
 echo "=== Installing Langflow ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y python3-pip python3-venv > /dev/null 2>&1
+sudo apt-get install -y python3-pip python3-venv python3-dev > /dev/null 2>&1
 
 # Create virtual environment
 sudo mkdir -p /opt/langflow-env
@@ -225,7 +225,7 @@ echo "INFO=Access the visual builder at http://localhost:7860"
 echo "=== Installing MLflow ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y python3-pip python3-venv > /dev/null 2>&1
+sudo apt-get install -y python3-pip python3-venv python3-dev > /dev/null 2>&1
 
 # Create virtual environment
 sudo mkdir -p /opt/mlflow-env

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
-import { getUnifiedInstances, getInstanceCredentials } from "@/lib/hostedai";
-// import { exposeService } from "@/lib/hostedai/services"; // TODO: need HAI 2.2 expose API
+import { getUnifiedInstances } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
 import { sendHfDeploymentEmail } from "@/lib/email";
 import { generateCustomerToken } from "@/lib/customer-auth";
@@ -15,9 +14,11 @@ import {
   executeRemoteCommand,
   executeRemoteScript,
   parseStatusOutput,
+  getSSHCredentials,
   ERROR_MESSAGES,
   STATUS_CHECK_SCRIPT,
   type DeploymentStatus,
+  type SSHCredentials,
 } from "@/lib/huggingface-status";
 
 // Track in-flight deploy triggers to prevent duplicate script executions
@@ -54,14 +55,81 @@ interface AdvancedStatus {
 }
 
 interface StatusResponse extends SimpleStatus {
+  // Top-level fields consumed by frontends (HuggingFaceTab, ProgressModal, GPUCard)
+  logs?: string;
+  apiEndpoint?: string;
+  // Detailed view for power users / SSH terminal
   advanced?: AdvancedStatus;
+}
+
+/**
+ * Trigger the deploy script on a running instance via SSH.
+ * Fire-and-forget: runs in background, updates DB on completion.
+ */
+function triggerDeployScript(
+  instanceId: string,
+  deployment: { id: string; hfItemId: string; hfItemType: string; hfItemName: string; deployScript: string; servicePort: number | null; hfToken: string | null; openWebUI: boolean; netdata: boolean },
+  creds: SSHCredentials
+) {
+  if (deployTriggersInFlight.has(instanceId)) return;
+  deployTriggersInFlight.add(instanceId);
+
+  console.log(`[HF Status] Triggering deploy script for ${deployment.hfItemName} (deployment ${deployment.id})`);
+
+  (async () => {
+    try {
+      const catalogItem = getCatalogItem(deployment.hfItemId);
+      const deployScriptType = deployment.deployScript as DeployScriptType;
+
+      const script = generateDeployScript(deployScriptType, {
+        modelId: deployment.hfItemType !== "docker" ? deployment.hfItemId : undefined,
+        dockerImage: catalogItem?.dockerImage,
+        port: deployment.servicePort || getDefaultPort(deployScriptType),
+        hfToken: deployment.hfToken || undefined,
+        gpuCount: 1,
+        openWebUI: deployment.openWebUI || false,
+        netdata: deployment.netdata || false,
+      });
+
+      await prisma.huggingFaceDeployment.update({
+        where: { id: deployment.id },
+        data: { status: "deploying", errorMessage: null },
+      });
+
+      const scriptResult = await executeRemoteScript(
+        creds.host, creds.port, creds.username, creds.password, script,
+      );
+
+      if (scriptResult.success) {
+        console.log(`[HF Status] Deploy script started successfully for ${deployment.hfItemName}`);
+        await prisma.huggingFaceDeployment.update({
+          where: { id: deployment.id },
+          data: { status: "deploying", deployOutput: scriptResult.output.slice(-5000) },
+        });
+      } else {
+        console.error(`[HF Status] Deploy script failed (exit ${scriptResult.exitCode}): ${scriptResult.output.slice(-500)}`);
+        await prisma.huggingFaceDeployment.update({
+          where: { id: deployment.id },
+          data: {
+            status: "failed",
+            errorMessage: `Deploy script failed with exit code ${scriptResult.exitCode}`,
+            deployOutput: scriptResult.output.slice(-5000),
+          },
+        });
+      }
+    } catch (triggerErr) {
+      console.error(`[HF Status] Deploy trigger error:`, triggerErr);
+    } finally {
+      deployTriggersInFlight.delete(instanceId);
+    }
+  })();
 }
 
 /**
  * GET /api/huggingface/deploy-status
  *
  * Query params:
- * - subscriptionId: GPU subscription ID
+ * - subscriptionId: HAI 2.2 instance ID
  *
  * Returns deployment status by checking install.log and vLLM server status
  */
@@ -72,9 +140,9 @@ export async function GET(request: NextRequest) {
     const { payload, customer, teamId } = auth;
 
     const { searchParams } = new URL(request.url);
-    const subscriptionId = searchParams.get("subscriptionId");
+    const instanceId = searchParams.get("subscriptionId");
 
-    if (!subscriptionId) {
+    if (!instanceId) {
       return NextResponse.json(
         { error: "subscriptionId is required" },
         { status: 400 }
@@ -88,13 +156,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // HAI 2.2: Verify instance belongs to this team via unified instances
-    const resolvedSubscriptionId = subscriptionId;
+    // HAI 2.2: Verify instance belongs to this team
     const unifiedResult = await getUnifiedInstances(teamId);
-    const instance = unifiedResult.items?.find(i => i.id === subscriptionId);
+    const instance = unifiedResult.items?.find(i => i.id === instanceId);
 
     if (!instance) {
-      console.log(`[HF Status] Instance ${subscriptionId} not found for team ${teamId}`);
+      console.log(`[HF Status] Instance ${instanceId} not found for team ${teamId}`);
       return NextResponse.json({ error: "Instance not found" }, { status: 404 });
     }
 
@@ -102,10 +169,10 @@ export async function GET(request: NextRequest) {
 
     // Instance has terminated
     if (["succeeded", "failed", "terminated", "error", "crashloopbackoff"].includes(instanceStatus)) {
-      console.log(`[HF Status] Instance ${subscriptionId} terminated with status: ${instance.status}`);
+      console.log(`[HF Status] Instance ${instanceId} terminated with status: ${instance.status}`);
 
       const deployment = await prisma.huggingFaceDeployment.findFirst({
-        where: { subscriptionId: resolvedSubscriptionId },
+        where: { subscriptionId: instanceId },
         orderBy: { createdAt: "desc" },
       });
 
@@ -141,29 +208,57 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Get SSH credentials via HAI 2.2 credentials API
-    let host: string, port: number, username: string, password: string;
-    try {
-      const creds = await getInstanceCredentials(subscriptionId);
-      if (!creds.ip || !creds.port || !creds.username || !creds.password) {
-        return NextResponse.json<StatusResponse>({
-          status: "not_started",
-          message: "Pod is running, waiting for SSH access...",
-        });
-      }
-      host = creds.ip;
-      port = creds.port;
-      username = creds.username;
-      password = creds.password;
-    } catch {
+    // HAI 2.2: Get SSH credentials via instance credentials API
+    // Use 0 retries since this endpoint is polled every 5s — implicit retry via polling
+    const creds = await getSSHCredentials(instanceId, 0);
+
+    if (!creds) {
       return NextResponse.json<StatusResponse>({
         status: "not_started",
         message: "Pod is running, waiting for SSH access...",
       });
     }
 
+    // DEPLOY TRIGGER: Check if there's a pending deployment that needs its script kicked off.
+    // This runs BEFORE the SSH status check so that an SSH status-check failure
+    // doesn't block the deploy trigger indefinitely. The trigger fires once
+    // (guarded by deployTriggersInFlight) and the next poll will pick up the status.
+    // Retrigger eligibility: pending/failed always; "deploying" only if stale
+    // (>10min since last update — longer than the 5min script timeout, so we
+    // never restart an actively-running deploy). The install.log probe below
+    // is the real guard against retriggering a successful deploy.
+    const STALE_DEPLOYING_MS = 10 * 60 * 1000;
+    const pendingDeployment = await prisma.huggingFaceDeployment.findFirst({
+      where: {
+        subscriptionId: instanceId,
+        OR: [
+          { status: { in: ["pending", "failed"] } },
+          {
+            status: "deploying",
+            updatedAt: { lt: new Date(Date.now() - STALE_DEPLOYING_MS) },
+          },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (pendingDeployment && !deployTriggersInFlight.has(instanceId)) {
+      // Only trigger if deploy hasn't been started yet — check for install.log via a quick SSH probe
+      try {
+        const probe = await executeRemoteCommand(
+          creds.host, creds.port, creds.username, creds.password,
+          `test -f "$HOME/hf-workspace/install.log" && echo "EXISTS" || echo "MISSING"`,
+          10000
+        );
+        if (probe.success && probe.output.includes("MISSING")) {
+          triggerDeployScript(instanceId, pendingDeployment, creds);
+        }
+      } catch {
+        // Probe failed — deploy trigger will retry on next poll
+      }
+    }
+
     // Check status by examining install.log and server status
-    // Uses shared status check script + additional GPU/model info for advanced view
     const statusCommand = STATUS_CHECK_SCRIPT + `
       # Get GPU info for advanced view (if nvidia-smi available)
       echo "---GPUINFO---"
@@ -191,15 +286,15 @@ export async function GET(request: NextRequest) {
     `;
 
     const result = await executeRemoteCommand(
-      host,
-      port,
-      username,
-      password,
+      creds.host,
+      creds.port,
+      creds.username,
+      creds.password,
       statusCommand
     );
 
     if (!result.success) {
-      console.log(`[HF Status] SSH command failed for ${instance.name}: ${result.output.slice(-200)}`);
+      console.log(`[HF Status] SSH status check failed for ${instance.name}: ${result.output.slice(-200)}`);
       return NextResponse.json<StatusResponse>({
         status: "not_started",
         message: "Connecting to GPU... (SSH may still be starting)",
@@ -209,71 +304,6 @@ export async function GET(request: NextRequest) {
 
     // Parse output
     const { status, progressPercent, errorType } = parseStatusOutput(result.output);
-
-    // PRIMARY TRIGGER: If the pod is running and SSH works but install.log doesn't
-    // exist yet, this means the deploy script hasn't been executed. The deploy route
-    // only creates the subscription + DB record — this endpoint is responsible for
-    // triggering the actual script once the pod is ready (polled every ~10s by dashboard).
-    if (status === "not_started") {
-      const pendingDeployment = await prisma.huggingFaceDeployment.findFirst({
-        where: { subscriptionId: resolvedSubscriptionId, status: { in: ["pending", "failed"] } },
-        orderBy: { createdAt: "desc" },
-      });
-
-      if (pendingDeployment && !deployTriggersInFlight.has(resolvedSubscriptionId)) {
-        deployTriggersInFlight.add(resolvedSubscriptionId);
-        console.log(`[HF Status] Triggering deploy script for ${pendingDeployment.hfItemName} (deployment ${pendingDeployment.id}, status was ${pendingDeployment.status})`);
-
-        // Fire-and-forget: run deploy script in background
-        (async () => {
-          try {
-            const catalogItem = getCatalogItem(pendingDeployment.hfItemId);
-            const deployScriptType = pendingDeployment.deployScript as DeployScriptType;
-
-            const script = generateDeployScript(deployScriptType, {
-              modelId: pendingDeployment.hfItemType !== "docker" ? pendingDeployment.hfItemId : undefined,
-              dockerImage: catalogItem?.dockerImage,
-              port: pendingDeployment.servicePort || getDefaultPort(deployScriptType),
-              hfToken: pendingDeployment.hfToken || undefined,
-              gpuCount: 1,
-              openWebUI: pendingDeployment.openWebUI || false,
-              netdata: pendingDeployment.netdata || false,
-            });
-
-            await prisma.huggingFaceDeployment.update({
-              where: { id: pendingDeployment.id },
-              data: { status: "deploying", errorMessage: null },
-            });
-
-            const scriptResult = await executeRemoteScript(
-              host, port, username, password, script,
-            );
-
-            if (scriptResult.success) {
-              console.log(`[HF Status] Deploy script started successfully for ${pendingDeployment.hfItemName}`);
-              await prisma.huggingFaceDeployment.update({
-                where: { id: pendingDeployment.id },
-                data: { status: "deploying", deployOutput: scriptResult.output.slice(-5000) },
-              });
-            } else {
-              console.error(`[HF Status] Deploy script failed (exit ${scriptResult.exitCode}): ${scriptResult.output.slice(-500)}`);
-              await prisma.huggingFaceDeployment.update({
-                where: { id: pendingDeployment.id },
-                data: {
-                  status: "failed",
-                  errorMessage: `Deploy script failed with exit code ${scriptResult.exitCode}`,
-                  deployOutput: scriptResult.output.slice(-5000),
-                },
-              });
-            }
-          } catch (triggerErr) {
-            console.error(`[HF Status] Deploy trigger error:`, triggerErr);
-          } finally {
-            deployTriggersInFlight.delete(resolvedSubscriptionId);
-          }
-        })();
-      }
-    }
 
     // Parse GPU info
     const gpuInfoStart = result.output.indexOf("---GPUINFO---");
@@ -324,7 +354,7 @@ export async function GET(request: NextRequest) {
 
     // Get deployment record for additional info
     const deployment = await prisma.huggingFaceDeployment.findFirst({
-      where: { subscriptionId: resolvedSubscriptionId },
+      where: { subscriptionId: instanceId },
       orderBy: { createdAt: "desc" },
     });
 
@@ -334,17 +364,24 @@ export async function GET(request: NextRequest) {
       : undefined;
 
     // Build response with simple and advanced views
+    const truncatedLogs = logs.slice(-3000);
+    const apiEndpoint = status === "running" ? `http://localhost:8000/v1` : undefined;
+
     const response: StatusResponse = {
-      // Simple view - always included
       status,
       message,
       progressPercent,
-      error: errorType, // Include error code at top level for easy access
+      error: errorType,
 
-      // Advanced view - for power users
+      // Top-level for frontend consumption
+      logs: truncatedLogs || undefined,
+      apiEndpoint,
+
+      // Detailed view
       advanced: {
-        logs: logs.slice(-3000), // Last 3000 chars of logs
-        sshCommand: `ssh ${username}@${host} -p ${port}`,
+        logs: truncatedLogs,
+        sshCommand: `ssh ${creds.username}@${creds.host} -p ${creds.port}`,
+        apiEndpoint,
         podName: instance.name,
         podStatus: instance.status,
         startedAt: deployment?.createdAt?.toISOString(),
@@ -358,14 +395,6 @@ export async function GET(request: NextRequest) {
       },
     };
 
-    if (status === "running") {
-      response.advanced!.apiEndpoint = `http://localhost:8000/v1`;
-    }
-
-    // TODO: Auto-expose vLLM port 8000 when model is ready
-    // The legacy exposeService uses pool_subscription_id which doesn't work for unified instances.
-    // Need HAI 2.2 expose API for instance-based port exposure.
-
     // Update database and send email if status has changed to final state
     if ((status === "running" || status === "failed") && deployment) {
       try {
@@ -373,7 +402,6 @@ export async function GET(request: NextRequest) {
           const previousStatus = deployment.status;
           console.log(`[HF Status] Updating deployment ${deployment.id}: ${previousStatus} -> ${status}`);
 
-          // Update the deployment record
           await prisma.huggingFaceDeployment.update({
             where: { id: deployment.id },
             data: {
@@ -382,7 +410,6 @@ export async function GET(request: NextRequest) {
             },
           });
 
-          // Log activity
           await logActivity(
             payload.customerId,
             status === "running" ? "hf_deployment_running" : "hf_deployment_failed",

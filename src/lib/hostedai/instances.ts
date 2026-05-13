@@ -217,6 +217,28 @@ export async function getGlobalInstanceSummary(): Promise<GlobalInstanceSummary>
   };
 }
 
+// Get ALL unified instances globally (paginated, no team filter)
+// Used by admin pods to get actual running/stopped instances
+export async function getAllUnifiedInstances(): Promise<UnifiedInstance[]> {
+  const all: UnifiedInstance[] = [];
+  let page = 0;
+  const perPage = 100;
+  while (true) {
+    const res = await hostedaiRequest<{ items: UnifiedInstance[]; total_items: number }>(
+      "GET",
+      `/instances/unified?page=${page}&per_page=${perPage}`,
+      undefined,
+      60000
+    );
+    if (res.items && res.items.length > 0) {
+      all.push(...res.items);
+    }
+    if (!res.items || res.items.length < perPage || all.length >= res.total_items) break;
+    page++;
+  }
+  return all;
+}
+
 // Get workspaces for a team (every team has at least one default workspace)
 export async function getTeamWorkspaces(
   teamId: string
@@ -452,6 +474,16 @@ export async function getServiceProvisioningInfo(
   return hostedaiRequest(
     "GET",
     `/service/i/provisioning-info?service_id=${serviceId}&team_id=${teamId}&region_id=${regionId}`
+  );
+}
+
+// Get a HAI service by ID (returns the full service object including gpu_config)
+export async function getHAIService(
+  serviceId: string
+): Promise<Record<string, unknown>> {
+  return hostedaiRequest<Record<string, unknown>>(
+    "GET",
+    `/service/${serviceId}`
   );
 }
 

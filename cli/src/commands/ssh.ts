@@ -6,12 +6,19 @@ import { apiRequest, type ConnectionInfo } from "../api.js";
 import { getApiKey } from "../config.js";
 
 /**
- * Parse an SSH command string like "ssh user@host -p 12345" into components
+ * Parse an SSH command string into components.
+ * Handles both "ssh -p PORT user@host" and "ssh user@host -p PORT" formats.
  */
 function parseSSHCommand(cmd: string): { user: string; host: string; port: string } | null {
-  const match = cmd.match(/ssh\s+(\S+)@(\S+)\s+-p\s+(\d+)/);
-  if (!match) return null;
-  return { user: match[1], host: match[2], port: match[3] };
+  // Format: ssh -p PORT user@host
+  const match1 = cmd.match(/ssh\s+-p\s+(\d+)\s+(\S+)@(\S+)/);
+  if (match1) return { user: match1[2], host: match1[3], port: match1[1] };
+
+  // Format: ssh user@host -p PORT
+  const match2 = cmd.match(/ssh\s+(\S+)@(\S+)\s+-p\s+(\d+)/);
+  if (match2) return { user: match2[1], host: match2[2], port: match2[3] };
+
+  return null;
 }
 
 export const sshCommand = new Command("ssh")
@@ -32,9 +39,9 @@ export const sshCommand = new Command("ssh")
         `/instances/${id}/connection`
       );
 
-      const pod = info.pods?.find((p) => p.pod_status === "Running" && p.ssh);
+      const conn = info.connection;
 
-      if (!pod?.ssh) {
+      if (!conn?.ssh_command) {
         spinner.fail("Instance not ready for SSH");
         console.log(chalk.gray("\n  The instance may still be starting. Try again in a moment.\n"));
         console.log(chalk.gray(`  Check status: gpu-cloud ps\n`));
@@ -43,7 +50,8 @@ export const sshCommand = new Command("ssh")
 
       spinner.stop();
 
-      const { command: sshCmd, password } = pod.ssh;
+      const sshCmd = conn.ssh_command;
+      const password = conn.password;
       const parsed = parseSSHCommand(sshCmd);
 
       if (options.copy) {

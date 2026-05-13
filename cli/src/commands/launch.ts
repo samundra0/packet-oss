@@ -96,11 +96,11 @@ export const launchCommand = new Command("launch")
         body: JSON.stringify(body),
       });
 
-      const subId = result.subscription_id;
+      const instanceId = result.instance_id;
 
       spinner.succeed(`Launched ${product.name}`);
 
-      console.log(chalk.cyan(`\n  Instance ID: ${chalk.white(subId)}`));
+      console.log(chalk.cyan(`\n  Instance ID: ${chalk.white(instanceId)}`));
       console.log(chalk.gray(`  Status:      starting`));
       console.log(
         chalk.gray(
@@ -126,34 +126,24 @@ export const launchCommand = new Command("launch")
 
           try {
             const connInfo = await apiRequest<ConnectionInfo>(
-              `/instances/${subId}/connection`
+              `/instances/${instanceId}/connection`
             );
 
-            const pod = connInfo.pods?.find((p) => p.pod_status === "Running" && p.ssh);
+            const conn = connInfo.connection;
 
-            if (pod?.ssh) {
+            if (conn?.ssh_command) {
               ready = true;
               waitSpinner.succeed("Instance is ready!");
 
-              // Parse SSH command to extract host, port, user
-              const sshMatch = pod.ssh.command.match(/ssh\s+(\S+)@(\S+)\s+-p\s+(\d+)/);
-              if (sshMatch) {
-                console.log(chalk.cyan("\n  SSH Connection:"));
-                console.log(chalk.white(`  ${pod.ssh.command}`));
-                if (pod.ssh.password) {
-                  console.log(chalk.gray(`  Password: ${pod.ssh.password}`));
-                }
-              } else {
-                console.log(chalk.cyan("\n  SSH Connection:"));
-                console.log(chalk.white(`  ${pod.ssh.command}`));
-                if (pod.ssh.password) {
-                  console.log(chalk.gray(`  Password: ${pod.ssh.password}`));
-                }
+              console.log(chalk.cyan("\n  SSH Connection:"));
+              console.log(chalk.white(`  ${conn.ssh_command}`));
+              if (conn.password) {
+                console.log(chalk.gray(`  Password: ${conn.password}`));
               }
 
               if (setupPreset) {
                 console.log(chalk.cyan(`\n  Auto-setup (${setupPreset.name}) is running in the background.`));
-                console.log(chalk.gray(`  Check progress: gpu-cloud logs ${subId}`));
+                console.log(chalk.gray(`  Check progress: gpu-cloud logs ${instanceId}`));
                 if (setupPreset.defaultPort) {
                   console.log(chalk.gray(`  Service will be available on port ${setupPreset.defaultPort} when ready.`));
                 }
@@ -171,7 +161,7 @@ export const launchCommand = new Command("launch")
         }
       } else {
         console.log(chalk.gray("\n  Use --wait to wait for SSH access"));
-        console.log(chalk.gray(`  Or run: gpu-cloud ssh ${subId}`));
+        console.log(chalk.gray(`  Or run: gpu-cloud ssh ${instanceId}`));
       }
 
       console.log();

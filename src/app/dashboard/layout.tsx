@@ -1,4 +1,5 @@
 import { IBM_Plex_Sans, Space_Grotesk } from "next/font/google";
+import { SessionGuard } from "@/components/SessionGuard";
 
 const ibmPlexSans = IBM_Plex_Sans({
   subsets: ["latin"],
@@ -19,6 +20,7 @@ export default function DashboardLayout({
 }) {
   return (
     <div className={`dashboard-layout ${ibmPlexSans.variable} ${spaceGrotesk.variable}`}>
+      <SessionGuard redirectTo="/account" />
       {children}
     </div>
   );

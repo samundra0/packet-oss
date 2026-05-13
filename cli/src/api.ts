@@ -50,7 +50,7 @@ export async function apiRequest<T>(
   return json.data;
 }
 
-// Type definitions matching actual API responses
+// Type definitions matching API responses (HAI 2.2 unified instances)
 
 export interface Account {
   id: string;
@@ -92,53 +92,68 @@ export interface LaunchOptions {
   persistentStorageBlocks: unknown[];
 }
 
+export interface Instance {
+  id: string;
+  name: string;
+  status: string;
+  created_at: string;
+  region?: {
+    id: number;
+    name: string;
+    city: string;
+    country: string;
+  } | null;
+  gpu?: {
+    model: string;
+    vendor: string;
+    vram_gb: string;
+    vgpu_count: number;
+  } | null;
+  instance_type?: {
+    id: string;
+    name: string;
+    cpu_cores: number;
+    ram_mb: number;
+  } | null;
+  ip: string[];
+  metadata?: {
+    displayName: string | null;
+    notes: string | null;
+  } | null;
+}
+
 export interface InstanceList {
-  instances: unknown[];
-  poolSubscriptions: Array<{
-    id: number | string;
-    status: string;
-    pool_id?: number | string;
-    pool_name?: string;
-    gpu_count?: number;
-    created_at?: string;
-    pods?: Array<{ pod_name: string; pod_status: string }>;
-  }>;
-  podMetadata: Record<string, { displayName: string | null; notes: string | null }>;
+  instances: Instance[];
 }
 
 export interface InstanceDetail {
-  subscription: {
-    id: number | string;
-    status: string;
-    pool_id?: number | string;
-    pool_name?: string;
-    gpu_count?: number;
-    created_at?: string;
-    pods?: Array<{ pod_name: string; pod_status: string }>;
-  };
+  instance: Instance;
   metadata: {
     displayName: string | null;
     notes: string | null;
   };
-  connectionInfo?: unknown;
+  connectionInfo?: {
+    ip: string;
+    port: number;
+    username: string;
+    ssh_command: string | null;
+  } | null;
 }
 
 export interface ConnectionInfo {
-  subscription_id: string;
-  pods: Array<{
-    pod_name: string;
-    pod_status: string;
-    internal_ip?: string | null;
-    ssh?: {
-      command: string;
-      password: string;
-    } | null;
-    discovered_services?: unknown[];
-  }>;
+  instance_id: string;
+  status: string;
+  connection: {
+    ip: string;
+    port: number;
+    username: string;
+    password?: string;
+    ssh_command: string | null;
+  };
 }
 
 export interface CreateInstanceResult {
-  subscription_id: number | string;
+  instance_id: string;
   name: string;
   pool_id: string;
   vgpus: number;

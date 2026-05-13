@@ -10,6 +10,7 @@
 
 import type { CatalogItem, SearchResult } from "./types";
 import { getCompatibilityBadge } from "./helpers";
+import { STANDARD_EPHEMERAL_STORAGE_GB } from "@/lib/huggingface-api";
 
 interface ItemCardProps {
   item: CatalogItem | SearchResult;
@@ -27,6 +28,14 @@ export function ItemCard({ item, onDeploy, onOpenMemoryModal }: ItemCardProps) {
       : 0;
   // Check if this is a real VRAM value from HF API (for catalog items)
   const hasRealVram = "realVramGb" in item && item.realVramGb !== undefined;
+  const diskSizeGb =
+    "diskSizeGb" in item
+      ? item.diskSizeGb
+      : "estimatedDiskSizeGb" in item
+      ? item.estimatedDiskSizeGb
+      : 0;
+  const exceedsStorageLimit =
+    diskSizeGb !== undefined && diskSizeGb > 0 && diskSizeGb > STANDARD_EPHEMERAL_STORAGE_GB;
 
   return (
     <div className="bg-white rounded-xl border border-[var(--line)] p-5 hover:shadow-lg transition-shadow">
@@ -108,9 +117,22 @@ export function ItemCard({ item, onDeploy, onOpenMemoryModal }: ItemCardProps) {
         ))}
       </div>
 
+      {exceedsStorageLimit && (
+        <div
+          className="mb-3 flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
+          title={`This model requires ~${diskSizeGb}GB of storage. Standard pods have ${STANDARD_EPHEMERAL_STORAGE_GB}GB ephemeral storage.`}
+        >
+          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+          </svg>
+          Requires ~{diskSizeGb}GB — exceeds {STANDARD_EPHEMERAL_STORAGE_GB}GB pod limit
+        </div>
+      )}
       <button
         onClick={() => onDeploy(item)}
-        className="w-full py-2 px-4 bg-[var(--blue)] text-white rounded-lg hover:opacity-90 transition-opacity text-sm font-medium"
+        disabled={exceedsStorageLimit}
+        className="w-full py-2 px-4 bg-[var(--blue)] text-white rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity text-sm font-medium"
+        title={exceedsStorageLimit ? `Model too large for standard pods (requires ~${diskSizeGb}GB)` : undefined}
       >
         Deploy to GPU
       </button>

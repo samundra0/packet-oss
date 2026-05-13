@@ -5,10 +5,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
-import { getConnectionInfo } from "@/lib/hostedai";
+import { getInstanceCredentials } from "@/lib/hostedai";
 import { spawn } from "child_process";
-import Stripe from "stripe";
 import { validateSSHParams } from "@/lib/ssh-validation";
 import { prisma } from "@/lib/prisma";
 
@@ -95,21 +93,6 @@ async function executeSSHCommand(
   });
 }
 
-/**
- * Parse SSH host from command like "ssh root@192.168.1.1 -p 22"
- */
-function parseSSHInfo(cmd: string): { host: string; port: number; username: string } {
-  const hostMatch = cmd.match(/@([^\s]+)/);
-  const portMatch = cmd.match(/-p\s+(\d+)/);
-  const userMatch = cmd.match(/ssh\s+([^@]+)@/);
-
-  return {
-    host: hostMatch ? hostMatch[1] : "localhost",
-    port: portMatch ? parseInt(portMatch[1], 10) : 22,
-    username: userMatch ? userMatch[1] : "root",
-  };
-}
-
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -168,36 +151,26 @@ export async function GET(
       });
     }
 
-    // Get team ID from Stripe customer
-    const stripe = await getStripe();
-    const customerResult = await stripe.customers.retrieve(payload.customerId);
-    if ("deleted" in customerResult && customerResult.deleted) {
-      return NextResponse.json({ error: "Customer not found" }, { status: 404 });
-    }
-    const customer = customerResult as Stripe.Customer;
-    const teamId = (customer.metadata?.team_id || customer.metadata?.teamId || customer.metadata?.hostedai_team_id) as string;
-
-    if (!teamId) {
-      return NextResponse.json({ error: "No team associated with account" }, { status: 400 });
-    }
-
-    // Get connection info for this subscription
-    const connectionInfo = await getConnectionInfo(teamId);
-    const connInfo = connectionInfo.find((c) => String(c.id) === String(subscriptionId));
-
-    if (!connInfo?.pods?.[0]) {
-      return NextResponse.json({ error: "Instance not found or not running" }, { status: 404 });
+    // HAI 2.2: fetch SSH credentials directly from the unified instance API
+    let creds;
+    try {
+      creds = await getInstanceCredentials(subscriptionId);
+    } catch (err) {
+      console.error(`[system-metrics] getInstanceCredentials failed for ${subscriptionId}:`, err);
+      return NextResponse.json(
+        { error: "Instance not found or not running" },
+        { status: 404 }
+      );
     }
 
-    const pod = connInfo.pods[0];
-    const sshInfo = pod.ssh_info;
-
-    if (!sshInfo?.cmd || !sshInfo?.pass) {
+    if (!creds.ip || !creds.port || !creds.username || !creds.password) {
       return NextResponse.json({ error: "SSH credentials not available" }, { status: 400 });
     }
 
-    const { host, port, username } = parseSSHInfo(sshInfo.cmd);
-    const password = sshInfo.pass;
+    const host = creds.ip;
+    const port = creds.port;
+    const username = creds.username;
+    const password = creds.password;
 
     // Get GPU metrics via nvidia-smi (basic + advanced SM metrics)
     // We run two queries: basic metrics + dmon for SM-level metrics

@@ -100,6 +100,7 @@ export async function GET(request: NextRequest) {
           gated: item.gated,
           tags: item.tags,
           estimatedVramGb: item.vramGb,
+          estimatedDiskSizeGb: item.diskSizeGb ?? 0,
           type: item.type === "space" ? "space" : "model",
           source: "catalog",
         });

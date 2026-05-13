@@ -9,6 +9,20 @@ import {
   deleteVoucher,
 } from "@/lib/voucher";
 
+// Voucher credit/min-topup are MySQL INT columns
+const MAX_CENTS = 2_147_483_647;
+
+function validateCentsField(value: unknown, label: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return `${label} must be a non-negative number`;
+  }
+  if (value > MAX_CENTS) {
+    return `${label} too large (max $${(MAX_CENTS / 100).toLocaleString()})`;
+  }
+  return null;
+}
+
 // GET - Get all vouchers and stats
 export async function GET(request: NextRequest) {
   const sessionToken = request.cookies.get("admin_session")?.value;
@@ -87,6 +101,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const creditErr = validateCentsField(creditCents, "Credit amount");
+    if (creditErr) return NextResponse.json({ error: creditErr }, { status: 400 });
+    const minTopupErr = validateCentsField(minTopupCents, "Min top-up");
+    if (minTopupErr) return NextResponse.json({ error: minTopupErr }, { status: 400 });
+
     const voucher = await createVoucher({
       code,
       name,
@@ -137,6 +156,15 @@ export async function PATCH(request: NextRequest) {
         { error: "Voucher ID is required" },
         { status: 400 }
       );
+    }
+
+    if ("creditCents" in updates) {
+      const err = validateCentsField(updates.creditCents, "Credit amount");
+      if (err) return NextResponse.json({ error: err }, { status: 400 });
+    }
+    if ("minTopupCents" in updates) {
+      const err = validateCentsField(updates.minTopupCents, "Min top-up");
+      if (err) return NextResponse.json({ error: err }, { status: 400 });
     }
 
     const voucher = await updateVoucher(id, updates);

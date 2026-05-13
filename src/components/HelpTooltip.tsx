@@ -278,7 +278,9 @@ export const HELP_CONTENT = {
       <>
         Data stored here survives instance restarts and termination.
         <br /><br />
-        <span className="text-zinc-400">Mount point:</span> <code className="bg-zinc-800 px-1 rounded">/workspace</code>
+        <span className="text-zinc-400">Accessible at:</span> <code className="bg-zinc-800 px-1 rounded">/workspace</code>
+        <br />
+        <span className="text-zinc-400 text-xs">NFS volume mounted at /data/share*, symlinked to /workspace for convenience.</span>
         <br /><br />
         Save models, datasets, and checkpoints here to avoid re-downloading.
       </>

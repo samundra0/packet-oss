@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
 import {
   getUnifiedInstances,
-  getInstanceCredentials,
   deleteInstance,
 } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
@@ -12,142 +11,17 @@ import {
   DeployScriptType,
 } from "@/lib/huggingface-deploy-scripts";
 import { logActivity } from "@/lib/activity";
-import { spawn } from "child_process";
-import { validateSSHParams } from "@/lib/ssh-validation";
+import {
+  executeRemoteScript,
+  getSSHCredentials,
+  type SSHCredentials,
+} from "@/lib/huggingface-status";
 
 // Deployment timeout: 30 minutes from creation
 const DEPLOYMENT_TIMEOUT_MS = 30 * 60 * 1000;
 
-// Maximum retry attempts for script execution
-const MAX_SCRIPT_RETRIES = 2;
-
 /**
- * Execute a script on a remote pod via SSH with retry logic
- */
-async function executeRemoteScript(
-  host: string,
-  port: number,
-  username: string,
-  password: string,
-  script: string,
-  timeoutMs: number = 300000, // 5 minutes for model deployment
-  retryCount: number = 0
-): Promise<{ success: boolean; output: string; exitCode: number }> {
-  // Validate SSH parameters to prevent command injection
-  validateSSHParams({ host, port, username });
-
-  return new Promise((resolve) => {
-    const encodedScript = Buffer.from(script).toString("base64");
-    const remoteCommand = `echo '${encodedScript}' | base64 -d | bash`;
-
-    // Use sshpass with SSHPASS env var (-e) to safely handle special characters in password
-    const args = [
-      "-e", // Use SSHPASS environment variable
-      "ssh",
-      "-o",
-      "StrictHostKeyChecking=no",
-      "-o",
-      "UserKnownHostsFile=/dev/null",
-      "-o",
-      "LogLevel=ERROR",
-      "-o",
-      "ConnectTimeout=30",
-      "-o",
-      "ServerAliveInterval=15",
-      "-o",
-      "ServerAliveCountMax=3",
-      "-p",
-      String(port),
-      `${username}@${host}`,
-      remoteCommand,
-    ];
-
-    let stdout = "";
-    let stderr = "";
-
-    console.log(`[HF Deploy] Executing SSH script (attempt ${retryCount + 1}/${MAX_SCRIPT_RETRIES + 1})`);
-    console.log(`[HF Deploy] SSH: ${username}@${host}:${port}`);
-
-    const proc = spawn("sshpass", args, {
-      timeout: timeoutMs,
-      env: { ...process.env, SSHPASS: password },
-    });
-
-    proc.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", async (code) => {
-      const output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
-
-      // If failed and we haven't exhausted retries, try again
-      if (code !== 0 && retryCount < MAX_SCRIPT_RETRIES) {
-        console.log(`[HF Deploy] Script execution failed (exit code ${code}), retrying in 5s...`);
-        await new Promise(r => setTimeout(r, 5000));
-        const retryResult = await executeRemoteScript(host, port, username, password, script, timeoutMs, retryCount + 1);
-        resolve(retryResult);
-        return;
-      }
-
-      if (code === 0) {
-        console.log("[HF Deploy] Script execution successful");
-      } else {
-        console.error(`[HF Deploy] Script execution failed with exit code ${code}`);
-        console.error(`[HF Deploy] Output: ${output.slice(-500)}`);
-      }
-
-      resolve({
-        success: code === 0,
-        output,
-        exitCode: code || 0,
-      });
-    });
-
-    proc.on("error", async (err) => {
-      console.error(`[HF Deploy] SSH process error: ${err.message}`);
-
-      // Retry on connection errors
-      if (retryCount < MAX_SCRIPT_RETRIES) {
-        console.log(`[HF Deploy] Retrying in 5s...`);
-        await new Promise(r => setTimeout(r, 5000));
-        const retryResult = await executeRemoteScript(host, port, username, password, script, timeoutMs, retryCount + 1);
-        resolve(retryResult);
-        return;
-      }
-
-      resolve({
-        success: false,
-        output: `Failed to execute: ${err.message}`,
-        exitCode: -1,
-      });
-    });
-  });
-}
-
-/**
- * Parse SSH command to extract connection details
- * Example: "ssh ubuntu@35.190.160.152 -p 31240"
- */
-function parseSSHCommand(cmd: string): { host: string; port: number; username: string } {
-  // Extract user@host
-  const userHostMatch = cmd.match(/(\w+)@([^\s]+)/);
-  const username = userHostMatch ? userHostMatch[1] : "ubuntu";
-  const host = userHostMatch ? userHostMatch[2] : "localhost";
-
-  // Extract port
-  const portMatch = cmd.match(/-p\s+(\d+)/);
-  const port = portMatch ? parseInt(portMatch[1], 10) : 22;
-
-  return { host, port, username };
-}
-
-/**
- * Check if pod status indicates the pod is running
- * Handles case-insensitive comparison
+ * Check if pod status indicates the pod is running (HAI 2.2 uses lowercase "running")
  */
 function isPodRunning(podStatus: string | undefined): boolean {
   if (!podStatus) return false;
@@ -170,11 +44,7 @@ function isDeploymentTimedOut(createdAt: Date): boolean {
   return Date.now() - createdAt.getTime() > DEPLOYMENT_TIMEOUT_MS;
 }
 
-interface ConnectionInfo {
-  host: string;
-  port: number;
-  username: string;
-  password: string;
+interface ConnectionInfo extends SSHCredentials {
   podName: string;
   podStatus: string;
 }
@@ -182,7 +52,8 @@ interface ConnectionInfo {
 /**
  * GET /api/huggingface/deploy/[id]
  *
- * Get deployment status and execute script if pod is ready
+ * Get deployment status and execute script if pod is ready.
+ * Uses HAI 2.2 unified instances and instance credentials API.
  */
 export async function GET(
   request: NextRequest,
@@ -243,27 +114,15 @@ export async function GET(
       );
     }
 
-    // Check instance status via HAI 2.2 unified instances
+    // HAI 2.2: Look up the instance directly by the stored instance ID
+    const instanceId = deployment.subscriptionId;
     let subscriptionStatus = "unknown";
     let connectionInfo: ConnectionInfo | null = null;
     let subscriptionError: string | null = null;
 
     try {
-      // Look up instanceId from PodMetadata, fall back to subscriptionId
-      const podMeta = await prisma.podMetadata.findFirst({
-        where: {
-          OR: [
-            { instanceId: deployment!.subscriptionId },
-            { subscriptionId: deployment!.subscriptionId },
-          ],
-        },
-      });
-      const instanceId = podMeta?.instanceId || deployment!.subscriptionId;
-
       const instancesResult = await getUnifiedInstances(teamId);
-      const instance = instancesResult.items.find(
-        (i) => i.id === instanceId || i.id === deployment!.subscriptionId
-      );
+      const instance = instancesResult.items.find(i => i.id === instanceId);
 
       if (!instance) {
         subscriptionStatus = "not_found";
@@ -272,25 +131,18 @@ export async function GET(
         subscriptionStatus = (instance.status || "unknown").toLowerCase();
         console.log(`[HF Deploy] Instance status: ${subscriptionStatus}`);
 
-        // Get SSH credentials if instance is running/active
-        if (["running", "active", "subscribed"].includes(subscriptionStatus)) {
-          try {
-            const credentials = await getInstanceCredentials(instance.id);
-            if (credentials?.ip && credentials?.password) {
-              connectionInfo = {
-                host: credentials.ip,
-                port: credentials.port || 22,
-                username: credentials.username || "ubuntu",
-                password: credentials.password,
-                podName: instance.name || instance.id,
-                podStatus: instance.status || "unknown",
-              };
-              console.log(`[HF Deploy] Pod: ${connectionInfo.podName}, Status: ${connectionInfo.podStatus}`);
-            } else {
-              console.log("[HF Deploy] SSH credentials not available yet");
-            }
-          } catch {
-            console.log("[HF Deploy] Could not fetch instance credentials yet");
+        // Get SSH credentials if instance is running
+        if (isPodRunning(instance.status)) {
+          const creds = await getSSHCredentials(instance.id);
+          if (creds) {
+            connectionInfo = {
+              ...creds,
+              podName: instance.name || instance.id,
+              podStatus: instance.status || "unknown",
+            };
+            console.log(`[HF Deploy] Pod: ${connectionInfo.podName}, Status: ${connectionInfo.podStatus}`);
+          } else {
+            console.log("[HF Deploy] SSH credentials not available yet");
           }
         }
       }
@@ -328,7 +180,6 @@ export async function GET(
     }
 
     // If pending and pod is ready, run deploy script
-    // CRITICAL: Use case-insensitive comparison for pod status
     if (
       deployment.status === "pending" &&
       connectionInfo &&
@@ -369,16 +220,14 @@ export async function GET(
         script
       );
 
-      // The script starts vLLM in background and exits - success means script ran, not that vLLM is running
-      // We set status to "deploying" and let deploy-status endpoint check actual vLLM status
       if (result.success) {
         console.log("[HF Deploy] Deploy script executed successfully, vLLM installation started");
 
         deployment = await prisma.huggingFaceDeployment.update({
           where: { id },
           data: {
-            status: "deploying", // Keep as deploying - deploy-status will update to running when ready
-            deployOutput: result.output.slice(-5000), // Keep last 5000 chars
+            status: "deploying",
+            deployOutput: result.output.slice(-5000),
           },
         });
 
@@ -453,7 +302,7 @@ export async function GET(
     } = {
       deployment: {
         id: deployment.id,
-        subscriptionId: deployment!.subscriptionId,
+        subscriptionId: deployment.subscriptionId,
         hfItemId: deployment.hfItemId,
         hfItemName: deployment.hfItemName,
         hfItemType: deployment.hfItemType,
@@ -509,7 +358,7 @@ export async function GET(
 /**
  * DELETE /api/huggingface/deploy/[id]
  *
- * Stop and delete a deployment
+ * Stop and delete a deployment. Deletes the HAI 2.2 instance directly.
  */
 export async function DELETE(
   request: NextRequest,
@@ -546,20 +395,10 @@ export async function DELETE(
 
     console.log(`[HF Deploy] Deleting deployment ${id} for ${deployment.hfItemName}`);
 
-    // Delete the HAI instance
+    // Delete the HAI 2.2 instance directly by the stored instance ID
     try {
-      const podMeta = await prisma.podMetadata.findFirst({
-        where: {
-          OR: [
-            { instanceId: deployment!.subscriptionId },
-            { subscriptionId: deployment!.subscriptionId },
-          ],
-        },
-      });
-      const instanceId = podMeta?.instanceId || deployment!.subscriptionId;
-
-      console.log(`[HF Deploy] Deleting instance ${instanceId}`);
-      await deleteInstance(instanceId);
+      console.log(`[HF Deploy] Deleting instance ${deployment.subscriptionId}`);
+      await deleteInstance(deployment.subscriptionId);
     } catch (error) {
       console.error("[HF Deploy] Error deleting instance:", error);
       // Continue with deleting the record even if instance delete fails

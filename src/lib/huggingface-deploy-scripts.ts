@@ -125,11 +125,35 @@ echo ""
 
 # Kill any existing server
 pkill -f "vllm.entrypoints" 2>/dev/null || true
+pkill -f "hf-stub-server" 2>/dev/null || true
 
 # Use home directory for workspace
 WORKSPACE="$HOME/hf-workspace"
 mkdir -p "$WORKSPACE" "$WORKSPACE/cache"
 cd "$WORKSPACE"
+
+# ============================================
+# Liveness probe stub server
+# ============================================
+# Some Kubernetes pod configs have a TCP/HTTP liveness probe on the service
+# port. vLLM install + model load takes 5-15 minutes; without anything
+# listening on the port, the probe kills the container mid-install and we
+# loop forever. Start a tiny HTTP server that returns 200 to anything until
+# vLLM takes over. Tagged "hf-stub-server" so we can pkill it before vLLM
+# binds the port.
+nohup python3 -c "
+# hf-stub-server-${port}
+from http.server import HTTPServer, BaseHTTPRequestHandler
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b'installing\\n')
+    def do_POST(self):
+        self.send_response(200); self.end_headers()
+    def log_message(self, *a, **k): pass
+HTTPServer(('0.0.0.0', ${port}), H).serve_forever()
+" > "\$WORKSPACE/stub-server.log" 2>&1 &
+echo \$! > "\$WORKSPACE/stub-server.pid"
+echo "Stub HTTP server started on port ${port} to satisfy liveness probes during install"
 
 # ============================================
 # GPU Memory Calculation
@@ -210,61 +234,45 @@ echo ""
 if [ -f "venv/bin/python" ] && "$WORKSPACE/venv/bin/python" -c "import vllm" 2>/dev/null; then
   echo "vLLM already installed, starting server directly..."
 
+  # Create install.log with INSTALL_COMPLETE so the status check script
+  # doesn't early-exit with "not_started" when the log file is absent.
+  echo "vLLM already installed - skipping reinstall" > "$WORKSPACE/install.log"
+  echo "INSTALL_COMPLETE" >> "$WORKSPACE/install.log"
+
   ${hfTokenExport}
   export HF_HOME="$WORKSPACE/cache"
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
-  # Try V1 engine first (faster), fall back to V0 if engine init fails
-  start_vllm() {
-    local use_v1=\$1
-    if [ "\$use_v1" = "0" ]; then
-      export VLLM_USE_V1=0
-      echo "Starting vLLM with V0 engine (fallback)..."
-    else
-      unset VLLM_USE_V1
-      echo "Starting vLLM with V1 engine..."
+  # Free port ${port} before vLLM binds it (kill the liveness-probe stub)
+  pkill -f "hf-stub-server" 2>/dev/null || true
+  sleep 1
+
+  # Start vLLM server
+  "$WORKSPACE/venv/bin/python" -m vllm.entrypoints.openai.api_server \\
+    --model "${safeModelId}" \\
+    --host 0.0.0.0 \\
+    --port ${port} \\
+    --tensor-parallel-size ${gpuCount} \\
+    --max-model-len \$MAX_MODEL_LEN \\
+    --gpu-memory-utilization \$GPU_UTIL \\
+    --enforce-eager \\
+    --trust-remote-code \\
+    --dtype float16 \\
+    > "$WORKSPACE/vllm.log" 2>&1 &
+  VLLM_PID=\$!
+
+  # Wait up to 120s for startup
+  for i in \$(seq 1 24); do
+    sleep 5
+    if ! kill -0 \$VLLM_PID 2>/dev/null; then
+      echo "vLLM exited early, check vllm.log"
+      break
     fi
-
-    "$WORKSPACE/venv/bin/python" -m vllm.entrypoints.openai.api_server \\
-      --model "${safeModelId}" \\
-      --host 0.0.0.0 \\
-      --port ${port} \\
-      --tensor-parallel-size ${gpuCount} \\
-      --max-model-len \$MAX_MODEL_LEN \\
-      --gpu-memory-utilization \$GPU_UTIL \\
-      --enforce-eager \\
-      --disable-frontend-multiprocessing \\
-      --trust-remote-code \\
-      --dtype float16 \\
-      > "$WORKSPACE/vllm.log" 2>&1 &
-    VLLM_PID=\$!
-
-    # Wait up to 120s for startup or failure
-    for i in \$(seq 1 24); do
-      sleep 5
-      if ! kill -0 \$VLLM_PID 2>/dev/null; then
-        # Process died — check if engine init failed
-        if grep -qiE "Engine core initialization failed|Failed core proc|EngineCore failed to start|Failed to initialize engine" "$WORKSPACE/vllm.log" 2>/dev/null; then
-          return 1  # Signal engine init failure
-        fi
-        return 2  # Some other failure
-      fi
-      # Check if server is ready
-      if grep -q "Uvicorn running on" "$WORKSPACE/vllm.log" 2>/dev/null; then
-        return 0  # Success
-      fi
-    done
-    return 0  # Still running after 120s, assume OK (model download may be slow)
-  }
-
-  start_vllm 1
-  RESULT=\$?
-  if [ \$RESULT -eq 1 ]; then
-    echo "V1 engine init failed, retrying with V0 engine..."
-    pkill -f "vllm.entrypoints" 2>/dev/null || true
-    sleep 2
-    echo "" > "$WORKSPACE/vllm.log"
-    start_vllm 0
-  fi
+    if grep -q "Uvicorn running on" "$WORKSPACE/vllm.log" 2>/dev/null; then
+      echo "vLLM is ready!"
+      break
+    fi
+  done
 
   echo ""
   echo "=== Server Starting ==="
@@ -357,9 +365,9 @@ if ! python3 -m venv /tmp/test-venv 2>/dev/null; then
   # Run apt with DEBIAN_FRONTEND to avoid interactive prompts
   export DEBIAN_FRONTEND=noninteractive
   sudo apt-get update -qq 2>/dev/null || true
-  sudo apt-get install -y --no-install-recommends python\${PYVER}-venv python3-pip 2>&1 | tail -3 || {
+  sudo apt-get install -y --no-install-recommends python\${PYVER}-venv python\${PYVER}-dev python3-pip 2>&1 | tail -3 || {
     echo "apt-get install failed, trying alternate packages..."
-    sudo apt-get install -y --no-install-recommends python3-venv python3-pip 2>&1 | tail -3 || true
+    sudo apt-get install -y --no-install-recommends python3-venv python3-dev python3-pip 2>&1 | tail -3 || true
   }
   rm -rf /tmp/test-venv 2>/dev/null || true
 fi
@@ -402,7 +410,7 @@ if ! python3 -m venv /tmp/venv-test 2>/dev/null; then
   log "Installing python3-venv..."
   export DEBIAN_FRONTEND=noninteractive
   sudo apt-get update -qq 2>/dev/null
-  sudo apt-get install -y --no-install-recommends python3-venv python3-pip 2>&1 | tail -3
+  sudo apt-get install -y --no-install-recommends python3-venv python3-dev python3-pip 2>&1 | tail -3
 fi
 rm -rf /tmp/venv-test 2>/dev/null
 
@@ -423,7 +431,17 @@ log "Installing pip..."
 pip install --upgrade pip >> install.log 2>&1
 
 log "Installing vLLM (this takes a while)..."
-if ! pip install vllm >> install.log 2>&1; then
+# Detect CUDA driver version to pick a compatible vLLM release.
+# vLLM >= 0.9 ships with CUDA 12.8 wheels which require driver >= 560.
+# Older drivers (535 = CUDA 12.2, 550 = CUDA 12.4) need vLLM 0.8.x.
+DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)
+if [ -n "$DRIVER_VER" ] && [ "$DRIVER_VER" -lt 560 ] 2>/dev/null; then
+  log "CUDA driver $DRIVER_VER < 560 — installing vLLM 0.8.x for compatibility"
+  VLLM_PKG="vllm>=0.8,<0.9"
+else
+  VLLM_PKG="vllm"
+fi
+if ! pip install "$VLLM_PKG" >> install.log 2>&1; then
   log "ERROR: vLLM installation failed"
   exit 1
 fi
@@ -433,60 +451,42 @@ log "INSTALL_COMPLETE"
 # Now start the server
 ${hfTokenExport}
 export HF_HOME="$HOME/hf-workspace/cache"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
 log "Starting vLLM server for ${safeModelId}..."
 log "Using max-model-len=$MAX_MODEL_LEN, gpu-memory-utilization=$GPU_UTIL"
 
-# Try V1 engine first (faster), fall back to V0 if engine init fails
-start_vllm_server() {
-  local use_v1=$1
-  if [ "$use_v1" = "0" ]; then
-    export VLLM_USE_V1=0
-    log "Starting with V0 engine (fallback)..."
-  else
-    unset VLLM_USE_V1
-    log "Starting with V1 engine..."
+# Free port ${port} before vLLM binds it (kill the liveness-probe stub)
+log "Stopping liveness-probe stub server..."
+pkill -f "hf-stub-server" 2>/dev/null || true
+sleep 1
+
+# Start vLLM server
+python -m vllm.entrypoints.openai.api_server \\
+  --model "${safeModelId}" \\
+  --host 0.0.0.0 \\
+  --port ${port} \\
+  --tensor-parallel-size ${gpuCount} \\
+  --max-model-len $MAX_MODEL_LEN \\
+  --gpu-memory-utilization $GPU_UTIL \\
+  --enforce-eager \\
+  --trust-remote-code \\
+  --dtype float16 \\
+  >> vllm.log 2>&1 &
+VLLM_PID=$!
+
+# Wait up to 120s for startup
+for i in $(seq 1 24); do
+  sleep 5
+  if ! kill -0 $VLLM_PID 2>/dev/null; then
+    log "vLLM exited early, check vllm.log"
+    break
   fi
-
-  python -m vllm.entrypoints.openai.api_server \\
-    --model "${safeModelId}" \\
-    --host 0.0.0.0 \\
-    --port ${port} \\
-    --tensor-parallel-size ${gpuCount} \\
-    --max-model-len $MAX_MODEL_LEN \\
-    --gpu-memory-utilization $GPU_UTIL \\
-    --enforce-eager \\
-    --disable-frontend-multiprocessing \\
-    --trust-remote-code \\
-    --dtype float16 \\
-    >> vllm.log 2>&1 &
-  VLLM_PID=$!
-
-  # Wait up to 120s for startup or failure
-  for i in $(seq 1 24); do
-    sleep 5
-    if ! kill -0 $VLLM_PID 2>/dev/null; then
-      if grep -qiE "Engine core initialization failed|Failed core proc|EngineCore failed to start|Failed to initialize engine" vllm.log 2>/dev/null; then
-        return 1
-      fi
-      return 2
-    fi
-    if grep -q "Uvicorn running on" vllm.log 2>/dev/null; then
-      return 0
-    fi
-  done
-  return 0
-}
-
-start_vllm_server 1
-RESULT=$?
-if [ $RESULT -eq 1 ]; then
-  log "V1 engine init failed, retrying with V0..."
-  pkill -f "vllm.entrypoints" 2>/dev/null || true
-  sleep 2
-  echo "" > vllm.log
-  start_vllm_server 0
-fi
+  if grep -q "Uvicorn running on" vllm.log 2>/dev/null; then
+    log "vLLM is ready!"
+    break
+  fi
+done
 
 log "SERVER_STARTED"
 
@@ -593,7 +593,7 @@ echo ""
 
 # Install dependencies
 sudo apt-get update
-sudo apt-get install -y python3 python3-pip python3-venv python3-full git git-lfs
+sudo apt-get install -y python3 python3-pip python3-venv python3-dev python3-full git git-lfs
 
 # Use home directory for workspace
 WORKSPACE="$HOME/hf-workspace"

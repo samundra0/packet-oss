@@ -427,9 +427,13 @@ rsync -a --info=progress2 \
   --exclude '*.pyc' \
   /home/ubuntu/ "$SNAPSHOT_DIR/home-ubuntu/" 2>&1 || true
 
-# Copy any workspace data
-if [ -d "/workspace" ]; then
-  rsync -a --info=progress2 /workspace/ "$SNAPSHOT_DIR/workspace/" 2>&1 || true
+# Copy workspace data from NFS persistent storage.
+# Target /data/share* directly rather than the /workspace symlink — the symlink
+# may point to an ephemeral directory when no NFS volume is attached, which
+# would silently rsync the wrong data.
+SHARE_PATH=$(ls -d /data/share* 2>/dev/null | head -1)
+if [ -n "$SHARE_PATH" ] && [ -d "$SHARE_PATH/workspace" ]; then
+  rsync -a --info=progress2 "$SHARE_PATH/workspace/" "$SNAPSHOT_DIR/workspace/" 2>&1 || true
 fi
 
 # Copy HuggingFace cache if exists

@@ -13,6 +13,7 @@ import { cacheCustomer, markCustomerCacheDeleted } from "@/lib/customer-cache";
 import { getBrandName, getDashboardUrl } from "@/lib/branding";
 import { loadTemplate } from "@/lib/email/template-loader";
 import { prisma } from "@/lib/prisma";
+import { setSuspension } from "@/lib/customer-suspension";
 import Stripe from "stripe";
 
 async function sendCredentialsEmail(params: {
@@ -223,39 +224,186 @@ export async function POST(
       }
 
       case "suspend": {
-        if (!teamId) {
-          return NextResponse.json({ error: "No team ID found" }, { status: 400 });
+        // Fraud lockout: blocks login, kills GPU access, cancels subscriptions,
+        // zeros wallet. Applied to ALL Stripe customers sharing this email
+        // (a single user may have linked hourly + monthly accounts).
+        if (!reason) {
+          return NextResponse.json({ error: "Reason is required for suspension" }, { status: 400 });
         }
 
-        await suspendTeam(teamId);
+        const reasonLabel = reason === "other" ? (reasonNote || "Other") : reason.replace(/_/g, " ");
+        const fullReason = `${reasonLabel}${reasonNote && reason !== "other" ? `: ${reasonNote}` : ""}`;
 
-        // Log team suspension
+        // Find all linked Stripe customers (same email)
+        const linkedCustomers: Stripe.Customer[] = [customer as Stripe.Customer];
+        if (customer.email) {
+          const allWithEmail = await stripe.customers.list({ email: customer.email, limit: 20 });
+          for (const c of allWithEmail.data) {
+            if (c.id !== customerId) linkedCustomers.push(c);
+          }
+        }
+
+        const teamIds = new Set<string>();
+        for (const c of linkedCustomers) {
+          const tid = c.metadata?.hostedai_team_id;
+          if (tid) teamIds.add(tid);
+        }
+
+        const errors: string[] = [];
+
+        // 1. Suspend all hosted.ai teams (block GPU access)
+        for (const tid of teamIds) {
+          try {
+            await suspendTeam(tid);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`Failed to suspend team ${tid}:`, msg);
+            errors.push(`HAI team ${tid}: ${msg}`);
+          }
+        }
+
+        // 2. Cancel active subscriptions across all linked customers
+        let canceledSubs = 0;
+        for (const c of linkedCustomers) {
+          try {
+            const subs = await stripe.subscriptions.list({ customer: c.id, status: "active", limit: 100 });
+            for (const sub of subs.data) {
+              await stripe.subscriptions.cancel(sub.id);
+              canceledSubs++;
+            }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`Failed to cancel subs for ${c.id}:`, msg);
+            errors.push(`Subscriptions ${c.id}: ${msg}`);
+          }
+        }
+
+        // 3. Zero out wallet on every linked customer (debit any positive credit)
+        let zeroedCents = 0;
+        for (const c of linkedCustomers) {
+          const creditCents = -(c.balance || 0); // Stripe: negative balance = credit
+          if (creditCents > 0) {
+            try {
+              await stripe.customers.createBalanceTransaction(c.id, {
+                amount: creditCents, // positive = debit (removes credit)
+                currency: "usd",
+                description: `Wallet zeroed on suspension: ${fullReason}`,
+                metadata: {
+                  adjusted_by: session.email,
+                  adjustment_type: "admin_suspension",
+                  reason,
+                  reason_note: reasonNote || "",
+                },
+              });
+              zeroedCents += creditCents;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              console.error(`Failed to zero wallet for ${c.id}:`, msg);
+              errors.push(`Wallet ${c.id}: ${msg}`);
+            }
+          }
+        }
+
+        // 4. Set suspension flag on every linked customer (blocks dashboard login)
+        for (const c of linkedCustomers) {
+          try {
+            await setSuspension({
+              stripeCustomerId: c.id,
+              suspended: true,
+              reason: fullReason,
+              adminEmail: session.email,
+            });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`Failed to set suspension flag for ${c.id}:`, msg);
+            errors.push(`DB flag ${c.id}: ${msg}`);
+          }
+        }
+
         await logAdminActivity(
           session.email,
-          "customer_viewed", // Reusing type
-          `Suspended team for ${customer.email || customerId}`,
-          { customerId, customerEmail: customer.email, teamId, action: "suspend-team" }
+          "customer_viewed",
+          `Suspended ${customer.email || customerId} (fraud lockout) — ${fullReason}`,
+          {
+            customerId,
+            customerEmail: customer.email,
+            linkedCustomerIds: linkedCustomers.map(c => c.id),
+            teamIds: Array.from(teamIds),
+            canceledSubs,
+            zeroedCents,
+            reason,
+            reasonNote: reasonNote || null,
+            errors,
+            action: "suspend-customer",
+          }
         );
 
-        return NextResponse.json({ success: true, message: "Team suspended" });
+        return NextResponse.json({
+          success: true,
+          message: `Customer suspended. Canceled ${canceledSubs} subs, zeroed $${(zeroedCents / 100).toFixed(2)}, blocked ${teamIds.size} HAI team(s).${errors.length ? ` ${errors.length} non-fatal error(s) — see logs.` : ""}`,
+          errors: errors.length ? errors : undefined,
+        });
       }
 
       case "unsuspend": {
-        if (!teamId) {
-          return NextResponse.json({ error: "No team ID found" }, { status: 400 });
+        // Reverses the suspension flag and unsuspends HAI teams across all
+        // linked customers. Does NOT restore canceled subscriptions or refund
+        // zeroed wallet — admin must do that manually if appropriate.
+        const linkedCustomers: Stripe.Customer[] = [customer as Stripe.Customer];
+        if (customer.email) {
+          const allWithEmail = await stripe.customers.list({ email: customer.email, limit: 20 });
+          for (const c of allWithEmail.data) {
+            if (c.id !== customerId) linkedCustomers.push(c);
+          }
         }
 
-        await unsuspendTeam(teamId);
+        const teamIds = new Set<string>();
+        for (const c of linkedCustomers) {
+          const tid = c.metadata?.hostedai_team_id;
+          if (tid) teamIds.add(tid);
+        }
 
-        // Log team unsuspension
+        const errors: string[] = [];
+
+        for (const tid of teamIds) {
+          try {
+            await unsuspendTeam(tid);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`Failed to unsuspend team ${tid}:`, msg);
+            errors.push(`HAI team ${tid}: ${msg}`);
+          }
+        }
+
+        for (const c of linkedCustomers) {
+          try {
+            await setSuspension({ stripeCustomerId: c.id, suspended: false });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`Failed to clear suspension flag for ${c.id}:`, msg);
+            errors.push(`DB flag ${c.id}: ${msg}`);
+          }
+        }
+
         await logAdminActivity(
           session.email,
-          "customer_viewed", // Reusing type
-          `Unsuspended team for ${customer.email || customerId}`,
-          { customerId, customerEmail: customer.email, teamId, action: "unsuspend-team" }
+          "customer_viewed",
+          `Unsuspended ${customer.email || customerId}`,
+          {
+            customerId,
+            customerEmail: customer.email,
+            linkedCustomerIds: linkedCustomers.map(c => c.id),
+            teamIds: Array.from(teamIds),
+            errors,
+            action: "unsuspend-customer",
+          }
         );
 
-        return NextResponse.json({ success: true, message: "Team unsuspended" });
+        return NextResponse.json({
+          success: true,
+          message: `Customer unsuspended.${errors.length ? ` ${errors.length} non-fatal error(s) — see logs.` : ""}`,
+          errors: errors.length ? errors : undefined,
+        });
       }
 
       case "adjust-credits": {

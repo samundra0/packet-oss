@@ -43,6 +43,7 @@ export interface CatalogItem {
   description: string;
   vramGb: number;
   realVramGb?: number;
+  diskSizeGb?: number;
   deployScript: string;
   tags: string[];
   gated: boolean;
@@ -66,6 +67,7 @@ export interface SearchResult {
   gated: boolean;
   tags: string[];
   estimatedVramGb: number;
+  estimatedDiskSizeGb?: number;
   type: "model" | "space";
   source: "catalog" | "huggingface";
   compatibility?: {
@@ -80,12 +82,33 @@ export interface LaunchProduct {
   name: string;
   description: string | null;
   pricePerHourCents: number;
+  pricePerMonthCents?: number | null;
+  billingType?: string;
+  serviceId?: string | null;
+  categoryIds?: string[];
+  displayOrder?: number;
+  featured?: boolean;
+  badgeText?: string | null;
   vramGb: number | null;
-  available: boolean;
-  regions: Array<{ id: number; region_name: string }>;
+  cudaCores?: number | null;
+  gpuFamily?: string | null;
+  available: boolean | null;
+  regions?: Array<{ id: number; region_name: string; city?: string; country?: string; country_code?: string }>;
+}
+
+export interface LaunchCategory {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  displayOrder: number;
+  icon: string | null;
+  scenarioConfigured: boolean;
+  products: LaunchProduct[];
 }
 
 export interface LaunchOptions {
+  categories?: LaunchCategory[];
   products: LaunchProduct[];
   walletBalanceCents: number;
 }

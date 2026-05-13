@@ -82,16 +82,20 @@ export function GPUCardHfDeployment({
         {/* Action buttons when model is running */}
         {hfStatus?.status === "running" && (
           <div className="flex flex-wrap gap-2 mt-2">
-            {/* Test Chat button */}
-            <button
-              onClick={() => setShowPlayground(true)}
-              className="px-3 py-1.5 text-xs font-medium bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors flex items-center gap-2"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-              Test Chat
-            </button>
+            {/* Test Chat — needs port 8000 exposed since the inference/chat
+                route reaches vLLM via the external service IP. Without
+                exposure, opening the playground always errors. */}
+            {exposedServices.some((s) => (s.internal_port || s.port) === 8000) && (
+              <button
+                onClick={() => setShowPlayground(true)}
+                className="px-3 py-1.5 text-xs font-medium bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors flex items-center gap-2"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+                Test Chat
+              </button>
+            )}
 
             {/* Expose API button when port 8000 not exposed */}
             {!exposedServices.some((s) => (s.internal_port || s.port) === 8000) && (
@@ -148,8 +152,11 @@ export function GPUCardHfDeployment({
           </div>
         )}
 
-        {/* GPU Metrics - show when model is running */}
-        {hfStatus?.status === "running" && (
+        {/* GPU Metrics — only when model running AND port 8000 is exposed.
+            The metrics endpoint scrapes vLLM via the exposed external service,
+            so without exposure it returns 404 and the card shows an error. */}
+        {hfStatus?.status === "running" &&
+          exposedServices.some((s) => (s.internal_port || s.port) === 8000) && (
           <div className="mt-3 border-t border-zinc-100 pt-3">
             <GPUMetricsCard
               subscriptionId={subscriptionId}

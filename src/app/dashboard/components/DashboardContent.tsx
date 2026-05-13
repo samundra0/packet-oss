@@ -11,6 +11,7 @@ import TeamMembers from "@/components/TeamMembers";
 import HuggingFaceTab from "@/components/HuggingFaceTab";
 import { TwoFactorSettings } from "@/components/two-factor";
 import TwoFactorVerify from "@/components/TwoFactorVerify";
+import TosConsentModal from "@/components/TosConsentModal";
 import { LogoutConfirmModal } from "@/components/logout-confirm-modal";
 import ReferralCard from "@/components/ReferralCard";
 import { formatSmartPrice } from "@/lib/format";
@@ -54,7 +55,7 @@ import {
 } from "./";
 import { useLiveCostTicker } from "@/hooks/useLiveCostTicker";
 import { HelpTooltip, HELP_CONTENT } from "@/components/HelpTooltip";
-import { TopupModal, ActivityLogModal, TransactionsModal, BlackwellModal, WelcomeModal } from "./modals";
+import { TopupModal, ActivityLogModal, TransactionsModal, BlackwellModal, WelcomeModal, MonthlyPlansModal } from "./modals";
 import { MobileHeader, MobileNav, MobileMenuSheet, MobileMoreSheet } from "./MobileDashboard";
 import { ProfileSettings } from "./ProfileSettings";
 import { BudgetSettings } from "./BudgetSettings";
@@ -90,6 +91,9 @@ export function DashboardContent() {
     twoFactorRequired,
     twoFactorVerified,
     pendingUserEmail,
+    tosConsentRequired,
+    tosConsentVersion,
+    setTosConsentRequired,
     fetchInstances,
     fetchActivityEvents,
     fetchBillingStats,
@@ -154,14 +158,23 @@ export function DashboardContent() {
   // Logout confirmation modal state
   const [showLogoutModal, setShowLogoutModal] = React.useState(false);
 
-  // Blackwell subscription modal state
+  // Blackwell subscription modal state (legacy single-product modal — kept for reference)
   const [showBlackwellModal, setShowBlackwellModal] = React.useState(false);
+
+  // Monthly plans modal (lists all monthly products)
+  const [showMonthlyPlansModal, setShowMonthlyPlansModal] = React.useState(false);
 
   // Welcome modal for new users with no infrastructure or wallet balance
   const [showWelcomeModal, setShowWelcomeModal] = React.useState(false);
 
   // Track product ID to pre-select in launch modal (e.g., after returning from top-up)
   const [launchProductId, setLaunchProductId] = React.useState<string | undefined>(undefined);
+
+  // When deploying a specific monthly subscription, lock the launch modal to
+  // that product and pass the subscription ID to the instances API.
+  const [launchSubscription, setLaunchSubscription] = React.useState<
+    { productId: string; stripeSubscriptionId: string } | null
+  >(null);
 
   // Toast notifications
   const [topupToast, setTopupToast] = React.useState<string | null>(null);
@@ -176,6 +189,30 @@ export function DashboardContent() {
   // Mobile navigation state
   const [showMobileMenu, setShowMobileMenu] = React.useState(false);
   const [showMoreSheet, setShowMoreSheet] = React.useState(false);
+
+  // Sticky header style toggles when the sentinel scrolls out of view.
+  // Uses a callback ref so the observer attaches when the sentinel mounts
+  // — the dashboard is rendered behind a `loading` guard, so a useEffect
+  // with [activeTab] would fire while the sentinel is still null.
+  const [isHeaderStuck, setIsHeaderStuck] = React.useState(false);
+  const stickyHeaderObserverRef = React.useRef<IntersectionObserver | null>(null);
+  const stickyHeaderSentinelRef = React.useCallback((node: HTMLDivElement | null) => {
+    stickyHeaderObserverRef.current?.disconnect();
+    stickyHeaderObserverRef.current = null;
+    if (!node) return;
+    let scrollParent: HTMLElement | null = node.parentElement;
+    while (scrollParent) {
+      const overflowY = window.getComputedStyle(scrollParent).overflowY;
+      if (overflowY === "auto" || overflowY === "scroll") break;
+      scrollParent = scrollParent.parentElement;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setIsHeaderStuck(!entry.isIntersecting),
+      { root: scrollParent, threshold: 0 }
+    );
+    observer.observe(node);
+    stickyHeaderObserverRef.current = observer;
+  }, []);
 
   // Bare metal deployments (active GPU nodes)
   const [bareMetalNodes, setBareMetalNodes] = React.useState<Array<{
@@ -373,21 +410,16 @@ export function DashboardContent() {
     }
   }, [data, loading, poolSubscriptions.length, instances.length, bareMetalNodes.length]);
 
-  // Gate GPU launch: monthly subscribers and funded wallets go straight to launch,
-  // new users (no subs, no wallet) pick billing type first
+  // On-demand requires a funded wallet, regardless of monthly subscriptions.
+  // Monthly pods launch via their own card button (setLaunchSubscription path).
   const handleLaunchGpu = React.useCallback(() => {
-    const monthlySubscriptions = data?.subscriptions || [];
-    if (monthlySubscriptions.length > 0) {
-      setShowLaunchModal(true);
-      return;
-    }
     const walletBalance = data?.wallet?.balance ?? 0;
     if (walletBalance <= 0) {
       setShowWelcomeModal(true);
       return;
     }
     setShowLaunchModal(true);
-  }, [data?.wallet?.balance, data?.subscriptions, setShowLaunchModal]);
+  }, [data?.wallet?.balance, setShowLaunchModal]);
 
   const handleLogout = () => {
     window.location.href = "/account";
@@ -417,15 +449,23 @@ export function DashboardContent() {
       <TwoFactorVerify
         token={token}
         userEmail={pendingUserEmail}
-        onSuccess={() => {
+        onSuccess={(newToken) => {
+          // Swap the URL token so page refreshes use the 2FA-verified JWT
+          const verifiedToken = newToken || token;
+          if (newToken) {
+            const url = new URL(window.location.href);
+            url.searchParams.set("token", newToken);
+            window.history.replaceState({}, "", url.toString());
+          }
+
           setTwoFactorVerified(true);
           setTwoFactorRequired(false);
           setLoading(true);
-          // Re-fetch account data and instances after 2FA verification
+          // Re-fetch account data with the verified token
           fetch("/api/account/verify", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token }),
+            body: JSON.stringify({ token: verifiedToken }),
           })
             .then((res) => res.json())
             .then((result) => {
@@ -440,6 +480,19 @@ export function DashboardContent() {
           fetchInstances();
           fetchActivityEvents();
           fetchBillingStats();
+        }}
+      />
+    );
+  }
+
+  // Show TOS consent gate if required (after 2FA passes)
+  if (tosConsentRequired && token) {
+    return (
+      <TosConsentModal
+        token={token}
+        currentVersion={tosConsentVersion}
+        onAccept={() => {
+          setTosConsentRequired(false);
         }}
       />
     );
@@ -513,7 +566,7 @@ export function DashboardContent() {
   const runtimeHours = totalHourlyRate > 0 ? balanceAmount / totalHourlyRate : (balanceAmount / avgHourlyRate);
 
   return (
-    <div className="flex min-h-screen flex-col md:flex-row">
+    <div className="flex h-screen overflow-hidden flex-col md:flex-row">
       <TruConversionIdentity email={data.customer.email} />
       {/* Mobile Header */}
       <MobileHeader
@@ -536,7 +589,6 @@ export function DashboardContent() {
               height={50}
               className="h-12 w-auto"
             />
-            <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-gradient-to-r from-teal-500 to-teal-600 text-white">Beta</span>
           </Link>
         </div>
 
@@ -781,13 +833,20 @@ export function DashboardContent() {
         <div className="flex-1 p-4 md:p-8 pb-24 md:pb-8 overflow-y-auto">
           {activeTab === "dashboard" && (
             <>
+              <div ref={stickyHeaderSentinelRef} aria-hidden className="h-px" />
               {/* Header with New GPU button */}
-              <div className="flex items-center justify-between mb-8">
+              <div
+                className={`flex items-center justify-between mb-8 sticky -top-4 md:-top-8 z-10 py-4 -mt-4 -mx-4 px-4 md:-mx-8 md:px-8 transition-colors duration-200 ${
+                  isHeaderStuck
+                    ? "bg-white/95 backdrop-blur-md border-b border-[var(--line)] shadow-sm"
+                    : "bg-[var(--surface)] border-b border-transparent"
+                }`}
+              >
                 <div>
                   <h1 className="text-2xl font-bold text-[var(--ink)]">Dashboard</h1>
                   <p className="text-sm text-[var(--muted)]">Manage your GPU instances</p>
                 </div>
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3">
                   <button
                     onClick={() => setActiveTab("referrals")}
                     className="text-sm text-teal-600 hover:text-teal-700 font-medium flex items-center gap-1.5"
@@ -797,12 +856,19 @@ export function DashboardContent() {
                   </button>
                   <button
                     onClick={handleLaunchGpu}
-                    className="px-5 py-2.5 bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white font-medium rounded-xl transition-colors flex items-center gap-2"
+                    className="px-4 py-2.5 border border-zinc-200 bg-white hover:bg-zinc-50 text-sm font-medium text-zinc-600 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
                     </svg>
-                    New GPU
+                    On-demand
+                  </button>
+                  <button
+                    onClick={() => setShowMonthlyPlansModal(true)}
+                    className="px-4 py-2.5 bg-(--blue) hover:bg-(--blue-dark) text-white text-sm font-medium rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    Monthly
+                    <span className="text-blue-200 font-semibold text-xs">· Save up to 40%</span>
                   </button>
                 </div>
               </div>
@@ -855,53 +921,94 @@ export function DashboardContent() {
                 </div>
               </div>
 
-              {/* Monthly Subscription Entitlements — only show subscriptions without running pods */}
+              {/* Monthly Subscription Entitlements — header always rendered so "Add Subscription" is reachable */}
               {(() => {
-                const undeployedSubs = (data.subscriptions || []).filter((sub) => {
-                  // Check via stripeSubscriptionId match first, then fall back to poolIds / billingType match
-                  const hasRunningPod = poolSubscriptions.some((ps) => {
-                    const meta = podMetadata[String(ps.id)];
-                    // Primary: match by stripeSubscriptionId stored in pod metadata
-                    if (meta?.stripeSubscriptionId && meta.stripeSubscriptionId === sub.id) return true;
-                    // Secondary: monthly pod on a matching pool (billingType check)
-                    if (meta?.billingType === "monthly" && sub.poolIds?.length && ps.pool_id != null) {
-                      return sub.poolIds.map(String).includes(String(ps.pool_id));
+                // Each subscription can cover multiple slots via `quantity`; a single pod
+                // can only satisfy ONE slot. Iterate slot-by-slot and claim pods greedily
+                // so a qty=2 sub with one running pod still surfaces a "Not Deployed" card.
+                const claimedPodIds = new Set<string | number>();
+                const undeployedSlots: Array<{
+                  sub: typeof data.subscriptions[number];
+                  slotIndex: number;
+                }> = [];
+                for (const sub of data.subscriptions || []) {
+                  const qty = Math.max(1, sub.quantity ?? 1);
+                  for (let slotIndex = 0; slotIndex < qty; slotIndex++) {
+                    const matchedPod = poolSubscriptions.find((ps) => {
+                      if (claimedPodIds.has(ps.id)) return false;
+                      const meta = podMetadata[String(ps.id)];
+                      // Primary: match by stripeSubscriptionId stored in pod metadata
+                      if (meta?.stripeSubscriptionId && meta.stripeSubscriptionId === sub.id) return true;
+                      // Secondary: monthly pod on a matching pool (billingType check)
+                      if (meta?.billingType === "monthly" && sub.poolIds?.length && ps.pool_id != null) {
+                        return sub.poolIds.map(String).includes(String(ps.pool_id));
+                      }
+                      // Fallback: match by pool ID overlap (convert both sides to strings for safety)
+                      if (sub.poolIds?.length && ps.pool_id != null) {
+                        return sub.poolIds.map(String).includes(String(ps.pool_id));
+                      }
+                      return false;
+                    });
+                    if (matchedPod) {
+                      claimedPodIds.add(matchedPod.id);
+                    } else {
+                      undeployedSlots.push({ sub, slotIndex });
                     }
-                    // Fallback: match by pool ID overlap (convert both sides to strings for safety)
-                    if (sub.poolIds?.length && ps.pool_id != null) {
-                      return sub.poolIds.map(String).includes(String(ps.pool_id));
-                    }
-                    return false;
-                  });
-                  return !hasRunningPod;
-                });
-                if (undeployedSubs.length === 0 && (data.subscriptions || []).length === 0) return null;
-                if (undeployedSubs.length === 0) return null;
+                  }
+                }
+                const undeployedSubs = undeployedSlots;
+                const hasAnySubs = (data.subscriptions || []).length > 0;
                 return (
                   <div className="mb-8">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="text-lg font-semibold text-[var(--ink)]">
                         Monthly Subscriptions
-                        <span className="ml-2 text-sm font-normal text-zinc-400">({undeployedSubs.length})</span>
+                        {undeployedSubs.length > 0 && (
+                          <span className="ml-2 text-sm font-normal text-zinc-400">({undeployedSubs.length})</span>
+                        )}
                       </h2>
                       <button
-                        onClick={() => setShowBlackwellModal(true)}
+                        onClick={() => setShowMonthlyPlansModal(true)}
                         className="text-sm text-teal-600 hover:text-teal-700 font-medium"
                       >
                         Add Subscription
                       </button>
                     </div>
+                    {undeployedSubs.length === 0 ? (
+                      <div className="bg-white rounded-2xl border border-dashed border-[var(--line)] p-5">
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <h3 className="font-medium text-[var(--ink)] mb-1">
+                              {hasAnySubs ? "All subscriptions deployed" : "Save with a monthly commitment"}
+                            </h3>
+                            <p className="text-sm text-[var(--muted)]">
+                              {hasAnySubs
+                                ? "Add another monthly GPU subscription at a discounted rate."
+                                : "Commit to a GPU monthly and pay a lower effective hourly rate than on-demand."}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => setShowMonthlyPlansModal(true)}
+                            className="shrink-0 px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white font-medium rounded-xl transition-colors text-sm"
+                          >
+                            View plans
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
                     <div className="grid md:grid-cols-2 gap-4">
-                      {undeployedSubs.map((sub) => {
+                      {undeployedSubs.map(({ sub, slotIndex }) => {
                         const periodStart = new Date(sub.currentPeriodStart * 1000);
                         const periodEnd = new Date(sub.currentPeriodEnd * 1000);
                         const priceDisplay = sub.pricePerMonthCents
                           ? `$${(sub.pricePerMonthCents / 100).toFixed(0)}/mo`
                           : "Monthly";
+                        const qty = Math.max(1, sub.quantity ?? 1);
+                        const slotLabel = qty > 1 ? ` · slot ${slotIndex + 1}/${qty}` : "";
 
                         return (
                           <div
-                            key={sub.id}
+                            key={`${sub.id}-${slotIndex}`}
                             className="bg-white rounded-2xl border-2 border-teal-200 p-5 relative overflow-hidden"
                           >
                             <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-teal-50 to-transparent rounded-bl-full" />
@@ -915,7 +1022,10 @@ export function DashboardContent() {
                                       </svg>
                                     </div>
                                     <div>
-                                      <h3 className="font-semibold text-[var(--ink)]">{sub.productName || "GPU Subscription"}</h3>
+                                      <h3 className="font-semibold text-[var(--ink)]">
+                                        {sub.productName || "GPU Subscription"}
+                                        {slotLabel && <span className="ml-1 text-xs font-normal text-[var(--muted)]">{slotLabel}</span>}
+                                      </h3>
                                       <span className="text-sm font-medium text-teal-600">{priceDisplay}</span>
                                     </div>
                                   </div>
@@ -932,7 +1042,20 @@ export function DashboardContent() {
                                 )}
                               </div>
                               <button
-                                onClick={handleLaunchGpu}
+                                onClick={() => {
+                                  if (sub.productId) {
+                                    setLaunchSubscription({
+                                      productId: sub.productId,
+                                      stripeSubscriptionId: sub.id,
+                                    });
+                                    setShowLaunchModal(true);
+                                  } else {
+                                    // Fallback: no product link — use the
+                                    // normal launch path and rely on the API
+                                    // to resolve the sub from the price ID.
+                                    handleLaunchGpu();
+                                  }
+                                }}
                                 className="w-full px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white font-medium rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
                               >
                                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -945,6 +1068,7 @@ export function DashboardContent() {
                         );
                       })}
                     </div>
+                    )}
                   </div>
                 );
               })()}
@@ -1217,6 +1341,7 @@ export function DashboardContent() {
               payments={data.recentPayments}
               billingPortalUrl={data?.billingPortalUrl}
               subscriptions={data?.subscriptions}
+              token={token!}
             />
           )}
 
@@ -1391,12 +1516,14 @@ export function DashboardContent() {
         onClose={() => {
           setShowLaunchModal(false);
           setLaunchProductId(undefined);
+          setLaunchSubscription(null);
         }}
         token={token!}
         customerEmail={data?.customer?.email}
         onSuccess={(launchInfo) => {
           setProvisioningGpu(launchInfo);
           setLaunchProductId(undefined);
+          setLaunchSubscription(null);
           const pollInterval = setInterval(() => fetchInstances(), 3000);
           setTimeout(() => clearInterval(pollInterval), 60000);
           setTimeout(() => setProvisioningGpu(null), 120000);
@@ -1411,6 +1538,8 @@ export function DashboardContent() {
         onTopup={handleTopup}
         topupLoading={topupLoading}
         initialProductId={launchProductId}
+        lockedProductId={launchSubscription?.productId}
+        stripeSubscriptionId={launchSubscription?.stripeSubscriptionId}
       />
 
       {/* Wallet Top-Up Modal */}
@@ -1453,6 +1582,13 @@ export function DashboardContent() {
       <BlackwellModal
         isOpen={showBlackwellModal}
         onClose={() => setShowBlackwellModal(false)}
+        customerEmail={data?.customer?.email}
+      />
+
+      {/* Monthly plans picker — lists all active monthly products */}
+      <MonthlyPlansModal
+        isOpen={showMonthlyPlansModal}
+        onClose={() => setShowMonthlyPlansModal(false)}
         customerEmail={data?.customer?.email}
       />
 

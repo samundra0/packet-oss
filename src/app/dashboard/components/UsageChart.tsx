@@ -47,6 +47,9 @@ export function UsageChart({ transactions }: UsageChartProps) {
   }, [transactions]);
 
   const maxSpend = Math.max(...chartData.map((d) => d.spend), 0.5);
+  // Width needed to fit the largest Y-axis label (e.g. "$10000") without clipping.
+  // ~8px per character at 11px font size, plus 16px for the "$" prefix and right padding.
+  const yAxisWidth = Math.max(40, String(Math.ceil(maxSpend * 1.2)).length * 8 + 16);
   const hasData = chartData.some(d => d.spend > 0);
 
   if (!hasData) {
@@ -59,7 +62,7 @@ export function UsageChart({ transactions }: UsageChartProps) {
 
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+      <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
         <defs>
           <linearGradient id="spendGradient" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#f43f5e" stopOpacity={0.2} />
@@ -79,7 +82,7 @@ export function UsageChart({ transactions }: UsageChartProps) {
           tickLine={false}
           tick={{ fontSize: 11, fill: "#71717a" }}
           tickFormatter={(v) => `$${v}`}
-          width={40}
+          width={yAxisWidth}
           domain={[0, Math.ceil(maxSpend * 1.2)]}
           tickCount={4}
         />

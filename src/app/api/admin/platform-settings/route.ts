@@ -5,6 +5,7 @@ import {
   getSetting,
   getSettings,
   setSetting,
+  deleteSetting,
   isSensitiveKey,
   isServiceConfigured,
   isEmailConfigured,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/settings";
 import { clearSmtpPool } from "@/lib/email/client";
 import { DEFAULT_BLOCKED_DOMAINS } from "@/lib/email-blocklist";
+import { DEFAULT_EMBARGOED_COUNTRIES } from "@/lib/embargo";
 
 function verifyAdmin(request: NextRequest) {
   const sessionToken = request.cookies.get("admin_session")?.value;
@@ -82,7 +84,24 @@ export async function GET(request: NextRequest) {
     defaultDomains: DEFAULT_BLOCKED_DOMAINS,
   };
 
-  return NextResponse.json({ services, emailBlocklist });
+  // ── Embargo settings ──
+  const [embargoEnabled, embargoCountries] = await Promise.all([
+    getSetting("embargo_enabled"),
+    getSetting("embargo_countries"),
+  ]);
+
+  let embargoList: string[] = [];
+  if (embargoCountries) {
+    try { embargoList = JSON.parse(embargoCountries); } catch { /* malformed, return empty */ }
+  }
+
+  const embargo = {
+    enabled: embargoEnabled === "true",
+    countries: embargoList,
+    defaultCountries: DEFAULT_EMBARGOED_COUNTRIES,
+  };
+
+  return NextResponse.json({ services, emailBlocklist, embargo });
 }
 
 /**
@@ -96,6 +115,28 @@ export async function PUT(request: NextRequest) {
   }
 
   const body = await request.json();
+
+  // ── Handle embargo settings updates ──
+  if (body.embargo !== undefined) {
+    const { enabled, countries } = body.embargo as { enabled?: boolean; countries?: string[] };
+
+    if (enabled !== undefined) {
+      await setSetting("embargo_enabled", enabled ? "true" : "false");
+    }
+
+    if (Array.isArray(countries)) {
+      // Sanitize: uppercase, trim, deduplicate, 2-letter codes only
+      const cleaned = [...new Set(
+        countries
+          .map(c => c.toUpperCase().trim())
+          .filter(c => c.length === 2 && /^[A-Z]{2}$/.test(c))
+      )];
+      await setSetting("embargo_countries", JSON.stringify(cleaned));
+    }
+
+    clearSettingsCache();
+    return NextResponse.json({ success: true });
+  }
 
   // ── Handle email blocklist updates ──
   if (body.emailBlocklist !== undefined) {
@@ -141,8 +182,9 @@ export async function PUT(request: NextRequest) {
       continue;
     }
 
-    // Skip empty values — don't store blanks
+    // Empty value → delete the setting so it falls back to env or stays unset
     if (!value || value.trim() === "") {
+      await deleteSetting(key);
       continue;
     }
 

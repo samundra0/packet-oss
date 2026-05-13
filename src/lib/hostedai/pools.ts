@@ -3,7 +3,6 @@
  */
 
 import { hostedaiRequest, getCached, setCache, clearCache, getApiUrl, getApiKey } from "./client";
-import { recordSubscriptionLineage } from "@/lib/subscription-lineage";
 import { prisma } from "@/lib/prisma";
 import { getDefaultResourcePolicy } from "./policies";
 import { validateSSHParams } from "@/lib/ssh-validation";
@@ -611,66 +610,6 @@ export async function podAction(
   return hostedaiRequest<{ success: boolean }>("POST", "/pods/action", payload);
 }
 
-// DEPRECATED: Old restart method using unsubscribe + resubscribe
-// Use podAction() with action="restart" instead
-// Restart a GPUaaS pod subscription (unsubscribe + resubscribe)
-// Note: Ephemeral storage will be reset, but persistent storage will be preserved if provided
-export async function restartPoolSubscription(
-  subscriptionId: string | number,
-  teamId: string,
-  poolId: string | number,
-  vgpus: number = 1,
-  instanceTypeId: string,
-  ephemeralStorageBlockId: string,
-  imageUuid?: string,
-  persistentStorageBlockId?: string
-): Promise<{ subscription_id: string }> {
-  // Unsubscribe first
-  console.log("Restarting: unsubscribing from", subscriptionId);
-  await unsubscribeFromPool(subscriptionId, teamId, poolId);
-
-  // Wait for unsubscribe to complete
-  const maxAttempts = 60;
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const subs = await getPoolSubscriptions(teamId);
-    const existingSub = subs.find(s =>
-      String(s.id) === String(subscriptionId) ||
-      String(s.pool_id) === String(poolId)
-    );
-    if (!existingSub) {
-      console.log("Unsubscribe complete after", i + 1, "seconds");
-      break;
-    }
-    if (existingSub.status === "un_subscribing") {
-      continue;
-    }
-  }
-
-  // Resubscribe with same settings (including persistent storage if provided)
-  console.log("Restarting: resubscribing to pool", poolId, "with persistent storage:", persistentStorageBlockId || "none");
-  const newSubscription = await subscribeToPool({
-    pool_id: String(poolId),
-    team_id: teamId,
-    vgpus,
-    instance_type_id: instanceTypeId,
-    ephemeral_storage_block_id: ephemeralStorageBlockId,
-    persistent_storage_block_id: persistentStorageBlockId,
-    image_uuid: imageUuid,
-  });
-
-  // Record the lineage so metrics can be aggregated across restarts
-  // This allows the dashboard to show data as though it's the same pod
-  await recordSubscriptionLineage({
-    teamId,
-    previousSubscriptionId: String(subscriptionId),
-    newSubscriptionId: newSubscription.subscription_id,
-    poolId: String(poolId),
-    reason: "restart",
-  });
-
-  return newSubscription;
-}
 
 // Reimage a GPUaaS pod subscription (change image)
 export async function reimagePoolSubscription(
@@ -1302,77 +1241,3 @@ export async function subscribeWithFallback(params: {
   }
 }
 
-// ============================================
-// Storage Management for Pool Subscriptions
-// ============================================
-
-export interface AddStorageToSubscriptionParams {
-  subscriptionId: string | number;
-  teamId: string;
-  persistentStorageBlockId: string;
-}
-
-export interface StoragePricingInfo {
-  hourly_cost: number;
-  monthly_cost?: number;
-  currency: string;
-  storage_block?: {
-    id: string;
-    name: string;
-    size_gb: number;
-  };
-}
-
-// Get pricing for adding persistent storage to a pool subscription
-export async function getPoolSubscriptionStoragePricing(
-  regionId: string,
-  teamId: string,
-  storageBlockId: string
-): Promise<StoragePricingInfo> {
-  // Get storage block details to calculate pricing
-  const storageBlocks = await getPoolPersistentStorageBlocks(regionId, teamId);
-  const block = storageBlocks.find(b => b.id === storageBlockId);
-
-  if (!block) {
-    throw new Error("Storage block not found");
-  }
-
-  // Return pricing info (price_per_hour comes from the storage block)
-  return {
-    hourly_cost: block.price_per_hour || 0,
-    monthly_cost: (block.price_per_hour || 0) * 24 * 30,
-    currency: "USD",
-    storage_block: {
-      id: block.id,
-      name: block.name,
-      size_gb: block.size_gb || 0,
-    },
-  };
-}
-
-// Add persistent storage to a pool subscription
-// Note: This requires unsubscribing and resubscribing with the new storage config
-// The restartPoolSubscription function already handles this
-export async function addStorageToPoolSubscription(
-  params: AddStorageToSubscriptionParams & {
-    poolId: string | number;
-    vgpus?: number;
-    instanceTypeId: string;
-    ephemeralStorageBlockId: string;
-    imageUuid?: string;
-  }
-): Promise<{ subscription_id: string }> {
-  console.log("Adding persistent storage to subscription:", params.subscriptionId);
-
-  // Use the restart function which unsubscribes and resubscribes with new config
-  return restartPoolSubscription(
-    params.subscriptionId,
-    params.teamId,
-    params.poolId,
-    params.vgpus || 1,
-    params.instanceTypeId,
-    params.ephemeralStorageBlockId,
-    params.imageUuid,
-    params.persistentStorageBlockId
-  );
-}

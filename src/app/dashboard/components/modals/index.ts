@@ -12,3 +12,4 @@ export { TransactionsModal } from "./TransactionsModal";
 export { BlackwellModal } from "./BlackwellModal";
 export { WelcomeModal } from "./WelcomeModal";
 export { BillingTypeModal } from "./BillingTypeModal";
+export { MonthlyPlansModal } from "./MonthlyPlansModal";

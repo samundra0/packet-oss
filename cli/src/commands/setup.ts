@@ -261,23 +261,25 @@ export const setupCommand = new Command("setup")
         `/instances/${id}/connection`
       );
 
-      const pod = connInfo.pods?.find((p) => p.pod_status === "Running" && p.ssh);
-      if (!pod?.ssh) {
+      const conn = connInfo.connection;
+      if (!conn?.ssh_command) {
         spinner.fail("Instance not ready for SSH");
         console.log(chalk.gray("\n  The instance must be running. Check: gpu-cloud ps\n"));
         process.exit(1);
       }
 
       // Parse SSH command string
-      const sshMatch = pod.ssh.command.match(/ssh\s+(\S+)@(\S+)\s+-p\s+(\d+)/);
+      const sshMatch = conn.ssh_command.match(/ssh\s+(?:-p\s+(\d+)\s+)?(\S+)@(\S+)(?:\s+-p\s+(\d+))?/);
       if (!sshMatch) {
         spinner.fail("Could not parse SSH connection info");
-        console.log(chalk.gray(`\n  SSH command: ${pod.ssh.command}\n`));
+        console.log(chalk.gray(`\n  SSH command: ${conn.ssh_command}\n`));
         process.exit(1);
       }
-      const [, user, host, portStr] = sshMatch;
-      const port = parseInt(portStr, 10);
-      const password = pod.ssh.password;
+      // ssh -p PORT user@host
+      const port = parseInt(sshMatch[1] || sshMatch[4], 10);
+      const user = sshMatch[2];
+      const host = sshMatch[3];
+      const password = conn.password;
 
       // Base64-encode script to avoid shell escaping issues
       const scriptB64 = Buffer.from(setupPreset.script).toString("base64");
@@ -287,9 +289,7 @@ export const setupCommand = new Command("setup")
 
       // Run via sshpass + ssh
       await new Promise<void>((resolve, reject) => {
-        const args = [
-          "-p", password,
-          "ssh",
+        const sshArgs = [
           "-o", "StrictHostKeyChecking=no",
           "-o", "UserKnownHostsFile=/dev/null",
           "-o", "LogLevel=ERROR",
@@ -298,7 +298,11 @@ export const setupCommand = new Command("setup")
           remoteCmd,
         ];
 
-        const child = spawn("sshpass", args, { stdio: ["ignore", "pipe", "pipe"] });
+        const args = password
+          ? ["-p", password, "ssh", ...sshArgs]
+          : ["ssh", ...sshArgs];
+
+        const child = spawn(password ? "sshpass" : "ssh", args, { stdio: ["ignore", "pipe", "pipe"] });
 
         let output = "";
 

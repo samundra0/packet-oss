@@ -147,6 +147,22 @@ export function VouchersTab() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // MySQL INT max — Voucher.creditCents/minTopupCents are Int columns
+    const MAX_CENTS = 2_147_483_647;
+    if (!Number.isFinite(form.creditCents) || form.creditCents < 1) {
+      alert("Credit amount must be a positive number");
+      return;
+    }
+    if (form.creditCents > MAX_CENTS) {
+      alert(`Credit amount too large (max $${(MAX_CENTS / 100).toLocaleString()})`);
+      return;
+    }
+    if (form.minTopupCents != null && form.minTopupCents > MAX_CENTS) {
+      alert(`Min top-up too large (max $${(MAX_CENTS / 100).toLocaleString()})`);
+      return;
+    }
+
     setSaving(true);
 
     try {
@@ -429,6 +445,8 @@ export function VouchersTab() {
                     value={form.creditCents / 100}
                     onChange={(e) => setForm({ ...form, creditCents: parseFloat(e.target.value) * 100 })}
                     min="1"
+                    max="21474836"
+                    step="0.01"
                     className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg"
                     required
                   />
@@ -442,6 +460,9 @@ export function VouchersTab() {
                     value={form.minTopupCents ? form.minTopupCents / 100 : ""}
                     onChange={(e) => setForm({ ...form, minTopupCents: e.target.value ? parseFloat(e.target.value) * 100 : null })}
                     placeholder="No minimum"
+                    min="0"
+                    max="21474836"
+                    step="0.01"
                     className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg"
                   />
                 </div>

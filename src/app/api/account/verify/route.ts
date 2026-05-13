@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
-import { verifyCustomerToken } from "@/lib/customer-auth";
+import { verifyCustomerToken, type CustomerTokenPayload } from "@/lib/customer-auth";
 import { resolveAllTeamsForEmail } from "@/lib/customer-resolver";
 import { getWalletTransactions, formatCents, formatCentsForUser } from "@/lib/wallet";
 import { createOneTimeLogin, ensureRoles } from "@/lib/hostedai";
@@ -10,6 +10,8 @@ import { logAccountLogin, logTeamMemberJoined } from "@/lib/activity";
 import { recordFirstLogin } from "@/lib/lifecycle";
 import { getTeamMemberByEmail, acceptTeamInvite, isTeamMember } from "@/lib/team-members";
 import { prisma } from "@/lib/prisma";
+import { getSetting } from "@/lib/settings";
+import { findSuspension } from "@/lib/customer-suspension";
 import Stripe from "stripe";
 
 export async function POST(request: NextRequest) {
@@ -49,6 +51,17 @@ export async function POST(request: NextRequest) {
     const teamId = customer.metadata?.hostedai_team_id;
     const monthlyCustomerIds = resolved.monthlyCustomerIds;
     console.log(`[Verify] Resolved ${payload.email}: primary=${customer.id}, teams=[${resolved.allTeamIds.join(",")}], monthly=[${monthlyCustomerIds.join(",")}]`);
+
+    // Block suspended customers (fraud lockout). Checks all linked customer
+    // IDs since one suspended account locks the whole email out.
+    const suspension = await findSuspension(resolved.allCustomerIds);
+    if (suspension) {
+      console.warn(`[Verify] Blocked suspended customer ${payload.email} (${customer.id})`);
+      return NextResponse.json(
+        { error: "This account has been suspended. Contact support." },
+        { status: 403 }
+      );
+    }
 
     // Get wallet balance for hourly customers
     let wallet = null;
@@ -118,6 +131,7 @@ export async function POST(request: NextRequest) {
       poolIds: string[];
       pricePerMonthCents: number | null;
       stripePriceId: string | null;
+      quantity: number;
     }> = [];
 
     {
@@ -141,16 +155,26 @@ export async function POST(request: NextRequest) {
           cancelAtPeriodEnd: firstSub.cancel_at_period_end,
         };
 
-        // Collect all price IDs from subscriptions to batch-lookup GpuProducts
+        // Collect price and product IDs from subscriptions. We match by both so
+        // grandfathered subscriptions (whose price no longer matches the current
+        // GpuProduct.stripePriceId) still resolve to a product via stripeProductId.
         const priceIds = subs.data
           .map((s) => s.items?.data?.[0]?.price?.id)
           .filter((id): id is string => !!id);
+        const productIds = subs.data
+          .map((s) => {
+            const prod = s.items?.data?.[0]?.price?.product;
+            return typeof prod === "string" ? prod : prod?.id;
+          })
+          .filter((id): id is string => !!id);
 
-        // Look up matching GpuProducts by stripePriceId (only monthly products)
-        const matchingProducts = priceIds.length > 0
+        const matchingProducts = priceIds.length > 0 || productIds.length > 0
           ? await prisma.gpuProduct.findMany({
               where: {
-                stripePriceId: { in: priceIds },
+                OR: [
+                  { stripePriceId: { in: priceIds } },
+                  { stripeProductId: { in: productIds } },
+                ],
                 billingType: "monthly",
                 active: true,
               },
@@ -158,14 +182,26 @@ export async function POST(request: NextRequest) {
           : [];
 
         const productByPriceId = new Map(
-          matchingProducts.map((p) => [p.stripePriceId, p])
+          matchingProducts
+            .filter((p) => p.stripePriceId)
+            .map((p) => [p.stripePriceId as string, p])
+        );
+        const productByProductId = new Map(
+          matchingProducts
+            .filter((p) => p.stripeProductId)
+            .map((p) => [p.stripeProductId as string, p])
         );
 
         // Build enriched subscriptions array
         subscriptions = subs.data.map((sub) => {
           const item = sub.items?.data?.[0];
           const priceId = item?.price?.id || null;
-          const product = priceId ? productByPriceId.get(priceId) : undefined;
+          const productIdRef = typeof item?.price?.product === "string"
+            ? item.price.product
+            : item?.price?.product?.id || null;
+          const product =
+            (priceId ? productByPriceId.get(priceId) : undefined) ??
+            (productIdRef ? productByProductId.get(productIdRef) : undefined);
 
           let poolIds: string[] = [];
           if (product?.poolIds) {
@@ -187,6 +223,7 @@ export async function POST(request: NextRequest) {
             poolIds,
             pricePerMonthCents: product?.pricePerMonthCents ?? null,
             stripePriceId: priceId,
+            quantity: item?.quantity ?? 1,
           };
         });
       }
@@ -213,7 +250,20 @@ export async function POST(request: NextRequest) {
 
     // ── Parallel fetch: OTL + billing portal + 2FA ──
     const verifyRoles = await ensureRoles();
-    const [otlResult, portalSession, twoFactorStatus] = await Promise.all([
+    // TOS version check (runs in parallel, fail-closed: if query fails, gate stays up)
+    const tosVersionPromise = getSetting("TOS_VERSION").then(async (ver) => {
+      if (!ver) return { version: null, accepted: true }; // Kill switch: no version = no gate
+      const acceptance = await prisma.tosAcceptance.findFirst({
+        where: { stripeCustomerId: customer.id, tosVersion: ver },
+        select: { id: true },
+      });
+      return { version: ver, accepted: !!acceptance };
+    }).catch(() => {
+      // Fail-closed: DB error means we can't confirm acceptance, gate stays up
+      return { version: "unknown", accepted: false };
+    });
+
+    const [otlResult, portalSession, twoFactorStatus, tosResult] = await Promise.all([
       teamId
         ? createOneTimeLogin({
             email: payload.email,
@@ -230,6 +280,7 @@ export async function POST(request: NextRequest) {
         return_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`,
       }),
       getTwoFactorStatus(payload.email),
+      tosVersionPromise,
     ]);
 
     const gpuDashboardUrl = otlResult?.url || null;
@@ -263,14 +314,32 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Check if this is an admin bypass token (skipTwoFactor flag in JWT)
-    const skipTwoFactor = payload.skipTwoFactor === true;
+    // Check if 2FA can be skipped:
+    // - Admin bypass token (skipTwoFactor flag from "Login As" feature)
+    // - Token already carries twoFactorVerified from a prior TOTP check
+    const skipTwoFactor = payload.skipTwoFactor === true || payload.twoFactorVerified === true;
 
     // Log customer login to admin activity
     logCustomerLogin(payload.email, customer.id, !isOwner).catch(() => {});
 
-    // Log to customer activity
-    logAccountLogin(customer.id, payload.email, !isOwner).catch(() => {});
+    // Log to customer activity — skip for admin "login as" sessions so customers
+    // don't see admin impersonation events in their own activity feed.
+    // Deduplicate using the token's iat: only log once per token issuance, not on
+    // every page refresh (verify is called on every dashboard load, not just login).
+    if (!skipTwoFactor) {
+      const tokenIat = new Date(((payload as CustomerTokenPayload & { iat: number }).iat || 0) * 1000);
+      const alreadyLogged = await prisma.activityEvent.findFirst({
+        where: {
+          customerId: customer.id,
+          type: "account_login",
+          createdAt: { gte: tokenIat },
+        },
+        select: { id: true },
+      });
+      if (!alreadyLogged) {
+        logAccountLogin(customer.id, payload.email, !isOwner).catch(() => {});
+      }
+    }
 
     // Track lifecycle milestone (first login)
     recordFirstLogin(customer.id).catch(() => {});
@@ -302,6 +371,10 @@ export async function POST(request: NextRequest) {
       bareMetalEnabled: customerSettings?.bareMetalEnabled ?? false,
       twoFactor: twoFactorStatus, // 2FA status for the user
       skipTwoFactor, // Admin bypass flag
+      tosConsent: {
+        required: !tosResult.accepted,
+        currentVersion: tosResult.version,
+      },
     });
   } catch (error) {
     console.error("Account verify error:", error);

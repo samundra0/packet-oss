@@ -3,6 +3,7 @@ import { getStripe } from "@/lib/stripe";
 import { getSharedVolumes, getPoolSubscriptions, deleteSharedVolume } from "@/lib/hostedai";
 import { checkAndRefillWallet, WALLET_CONFIG } from "@/lib/wallet";
 import { getStoragePricePerGBHourCents, getStoppedInstanceRatePercent } from "@/lib/pricing";
+import { computeStorageCharge } from "@/lib/storage-billing";
 import { getProductByPoolId } from "@/lib/products";
 import { prisma } from "@/lib/prisma";
 import { sendNegativeBalanceShutdownEmail } from "@/lib/email";
@@ -494,34 +495,65 @@ export async function POST(request: NextRequest) {
           }
 
           if (totalStorageGb > 0) {
+            // Sub-cent accumulator: carry fractional cents forward across intervals,
+            // only post a Stripe charge when the running balance crosses 1¢. This
+            // removes the $14.60/mo minimum-charge floor caused by Math.round on
+            // each 30-min interval. See PA-159 and src/lib/storage-billing.ts.
             const hoursInInterval = BILLING_INTERVAL_MINUTES / 60;
-            const storageCostCents = Math.round(totalStorageGb * storagePriceCentsPerGBHour * hoursInInterval);
+            const meta = updatedSyncCustomer.metadata ?? {};
+            const prevPendingCents = parseFloat(meta.storage_pending_cents ?? "") || 0;
+            const prevPendingGbHours = parseFloat(meta.storage_pending_gb_hours ?? "") || 0;
+            const prevWindowStart = parseInt(meta.storage_window_started_at ?? "", 10);
+            const windowStartedAt = Number.isFinite(prevWindowStart) && prevWindowStart > 0
+              ? prevWindowStart
+              : nowSec - BILLING_INTERVAL_MINUTES * 60;
 
-            if (storageCostCents > 0) {
-              const storageDesc = `Storage: ${totalStorageGb}GB @ $${(storagePriceCentsPerGBHour / 100).toFixed(4)}/GB/hr`;
+            const result = computeStorageCharge(
+              { pendingCents: prevPendingCents, pendingGbHours: prevPendingGbHours, windowStartedAt },
+              totalStorageGb,
+              storagePriceCentsPerGBHour,
+              hoursInInterval,
+              nowSec,
+            );
+
+            // Persist accumulator state (always, charge or not).
+            const persisted = await stripe.customers.update(customerId, {
+              metadata: {
+                ...meta,
+                storage_pending_cents: result.newState.pendingCents.toFixed(8),
+                storage_pending_gb_hours: result.newState.pendingGbHours.toFixed(4),
+                storage_window_started_at: result.newState.windowStartedAt.toString(),
+              },
+            });
+            cacheCustomer(persisted as Stripe.Customer).catch(() => {});
+
+            if (result.charge) {
               await stripe.customers.createBalanceTransaction(customerId, {
-                amount: storageCostCents,
+                amount: result.charge.cents,
                 currency: "usd",
-                description: storageDesc,
+                description: result.charge.description,
                 metadata: {
                   storage_gb: totalStorageGb.toString(),
                   billing_type: "storage",
+                  window_started_at: result.charge.windowStartedAt.toString(),
+                  window_ended_at: result.charge.windowEndedAt.toString(),
+                  avg_gb: result.charge.avgGb.toString(),
                 },
               });
 
-              // Log storage charge locally
+              const windowMinutes = Math.max(1, Math.round((result.charge.windowEndedAt - result.charge.windowStartedAt) / 60));
               await prisma.walletTransaction.create({
                 data: {
                   stripeCustomerId: customerId,
                   teamId,
                   type: "storage",
-                  amountCents: storageCostCents,
-                  description: storageDesc,
-                  billingMinutes: BILLING_INTERVAL_MINUTES,
+                  amountCents: result.charge.cents,
+                  description: result.charge.description,
+                  billingMinutes: windowMinutes,
                 },
               }).catch((e) => console.error(`[Sync] Failed to log storage WalletTransaction for ${customerId}:`, e));
 
-              storageResults.push({ customerId, storageGb: totalStorageGb, storageCostCents });
+              storageResults.push({ customerId, storageGb: totalStorageGb, storageCostCents: result.charge.cents });
             }
           }
         } catch (storageErr) {
@@ -657,92 +689,12 @@ export async function POST(request: NextRequest) {
 
           const terminatedPods: string[] = [];
           const deletedVolumes: number[] = [];
-          const preservedVolumeIds = new Set<number>(); // Volumes kept for auto-preserved snapshots
-
-          // === AUTO-PRESERVE: Create snapshots before termination ===
-          // This saves pod configuration + links to persistent storage so the user
-          // can re-deploy when they top up their wallet. Snapshots expire after 7 days.
-          const PRESERVATION_DAYS = 7;
-          const expiresAt = new Date(Date.now() + PRESERVATION_DAYS * 24 * 60 * 60 * 1000);
 
           try {
             const subscriptions = await getCachedSubs(teamId);
 
-            // First pass: create auto-preserved snapshots for each active pod
-            for (const sub of subscriptions) {
-              if (sub.status === "subscribed" || sub.status === "active" || sub.status === "subscribing") {
-                try {
-                  // Get pod metadata for display name
-                  const podMeta = await prisma.podMetadata.findUnique({
-                    where: { subscriptionId: String(sub.id) },
-                  });
+            // Terminate all active pods
 
-                  // Get HuggingFace deployment if any
-                  const hfDeploy = await prisma.huggingFaceDeployment.findFirst({
-                    where: { subscriptionId: String(sub.id) },
-                  }).catch(() => null);
-
-                  // Determine storage info from subscription
-                  const sharedVolumes = sub.storage_details?.shared_volumes || [];
-                  const firstVol = sharedVolumes[0];
-                  const volumeId = firstVol?.id ? Number(firstVol.id) : null;
-                  const volumeName = firstVol?.name || null;
-                  const volumeSize = firstVol?.size_in_gb || firstVol?.size_gb || null;
-                  const hasStorage = sharedVolumes.length > 0 || (sub.storage_details?.persistent_storage_gb || 0) > 0;
-
-                  // If there's a persistent volume, mark it for preservation
-                  if (volumeId && !isNaN(volumeId)) {
-                    preservedVolumeIds.add(volumeId);
-                  }
-
-                  // Also check for volumes via the API if subscription has persistent_storage_gb but no shared_volumes
-                  if (!volumeId && (sub.storage_details?.persistent_storage_gb || 0) > 0) {
-                    try {
-                      const teamVols = await getCachedVolumes(teamId);
-                      const inUseVols = teamVols.filter(v => v.status === "IN_USE");
-                      for (const vol of inUseVols) {
-                        preservedVolumeIds.add(vol.id);
-                      }
-                    } catch { /* continue without */ }
-                  }
-
-                  const displayName = podMeta?.displayName || sub.pool_name || `Pod ${sub.id}`;
-                  const poolId = String(sub.pool_id);
-                  const vgpus = Math.max(1, Math.ceil(sub.per_pod_info?.vgpu_count || 1));
-                  const imageUuid = sub.per_pod_info?.image_uuid || null;
-
-                  await prisma.podSnapshot.create({
-                    data: {
-                      stripeCustomerId: customerId,
-                      displayName: `${displayName} (auto-saved)`,
-                      notes: `Automatically preserved on ${new Date().toLocaleDateString()} due to insufficient balance. Top up your wallet to re-deploy. Expires in ${PRESERVATION_DAYS} days.`,
-                      snapshotType: hasStorage ? "full" : "template",
-                      originalSubscriptionId: String(sub.id),
-                      poolId,
-                      poolName: sub.pool_name || null,
-                      vgpus,
-                      imageUuid,
-                      persistentVolumeId: volumeId,
-                      persistentVolumeName: volumeName,
-                      persistentVolumeSize: volumeSize,
-                      autoPreserved: true,
-                      expiresAt,
-                      hfItemId: hfDeploy?.hfItemId || null,
-                      hfItemType: hfDeploy?.hfItemType || null,
-                      hfItemName: hfDeploy?.hfItemName || null,
-                      deployScript: hfDeploy?.deployScript || null,
-                    },
-                  });
-
-                  console.log(`[Sync] Auto-preserved snapshot for pod ${sub.id} (${displayName}), expires ${expiresAt.toISOString()}`);
-                } catch (snapErr) {
-                  // Snapshot creation failure must NOT prevent termination
-                  console.error(`[Sync] Failed to auto-preserve pod ${sub.id} (non-blocking):`, snapErr);
-                }
-              }
-            }
-
-            // Second pass: terminate all pods
             // HAI 2.2: use deleteInstance instead of dead unsubscribeFromPool
             for (const sub of subscriptions) {
               if (sub.status === "subscribed" || sub.status === "active" || sub.status === "subscribing") {
@@ -769,10 +721,6 @@ export async function POST(request: NextRequest) {
               const volumes = await getCachedVolumes(teamId);
               const teamVolumes = volumes.filter(v => v.team_id === teamId);
               for (const vol of teamVolumes) {
-                if (preservedVolumeIds.has(vol.id)) {
-                  console.log(`[Sync] Preserving storage volume ${vol.id} (${vol.name}) — referenced by auto-preserved snapshot, expires ${expiresAt.toISOString()}`);
-                  continue;
-                }
                 try {
                   console.log(`[Sync] Deleting storage volume ${vol.id} (${vol.name}) for negative balance customer ${customerId}`);
                   await deleteSharedVolume(vol.id);

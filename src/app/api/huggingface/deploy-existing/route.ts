@@ -1,102 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
-import { getUnifiedInstances, getInstanceCredentials } from "@/lib/hostedai";
+import { getUnifiedInstances } from "@/lib/hostedai";
 import {
   generateDeployScript,
   getDefaultPort,
 } from "@/lib/huggingface-deploy-scripts";
 import { getCatalogItem, DeployScriptType } from "@/lib/huggingface-catalog";
 import { logActivity } from "@/lib/activity";
-import { spawn } from "child_process";
 import { prisma } from "@/lib/prisma";
-import { validateSSHParams } from "@/lib/ssh-validation";
-
-/**
- * Execute a script on a remote pod via SSH
- */
-async function executeRemoteScript(
-  host: string,
-  port: number,
-  username: string,
-  password: string,
-  script: string,
-  timeoutMs: number = 300000 // 5 minutes for model deployment
-): Promise<{ success: boolean; output: string; exitCode: number }> {
-  // Validate SSH parameters to prevent command injection
-  validateSSHParams({ host, port, username });
-
-  return new Promise((resolve) => {
-    const encodedScript = Buffer.from(script).toString("base64");
-    const remoteCommand = `echo '${encodedScript}' | base64 -d | bash`;
-
-    // Use sshpass with SSHPASS env var (-e) to safely handle special characters in password
-    const args = [
-      "-e",  // Use SSHPASS environment variable
-      "ssh",
-      "-o",
-      "StrictHostKeyChecking=no",
-      "-o",
-      "UserKnownHostsFile=/dev/null",
-      "-o",
-      "LogLevel=ERROR",
-      "-o",
-      "ConnectTimeout=20",
-      "-p",
-      String(port),
-      `${username}@${host}`,
-      remoteCommand,
-    ];
-
-    let stdout = "";
-    let stderr = "";
-
-    const proc = spawn("sshpass", args, {
-      timeout: timeoutMs,
-      env: { ...process.env, SSHPASS: password },
-    });
-
-    proc.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", (code) => {
-      resolve({
-        success: code === 0,
-        output: stdout + (stderr ? `\nSTDERR: ${stderr}` : ""),
-        exitCode: code || 0,
-      });
-    });
-
-    proc.on("error", (err) => {
-      resolve({
-        success: false,
-        output: `Failed to execute: ${err.message}`,
-        exitCode: -1,
-      });
-    });
-  });
-}
-
-/**
- * Parse SSH host from command like "ssh root@192.168.1.1 -p 22"
- */
-function parseSSHHost(cmd: string): string {
-  const match = cmd.match(/@([^\s]+)/);
-  return match ? match[1] : "localhost";
-}
+import {
+  executeRemoteScript,
+  getSSHCredentials,
+} from "@/lib/huggingface-status";
 
 /**
  * POST /api/huggingface/deploy-existing
  *
- * Deploy a HuggingFace model to an existing GPU subscription
+ * Deploy a HuggingFace model to an existing running GPU instance.
+ * Uses HAI 2.2 unified instances and instance credentials API.
  *
  * Body:
  * - hfItemId: Catalog item ID or HF Hub ID
- * - subscriptionId: Existing subscription ID
+ * - subscriptionId: HAI 2.2 instance ID
  * - hfToken: Optional HF token for gated models
  */
 export async function POST(request: NextRequest) {
@@ -113,7 +38,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { hfItemId, subscriptionId, hfToken, openWebUI, netdata } = body;
+    const { hfItemId, subscriptionId: instanceId, hfToken, openWebUI, netdata } = body;
 
     if (!hfItemId) {
       return NextResponse.json(
@@ -122,7 +47,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!subscriptionId) {
+    if (!instanceId) {
       return NextResponse.json(
         { error: "subscriptionId is required" },
         { status: 400 }
@@ -160,7 +85,7 @@ export async function POST(request: NextRequest) {
 
     // HAI 2.2: Verify instance belongs to this team
     const unifiedResult = await getUnifiedInstances(teamId);
-    const instance = unifiedResult.items?.find(i => i.id === subscriptionId);
+    const instance = unifiedResult.items?.find(i => i.id === instanceId);
 
     if (!instance) {
       return NextResponse.json(
@@ -176,20 +101,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get SSH credentials via HAI 2.2 credentials API
-    let connectionInfo: { host: string; port: number; username: string; password: string };
-    try {
-      const creds = await getInstanceCredentials(subscriptionId);
-      if (!creds.ip || !creds.port || !creds.username || !creds.password) {
-        return NextResponse.json(
-          { error: "SSH credentials not available for this instance" },
-          { status: 400 }
-        );
-      }
-      connectionInfo = { host: creds.ip, port: creds.port, username: creds.username, password: creds.password };
-    } catch {
+    // HAI 2.2: Get SSH credentials via instance credentials API
+    const creds = await getSSHCredentials(instanceId);
+    if (!creds) {
       return NextResponse.json(
-        { error: "Could not retrieve SSH credentials for this instance" },
+        { error: "SSH credentials not available for this instance. It may still be provisioning." },
         { status: 400 }
       );
     }
@@ -197,8 +113,8 @@ export async function POST(request: NextRequest) {
     const gpuCount = 1;
 
     // Generate and run deploy script
-    console.log(`[HF Deploy] Running deploy script for ${hfItemId} on existing subscription ${subscriptionId} with ${gpuCount} GPUs`);
-    console.log(`[HF Deploy] SSH: ${connectionInfo.username}@${connectionInfo.host}:${connectionInfo.port}`);
+    console.log(`[HF Deploy] Running deploy script for ${hfItemId} on instance ${instanceId} with ${gpuCount} GPUs`);
+    console.log(`[HF Deploy] SSH: ${creds.username}@${creds.host}:${creds.port}`);
 
     const script = generateDeployScript(deployScript, {
       modelId: catalogItem?.type !== "docker" ? hfItemId : undefined,
@@ -211,10 +127,10 @@ export async function POST(request: NextRequest) {
     });
 
     const result = await executeRemoteScript(
-      connectionInfo.host,
-      connectionInfo.port,
-      connectionInfo.username,
-      connectionInfo.password,
+      creds.host,
+      creds.port,
+      creds.username,
+      creds.password,
       script
     );
 
@@ -249,20 +165,19 @@ export async function POST(request: NextRequest) {
     const isInstalling = result.output.includes("DEPLOYMENT_INSTALLING");
     const isStarted = result.output.includes("DEPLOYMENT_STARTED");
 
-    // Create or update HuggingFace deployment record in database
-    // This is needed for the dashboard to track and display deployment progress
+    // Create or update HuggingFace deployment record
     const servicePort = getDefaultPort(deployScript);
     const modelName = catalogItem?.name || hfItemId.split("/").pop() || hfItemId;
 
-    // Delete any existing deployment record for this subscription first
+    // Delete any existing deployment record for this instance
     await prisma.huggingFaceDeployment.deleteMany({
-      where: { subscriptionId: String(subscriptionId) },
+      where: { subscriptionId: String(instanceId) },
     });
 
     // Create new deployment record
     await prisma.huggingFaceDeployment.create({
       data: {
-        subscriptionId: String(subscriptionId),
+        subscriptionId: String(instanceId),
         stripeCustomerId: payload.customerId,
         hfItemId,
         hfItemType: catalogItem?.type || "model",
@@ -277,7 +192,7 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    console.log(`[HF Deploy] Created deployment record for ${modelName} on subscription ${subscriptionId}`);
+    console.log(`[HF Deploy] Created deployment record for ${modelName} on instance ${instanceId}`);
 
     // Log activity
     await logActivity(
@@ -285,7 +200,7 @@ export async function POST(request: NextRequest) {
       isInstalling ? "hf_deployment_installing" : "hf_deployment_running",
       `Deployed ${modelName} to existing GPU`,
       {
-        subscriptionId,
+        instanceId,
         hfItemId,
         deployScript,
         isInstalling,
@@ -305,25 +220,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: true,
         installing: true,
-        subscriptionId: String(subscriptionId),
+        subscriptionId: String(instanceId),
         message: `${featuresStr} ${features.length > 1 ? 'are' : 'is'} being installed in the background. This takes 5-10 minutes. The servers will start automatically when done.`,
         instructions: "Check progress with: tail -f ~/hf-workspace/install.log",
         servicePort,
         webUiPort: openWebUI ? 3000 : null,
         netdataPort: netdata ? 19999 : null,
-        serviceHost: connectionInfo.host,
+        serviceHost: creds.host,
         logs: result.output,
       });
     }
 
     return NextResponse.json({
       success: true,
-      subscriptionId: String(subscriptionId),
+      subscriptionId: String(instanceId),
       message: `Deployment complete! ${featuresStr} ${features.length > 1 ? 'are' : 'is'} starting up.`,
       servicePort,
       webUiPort: openWebUI ? 3000 : null,
       netdataPort: netdata ? 19999 : null,
-      serviceHost: connectionInfo.host,
+      serviceHost: creds.host,
       logs: result.output,
     });
   } catch (error) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { LaunchGPUModal } from "./LaunchGPUModal";
 
 interface App {
   slug: string;
@@ -608,141 +609,41 @@ export function AppsTab({ token, subscriptions, onRefresh }: AppsTabProps) {
         </div>
       )}
 
-      {/* Deploy Modal — Product Picker */}
-      {deployApp && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full mx-4 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <span className="text-2xl">{deployApp.icon}</span>
-                <h3 className="text-lg font-semibold">Deploy {deployApp.name}</h3>
-              </div>
-              <button onClick={closeDeployModal} className="text-zinc-400 hover:text-zinc-600 text-xl leading-none">&times;</button>
-            </div>
-
-            {loadingProducts ? (
-              <div className="flex items-center justify-center py-8 text-zinc-500 gap-2">
-                <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                <span>Loading GPU options...</span>
-              </div>
-            ) : availableProducts.length === 0 ? (
-              <div className="text-center py-8 text-zinc-500">
-                <p className="mb-2">No GPUs available right now.</p>
-                <p className="text-xs">Check back later or contact support.</p>
-              </div>
-            ) : (
-              <>
-                <p className="text-sm text-zinc-500 mb-4">Select a GPU to deploy {deployApp.name} on:</p>
-
-                {/* Product cards */}
-                <div className="grid grid-cols-2 gap-3 mb-4">
-                  {availableProducts.map(product => (
-                    <button
-                      key={product.id}
-                      onClick={() => product.available ? selectProduct(product.id) : undefined}
-                      disabled={!product.available}
-                      className={`text-left p-3 rounded-xl border-2 transition-colors ${
-                        selectedProductId === product.id
-                          ? "border-teal-500 bg-teal-50"
-                          : product.available
-                            ? "border-zinc-200 hover:border-teal-300"
-                            : "border-zinc-100 opacity-50 cursor-not-allowed"
-                      }`}
-                    >
-                      <div className="font-semibold text-sm text-zinc-900">{product.name}</div>
-                      {product.vramGb && (
-                        <div className="text-xs text-zinc-500 mt-0.5">{product.vramGb} GB VRAM</div>
-                      )}
-                      <div className="text-sm font-medium text-zinc-700 mt-1">
-                        ${(product.pricePerHourCents / 100).toFixed(2)}/hr
-                      </div>
-                      {product.available ? (
-                        <div className="flex items-center gap-1 mt-1">
-                          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />
-                          <span className="text-xs text-emerald-600">Available</span>
-                        </div>
-                      ) : (
-                        <div className="text-xs text-zinc-400 mt-1">No GPUs in stock</div>
-                      )}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Region picker */}
-                {selectedProductId && (() => {
-                  const product = availableProducts.find(p => p.id === selectedProductId);
-                  if (!product || product.regions.length === 0) return null;
-                  return (
-                    <div className="mb-4">
-                      <label className="block text-sm font-medium text-zinc-700 mb-1">Region</label>
-                      <select
-                        value={selectedRegionId || ""}
-                        onChange={e => setSelectedRegionId(Number(e.target.value))}
-                        className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg"
-                      >
-                        {product.regions.map(r => (
-                          <option key={r.id} value={r.id}>{r.region_name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  );
-                })()}
-
-                {/* Pricing summary */}
-                {selectedProductId && (() => {
-                  const product = availableProducts.find(p => p.id === selectedProductId);
-                  if (!product) return null;
-                  const prepaidCents = Math.round((30 / 60) * product.pricePerHourCents);
-                  return (
-                    <div className="text-xs text-zinc-500 mb-4 p-3 bg-zinc-50 rounded-lg space-y-1">
-                      <div>Wallet: <span className="font-medium text-zinc-700">${(walletBalanceCents / 100).toFixed(2)}</span></div>
-                      <div>First 30 min prepaid: <span className="font-medium text-zinc-700">${(prepaidCents / 100).toFixed(2)}</span></div>
-                      <div>Then billed hourly at ${(product.pricePerHourCents / 100).toFixed(2)}/hr</div>
-                    </div>
-                  );
-                })()}
-
-                {/* Error */}
-                {deployError && (
-                  <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-700">
-                    {deployError}
-                  </div>
-                )}
-
-                {/* Actions */}
-                <div className="flex gap-2">
-                  <button
-                    onClick={closeDeployModal}
-                    className="flex-1 px-3 py-2 text-sm text-zinc-600 border border-zinc-300 rounded-lg hover:bg-zinc-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleDeploy}
-                    disabled={!selectedProductId || !selectedRegionId || deploying}
-                    className="flex-1 px-3 py-2 text-sm text-white bg-teal-600 rounded-lg hover:bg-teal-700 disabled:opacity-50"
-                  >
-                    {deploying ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
-                        Deploying...
-                      </span>
-                    ) : selectedProductId ? (
-                      `Deploy — $${(availableProducts.find(p => p.id === selectedProductId)?.pricePerHourCents || 0) / 100}/hr`
-                    ) : "Select a GPU"}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
+      {/* Deploy Modal — Shared LaunchGPUModal with app deploy context */}
+      <LaunchGPUModal
+        isOpen={!!deployApp}
+        onClose={closeDeployModal}
+        token={token}
+        onSuccess={() => {
+          closeDeployModal();
+          onRefresh();
+        }}
+        onError={(msg) => setDeployError(msg)}
+        deployContext={deployApp ? {
+          type: "app",
+          title: `Deploy ${deployApp.name}`,
+          subtitle: deployApp.description,
+          modelId: deployApp.id,
+          onDeploy: async (params) => {
+            const res = await fetch("/api/apps/deploy", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                appId: deployApp.id,
+                product_id: params.product_id,
+                region_id: params.region_id,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              throw new Error(data.error || "Failed to deploy app");
+            }
+          },
+        } : undefined}
+      />
     </div>
   );
 }

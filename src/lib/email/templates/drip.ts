@@ -41,7 +41,7 @@ const DEFAULT_API_BASE_URL = getApiBaseUrl();
 // ── GPU display names + pricing (kept in sync with signup route) ──
 
 const GPU_INFO: Record<string, { name: string; price: string; vram: string }> = {
-  b200:           { name: "NVIDIA B200",               price: "$2.25/hr", vram: "180 GB HBM3e" },
+  b200:           { name: "NVIDIA B200",               price: "$3.75/hr", vram: "180 GB HBM3e" },
   h200:           { name: "NVIDIA H200",               price: "$2.49/hr", vram: "141 GB HBM3e" },
   h100:           { name: "NVIDIA H100",               price: "$2.49/hr", vram: "80 GB HBM3"   },
   "rtx-pro-6000": { name: "RTX PRO 6000",             price: "$0.66/hr", vram: "96 GB GDDR7"  },
@@ -459,11 +459,11 @@ export async function sendDripApi3(params: {
         </tr>
         <tr>
           <td style="padding: 6px 0; font-size: 14px; color: #5b6476;">NVIDIA B200</td>
-          <td style="padding: 6px 0; font-size: 14px; font-weight: 600; color: #0b0f1c; text-align: right;">$2.25/hr &middot; 180 GB</td>
+          <td style="padding: 6px 0; font-size: 14px; font-weight: 600; color: #0b0f1c; text-align: right;">$3.75/hr &middot; 180 GB</td>
         </tr>
       </table>
     `)}
-    ${emailText("$25 gets you <strong>37+ hours</strong> on an RTX PRO 6000 or <strong>11 hours</strong> on a B200. Enough to run a real workload.")}
+    ${emailText("$25 gets you <strong>37+ hours</strong> on an RTX PRO 6000 or <strong>8+ hours</strong> on a B200. Enough to run a real workload.")}
     ${emailButtonTeal("Launch a GPU", dashboardUrl, branding)}
     ${emailMuted("This credit expires in 30 days. No payment method needed. Your free API tokens are still there too.")}
     ${emailSignoff(branding)}
@@ -477,9 +477,9 @@ Just a reminder — you have $25.00 in your ${brand} wallet. It's ready to use, 
 When you need more than API calls — fine-tuning, custom model serving, or your own stack — a dedicated GPU is the next step.
 
 RTX PRO 6000: $0.66/hr, 96 GB
-NVIDIA B200: $2.25/hr, 180 GB
+NVIDIA B200: $3.75/hr, 180 GB
 
-$25 gets you 37+ hours on an RTX PRO 6000 or 11 hours on a B200.
+$25 gets you 37+ hours on an RTX PRO 6000 or 6+ hours on a B200.
 
 Launch a GPU: ${dashboardUrl}
 

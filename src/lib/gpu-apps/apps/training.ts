@@ -33,7 +33,7 @@ export const TRAINING_APPS: GpuAppDefinition[] = [
 echo "=== Installing Axolotl Fine-tuning ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y git python3-pip python3-venv > /dev/null 2>&1
+sudo apt-get install -y git python3-pip python3-venv python3-dev > /dev/null 2>&1
 
 # Clone Axolotl
 cd /opt
@@ -95,7 +95,7 @@ echo "INFO=Run: cd /opt/axolotl && source venv/bin/activate && accelerate launch
 echo "=== Installing Kohya_ss GUI ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y git python3-pip python3-venv python3-tk libgl1 libglib2.0-0 > /dev/null 2>&1
+sudo apt-get install -y git python3-pip python3-venv python3-dev python3-tk libgl1 libglib2.0-0 > /dev/null 2>&1
 
 # Clone kohya_ss
 cd /opt

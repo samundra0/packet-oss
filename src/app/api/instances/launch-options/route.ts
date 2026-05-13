@@ -1,9 +1,8 @@
 /**
- * Launch Options API — Simplified for HAI 2.2 unified instances
+ * Launch Options API — Category-based for HAI 2.2 unified instances
  *
- * Instead of fetching pools, instance types, images, storage blocks separately,
- * we call HAI's scenario-compatible-services which returns which GPU services
- * are deployable for this team. Each service maps to a GpuProduct for pricing.
+ * Returns GPU categories with nested products. Each category maps 1:1 to an HAI scenario.
+ * Per-category scenario-compatible-services checks determine product availability.
  *
  * HAI handles all compatibility: region, GPU capacity, instance types, images, storage.
  * Packet only needs to know: which products are available + wallet balance.
@@ -12,8 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { getStripe } from "@/lib/stripe";
 import { getWalletBalance } from "@/lib/wallet";
-import { getScenarioCompatibleServices, getSharedVolumes } from "@/lib/hostedai";
-import { getGpuScenarioId } from "@/lib/scenarios";
+import { getSharedVolumes } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
 import Stripe from "stripe";
 
@@ -38,16 +36,20 @@ export async function GET(request: NextRequest) {
 
     // === PARALLEL: Fetch everything we need ===
     const [
-      gpuScenarioId,
+      dbCategories,
       dbProducts,
       walletBalance,
       sharedVolumes,
       sshKeys,
     ] = await Promise.all([
-      getGpuScenarioId(),
+      prisma.gpuCategory.findMany({
+        where: { active: true },
+        orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+      }).catch(() => []),
       prisma.gpuProduct.findMany({
         where: { active: true },
         orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+        include: { categories: { select: { id: true } } },
       }),
       getWalletBalance(payload.customerId).then(w => w.availableBalance).catch(() => 0),
       getSharedVolumes(teamId).catch(() => []),
@@ -112,29 +114,8 @@ export async function GET(request: NextRequest) {
       return false;
     });
 
-    // === HAI COMPATIBILITY CHECK ===
-    // Ask HAI which services under the GPU scenario are deployable for this team
-    let compatibleServiceIds = new Set<string>();
-    try {
-      const compatible = await getScenarioCompatibleServices(gpuScenarioId, teamId);
-      // HAI may return { services: [...] } or just an array directly
-      const services = Array.isArray(compatible) ? compatible : compatible?.services;
-      if (!Array.isArray(services)) {
-        console.warn(`[LaunchOpts] Unexpected compatible-services response shape:`, JSON.stringify(compatible).slice(0, 500));
-      } else {
-        for (const svc of services) {
-          compatibleServiceIds.add(svc.id);
-        }
-      }
-      console.log(`[LaunchOpts] HAI compatible services: ${compatibleServiceIds.size} out of scenario`);
-    } catch (err) {
-      console.error("[LaunchOpts] Scenario compatibility check failed:", err);
-      // Fallback: treat all products with serviceId as available
-      // This prevents a total outage if HAI scenario API is down
-      for (const p of entitledProducts) {
-        if (p.serviceId) compatibleServiceIds.add(p.serviceId);
-      }
-    }
+    // NOTE: Compatibility checks are deferred to /api/instances/category-check
+    // Called on-demand when user selects a category in the launch modal
 
     // === BUILD PRODUCT LIST ===
     const products = entitledProducts.map(p => ({
@@ -146,32 +127,35 @@ export async function GET(request: NextRequest) {
       billingType: p.billingType,
       stripePriceId: p.stripePriceId,
       serviceId: p.serviceId,
+      categoryIds: p.categories.map((c: { id: string }) => c.id),
       displayOrder: p.displayOrder,
       active: p.active,
       featured: p.featured,
       badgeText: p.badgeText,
       vramGb: p.vramGb,
       cudaCores: p.cudaCores,
-      // HAI says this service is deployable for the team right now
-      available: p.serviceId ? compatibleServiceIds.has(p.serviceId) : false,
+      gpuFamily: p.gpuFamily ?? null,
+      // Availability checked on-demand via /api/instances/category-check
+      available: null as boolean | null,
     }));
 
-    console.log(`[LaunchOpts] Products: ${products.filter(p => p.available).length} available, ${products.filter(p => !p.available).length} unavailable, out of ${products.length} entitled`);
+    console.log(`[LaunchOpts] ${products.length} entitled products`);
 
-    // === FETCH REGIONS for available products ===
-    const { getServiceCompatibleRegions } = await import("@/lib/hostedai");
-    const productsWithRegions = await Promise.all(
-      products.map(async (p) => {
-        if (!p.available || !p.serviceId) return { ...p, regions: [] as Array<{ id: number; name: string }> };
-        try {
-          const regions = await getServiceCompatibleRegions(p.serviceId, teamId);
-          return { ...p, regions };
-        } catch (err) {
-          console.error(`[LaunchOpts] Failed to get regions for ${p.name}:`, err);
-          return { ...p, regions: [] as Array<{ id: number; name: string }> };
-        }
-      })
-    );
+    // === BUILD CATEGORIES LIST ===
+    // Only include categories that have at least one entitled product — categories
+    // with no products (e.g. B200 not yet provisioned) must not appear in the UI.
+    const categories = dbCategories
+      .map(cat => ({
+        id: cat.id,
+        name: cat.name,
+        slug: cat.slug,
+        description: cat.description,
+        displayOrder: cat.displayOrder,
+        icon: cat.icon,
+        scenarioConfigured: !!cat.scenarioId,
+        products: products.filter(p => p.categoryIds.includes(cat.id)),
+      }))
+      .filter(cat => cat.products.length > 0);
 
     // Existing shared volumes for persistent storage option
     const existingSharedVolumes = (sharedVolumes || []).map(v => ({
@@ -185,7 +169,8 @@ export async function GET(request: NextRequest) {
     }));
 
     return NextResponse.json({
-      products: productsWithRegions,
+      categories,
+      products, // flat list for backward compat
       existingSharedVolumes,
       sshKeys,
       teamId,

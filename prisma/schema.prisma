@@ -75,7 +75,7 @@ model PodMetadata {
   instanceId           String?   @unique @map("instance_id") // HostedAI 2.2 unified instance UUID
   stripeCustomerId     String    @map("stripe_customer_id")
   displayName          String?   @map("display_name")
-  notes                String?
+  notes                String?   @db.Text
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
   deployTime           DateTime? @map("deploy_time")
@@ -706,7 +706,7 @@ model ProviderCommercialTerms {
   termsType              String?         @map("terms_type")
   revenueSharePercent    Float?          @map("revenue_share_percent")
   minGuaranteedRateCents Int?            @map("min_guaranteed_rate_cents")
-  notes                  String?
+  notes                  String?         @db.Text
   effectiveFrom          DateTime        @default(now()) @map("effective_from")
   effectiveUntil         DateTime?       @map("effective_until")
   createdBy              String          @map("created_by")
@@ -741,7 +741,7 @@ model PoolSettingsOverride {
   securityMode    String?       @map("security_mode")
   priority        Int?
   maintenance     Boolean       @default(false)
-  notes           String?
+  notes           String?       @db.Text
   createdBy       String        @map("created_by")
   updatedBy       String?       @map("updated_by")
   createdAt       DateTime      @default(now()) @map("created_at")
@@ -752,29 +752,50 @@ model PoolSettingsOverride {
   @@map("pool_settings_override")
 }
 
-model GpuProduct {
-  id                 String   @id @default(cuid())
-  name               String   @unique
-  description        String?
-  billingType        String   @default("hourly") @map("billing_type") // "hourly" or "monthly"
-  pricePerHourCents  Int      @map("price_per_hour_cents")
-  pricePerMonthCents Int?     @map("price_per_month_cents")
-  stripeProductId    String?  @map("stripe_product_id")
-  stripePriceId      String?  @map("stripe_price_id")
-  poolIds            String   @default("[]") @map("pool_ids") @db.Text
-  serviceId          String?  @map("service_id") // HostedAI 2.2 service UUID for create-instance
-  displayOrder       Int      @default(0) @map("display_order")
-  active             Boolean  @default(true)
-  featured           Boolean  @default(false)
-  badgeText          String?  @map("badge_text")
-  vramGb             Int?     @map("vram_gb")
-  cudaCores          Int?     @map("cuda_cores")
-  createdBy          String?  @map("created_by")
-  updatedBy          String?  @map("updated_by")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+model GpuCategory {
+  id           String       @id @default(cuid())
+  name         String       @unique             // "H100", "B200", "L4"
+  slug         String       @unique             // "h100", "b200", "l4"
+  description  String?
+  scenarioId   String?      @map("scenario_id") // HAI scenario UUID, auto-created on category create
+  displayOrder Int          @default(0) @map("display_order")
+  active       Boolean      @default(true)
+  icon         String?                          // optional icon/image URL (reserved for future use)
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
 
-  deployableApps     GpuApp[]
+  products     GpuProduct[]
+
+  @@index([active])
+  @@index([displayOrder])
+  @@map("gpu_category")
+}
+
+model GpuProduct {
+  id                 String       @id @default(cuid())
+  name               String       @unique
+  description        String?
+  billingType        String       @default("hourly") @map("billing_type") // "hourly" or "monthly"
+  pricePerHourCents  Int          @map("price_per_hour_cents")
+  pricePerMonthCents Int?         @map("price_per_month_cents")
+  stripeProductId    String?      @map("stripe_product_id")
+  stripePriceId      String?      @map("stripe_price_id")
+  poolIds            String       @default("[]") @map("pool_ids") @db.Text
+  serviceId          String?      @map("service_id") // HostedAI 2.2 service UUID for create-instance
+  displayOrder       Int          @default(0) @map("display_order")
+  active             Boolean      @default(true)
+  featured           Boolean      @default(false)
+  badgeText          String?      @map("badge_text")
+  vramGb             Int?         @map("vram_gb")
+  cudaCores          Int?         @map("cuda_cores")
+  gpuFamily          String?      @map("gpu_family") // e.g. "H100", "A100", "B200" — kept for backward compat, redundant with categories
+  createdBy          String?      @map("created_by")
+  updatedBy          String?      @map("updated_by")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
+
+  categories     GpuCategory[]
+  deployableApps GpuApp[]
 
   @@index([active])
   @@index([displayOrder])
@@ -1002,17 +1023,22 @@ model BudgetAlert {
 }
 
 model CustomerSettings {
-  id                  String   @id @default(cuid())
-  stripeCustomerId    String   @unique @map("stripe_customer_id")
-  sessionTimeoutHours Int      @default(1) @map("session_timeout_hours") // 1-24 hours
-  pixelFactoryRpm     Int?     @map("pixel_factory_rpm") // Customer's chosen RPM for Pixel Factory (null = use admin cap)
-  bareMetalEnabled    Boolean  @default(false) @map("bare_metal_enabled")
-  tenantId            String   @default("default") @map("tenant_id")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  id                  String    @id @default(cuid())
+  stripeCustomerId    String    @unique @map("stripe_customer_id")
+  sessionTimeoutHours Int       @default(1) @map("session_timeout_hours") // 1-24 hours
+  pixelFactoryRpm     Int?      @map("pixel_factory_rpm") // Customer's chosen RPM for Pixel Factory (null = use admin cap)
+  bareMetalEnabled    Boolean   @default(false) @map("bare_metal_enabled")
+  tenantId            String    @default("default") @map("tenant_id")
+  suspended           Boolean   @default(false)
+  suspendedAt         DateTime? @map("suspended_at")
+  suspendedReason     String?   @map("suspended_reason") @db.Text
+  suspendedBy         String?   @map("suspended_by")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
 
   @@index([stripeCustomerId])
   @@index([tenantId])
+  @@index([suspended])
   @@map("customer_settings")
 }
 
@@ -1371,8 +1397,8 @@ model CampaignBanner {
 model EmailBroadcast {
   id             String    @id @default(cuid())
   subject        String
-  htmlBody       String    @map("html_body")
-  textBody       String?   @map("text_body")
+  htmlBody       String    @map("html_body") @db.LongText
+  textBody       String?   @map("text_body") @db.LongText
   useLayout      Boolean   @default(true) @map("use_layout") // wrap in emailLayout() or send raw HTML
   segmentType    String    @default("all") @map("segment_type") // all | active | pool | node | billing | product | custom
   segmentFilter  String?   @map("segment_filter") // JSON: {"poolIds":[59]}, {"billingType":"monthly"}, {"emails":["a@b.com"]}
@@ -1394,7 +1420,7 @@ model EmailBroadcast {
 model DashboardAnnouncement {
   id            String    @id @default(cuid())
   title         String
-  message       String
+  message       String    @db.Text
   displayType   String    @default("banner") @map("display_type") // banner | modal | both
   targetType    String    @default("all") @map("target_type") // all | pools
   targetPoolIds String?   @map("target_pool_ids") // JSON array of pool IDs, e.g. "[45,46,59]"
@@ -1781,4 +1807,53 @@ model AdminLoginLog {
   @@index([createdAt])
   @@index([success])
   @@map("admin_login_log")
+}
+
+model GpuWaitlist {
+  id               String   @id @default(cuid())
+  email            String
+  name             String?
+  gpu              String   // "b200", "h200", etc.
+  useCase          String?  @map("use_case")
+  expectedGpuHours String?  @map("expected_gpu_hours")
+  source           String?  // "gpu-b200-landing", etc.
+  ip               String?
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@unique([email, gpu])
+  @@index([gpu])
+  @@index([createdAt])
+  @@map("gpu_waitlist")
+}
+
+model EmbargoLog {
+  id        Int      @id @default(autoincrement())
+  timestamp DateTime @default(now())
+  ip        String   @db.VarChar(45)
+  country   String?  @db.VarChar(2)
+  action    String   @db.VarChar(10)
+  reason    String   @db.VarChar(50)
+  endpoint  String   @db.VarChar(255)
+  email     String?  @db.VarChar(255)
+  userAgent String?  @db.Text
+  cfThreat  Int?     @map("cf_threat")
+
+  @@index([timestamp])
+  @@index([country])
+  @@index([action])
+  @@map("embargo_log")
+}
+
+model TosAcceptance {
+  id               String   @id @default(cuid())
+  stripeCustomerId String   @map("stripe_customer_id")
+  tosVersion       String   @map("tos_version")
+  acceptedAt       DateTime @default(now()) @map("accepted_at")
+  ipAddress        String?  @map("ip_address")
+  userAgent        String?  @map("user_agent") @db.Text
+
+  @@unique([stripeCustomerId, tosVersion])
+  @@index([stripeCustomerId])
+  @@index([tosVersion])
+  @@map("tos_acceptance")
 }

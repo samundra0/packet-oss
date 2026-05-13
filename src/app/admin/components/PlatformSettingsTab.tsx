@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { isOSS } from "@/lib/edition";
 
 interface ServiceConfig {
@@ -15,9 +15,16 @@ interface EmailBlocklistData {
   defaultDomains: string[];
 }
 
+interface EmbargoData {
+  enabled: boolean;
+  countries: string[];
+  defaultCountries: string[];
+}
+
 interface PlatformSettingsData {
   services: Record<string, ServiceConfig>;
   emailBlocklist?: EmailBlocklistData;
+  embargo?: EmbargoData;
 }
 
 const SERVICE_KEY_LABELS: Record<string, string> = {
@@ -402,6 +409,248 @@ function SmtpTlsIndicator({ port }: { port: string }) {
   return <span className="inline-flex items-center gap-1 text-xs text-zinc-500 bg-zinc-50 px-2 py-0.5 rounded-full">Port {portNum}</span>;
 }
 
+// ── Country name resolver (uses built-in Intl API, no hardcoded map) ────────
+function getCountryName(code: string): string {
+  try {
+    const displayNames = new Intl.DisplayNames(["en"], { type: "region" });
+    return displayNames.of(code.toUpperCase()) || code;
+  } catch {
+    return code;
+  }
+}
+
+// ── All ISO 3166-1 alpha-2 country codes for the search dropdown ────────────
+const ALL_COUNTRY_CODES = [
+  "AF","AL","DZ","AS","AD","AO","AG","AR","AM","AU","AT","AZ","BS","BH","BD",
+  "BB","BY","BE","BZ","BJ","BT","BO","BA","BW","BR","BN","BG","BF","BI","KH",
+  "CM","CA","CV","CF","TD","CL","CN","CO","KM","CG","CD","CR","CI","HR","CU",
+  "CY","CZ","DK","DJ","DM","DO","EC","EG","SV","GQ","ER","EE","SZ","ET","FJ",
+  "FI","FR","GA","GM","GE","DE","GH","GR","GD","GT","GN","GW","GY","HT","HN",
+  "HU","IS","IN","ID","IR","IQ","IE","IL","IT","JM","JP","JO","KZ","KE","KI",
+  "KP","KR","KW","KG","LA","LV","LB","LS","LR","LY","LI","LT","LU","MG","MW",
+  "MY","MV","ML","MT","MH","MR","MU","MX","FM","MD","MC","MN","ME","MA","MZ",
+  "MM","NA","NR","NP","NL","NZ","NI","NE","NG","MK","NO","OM","PK","PW","PA",
+  "PG","PY","PE","PH","PL","PT","QA","RO","RU","RW","KN","LC","VC","WS","SM",
+  "ST","SA","SN","RS","SC","SL","SG","SK","SI","SB","SO","ZA","SS","ES","LK",
+  "SD","SR","SE","CH","SY","TW","TJ","TZ","TH","TL","TG","TO","TT","TN","TR",
+  "TM","TV","UG","UA","AE","GB","US","UY","UZ","VU","VE","VN","YE","ZM","ZW",
+];
+
+// ── Confirmation Dialog ─────────────────────────────────────────────────────
+function ConfirmDialog({ title, message, confirmLabel, confirmColor, onConfirm, onCancel }: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  confirmColor?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onCancel}>
+      <div className="bg-white rounded-xl shadow-xl max-w-sm w-full mx-4 p-5" onClick={e => e.stopPropagation()}>
+        <h4 className="font-semibold text-[#0b0f1c] text-sm mb-2">{title}</h4>
+        <p className="text-sm text-[#5b6476] mb-4">{message}</p>
+        <div className="flex gap-2 justify-end">
+          <button onClick={onCancel} className="px-3 py-1.5 text-sm text-[#5b6476] hover:text-[#0b0f1c] rounded-lg border border-[#e4e7ef] hover:bg-zinc-50">
+            Cancel
+          </button>
+          <button onClick={onConfirm} className={`px-3 py-1.5 text-sm text-white rounded-lg font-medium ${confirmColor || "bg-[#1a4fff] hover:bg-[#1a4fff]/90"}`}>
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Embargo Screening Section ───────────────────────────────────────────────
+function EmbargoScreeningSection({ enabled, countries, defaultCountries, message, saving, onToggle, onUpdate }: {
+  enabled: boolean;
+  countries: string[];
+  defaultCountries: string[];
+  message: { type: "success" | "error"; text: string } | null;
+  saving: boolean;
+  onToggle: (enabled: boolean) => void;
+  onUpdate: (countries: string[]) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<{ type: "add" | "remove" | "reset"; code?: string } | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  // Filter countries for dropdown: match on code or name, exclude already added
+  const filteredCountries = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return ALL_COUNTRY_CODES.filter(c => !countries.includes(c)).slice(0, 20);
+    return ALL_COUNTRY_CODES.filter(c => {
+      if (countries.includes(c)) return false;
+      if (c.toLowerCase().includes(q)) return true;
+      const name = getCountryName(c).toLowerCase();
+      return name.includes(q);
+    }).slice(0, 20);
+  }, [search, countries]);
+
+  function handleAdd(code: string) {
+    setConfirmAction({ type: "add", code });
+  }
+
+  function handleRemove(code: string) {
+    setConfirmAction({ type: "remove", code });
+  }
+
+  function handleReset() {
+    setConfirmAction({ type: "reset" });
+  }
+
+  function executeConfirm() {
+    if (!confirmAction) return;
+    if (confirmAction.type === "add" && confirmAction.code) {
+      onUpdate([...countries, confirmAction.code].sort());
+    } else if (confirmAction.type === "remove" && confirmAction.code) {
+      onUpdate(countries.filter(c => c !== confirmAction.code));
+    } else if (confirmAction.type === "reset") {
+      onUpdate([...defaultCountries].sort());
+    }
+    setConfirmAction(null);
+    setSearch("");
+    setShowDropdown(false);
+  }
+
+  return (
+    <>
+      {confirmAction && (
+        <ConfirmDialog
+          title={
+            confirmAction.type === "add" ? "Add Country to Embargo List" :
+            confirmAction.type === "remove" ? "Remove Country from Embargo List" :
+            "Reset to OFAC Defaults"
+          }
+          message={
+            confirmAction.type === "add"
+              ? `Block all signups, checkouts, and API requests from ${getCountryName(confirmAction.code!)} (${confirmAction.code})?`
+              : confirmAction.type === "remove"
+              ? `Remove ${getCountryName(confirmAction.code!)} (${confirmAction.code}) from the embargo list? Requests from this country will be allowed.`
+              : `Replace the current list with the ${defaultCountries.length} default OFAC-sanctioned countries?`
+          }
+          confirmLabel={confirmAction.type === "remove" ? "Remove" : confirmAction.type === "reset" ? "Reset" : "Add"}
+          confirmColor={confirmAction.type === "remove" ? "bg-red-600 hover:bg-red-700" : undefined}
+          onConfirm={executeConfirm}
+          onCancel={() => setConfirmAction(null)}
+        />
+      )}
+
+      <div className="bg-white border border-[#e4e7ef] rounded-lg overflow-hidden">
+        <div className="p-5">
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center gap-3">
+              <div className={`w-2.5 h-2.5 rounded-full ${enabled ? "bg-green-500" : "bg-zinc-300"}`} />
+              <div>
+                <h3 className="font-semibold text-[#0b0f1c]">Embargo Country Screening</h3>
+                <p className="text-xs text-[#5b6476] mt-0.5">
+                  Block signups, checkout, and API access from sanctioned countries (OFAC)
+                </p>
+              </div>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" checked={enabled} onChange={e => onToggle(e.target.checked)} className="sr-only peer" disabled={saving} />
+              <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#1a4fff]" />
+            </label>
+          </div>
+
+          {message && (
+            <div className={`mt-3 p-2 rounded text-xs ${message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>
+              {message.text}
+            </div>
+          )}
+
+          {enabled && (
+            <div className="mt-4 border-t border-[#e4e7ef] pt-4">
+              {/* Search + add country */}
+              <div className="relative" ref={dropdownRef}>
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={search}
+                  onChange={e => { setSearch(e.target.value); setShowDropdown(true); }}
+                  onFocus={() => setShowDropdown(true)}
+                  placeholder="Search by country name or code..."
+                  className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1a4fff]/20 focus:border-[#1a4fff]"
+                />
+                {showDropdown && filteredCountries.length > 0 && (
+                  <div className="absolute z-10 mt-1 w-full bg-white border border-[#e4e7ef] rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                    {filteredCountries.map((code: string) => (
+                      <button
+                        key={code}
+                        onClick={() => handleAdd(code)}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-[#f0f4ff] flex items-center justify-between"
+                      >
+                        <span>
+                          <span className="text-[#0b0f1c]">{getCountryName(code)}</span>
+                          <span className="text-[#5b6476] ml-2 font-mono text-xs">{code}</span>
+                        </span>
+                        <span className="text-xs text-[#1a4fff] font-medium">+ Add</span>
+                      </button>
+                    ))}
+                    {search.trim() && filteredCountries.length === 0 && (
+                      <div className="px-3 py-2 text-sm text-[#5b6476]">No matching countries found</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Country list */}
+              <div className="flex items-center justify-between mt-4 mb-2">
+                <div className="text-xs text-[#5b6476]">
+                  {countries.length} countr{countries.length !== 1 ? "ies" : "y"} blocked
+                </div>
+                {countries.length > 0 && (
+                  <button onClick={handleReset} className="text-xs text-[#5b6476] hover:text-[#0b0f1c] underline">
+                    Reset to OFAC defaults ({defaultCountries.length})
+                  </button>
+                )}
+              </div>
+              <div className="max-h-72 overflow-y-auto border border-[#e4e7ef] rounded-lg divide-y divide-[#e4e7ef]">
+                {countries.length === 0 ? (
+                  <div className="p-4 text-sm text-[#5b6476] text-center">
+                    No countries blocked. Search above to add countries, or the default OFAC list will be loaded when you enable screening.
+                  </div>
+                ) : (
+                  countries.map(code => (
+                    <div key={code} className="flex items-center justify-between px-3 py-2 hover:bg-zinc-50 group">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center w-8 h-5 bg-zinc-100 rounded text-xs font-mono font-medium text-[#0b0f1c]">{code}</span>
+                        <span className="text-sm text-[#0b0f1c]">{getCountryName(code)}</span>
+                      </div>
+                      <button
+                        onClick={() => handleRemove(code)}
+                        className="text-xs text-red-400 hover:text-red-600 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function PlatformSettingsTab() {
   const [data, setData] = useState<PlatformSettingsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -416,6 +665,10 @@ export function PlatformSettingsTab() {
   const [blocklistNewDomain, setBlocklistNewDomain] = useState("");
   const [blocklistSaving, setBlocklistSaving] = useState(false);
   const [blocklistMessage, setBlocklistMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [embargoEnabled, setEmbargoEnabled] = useState(false);
+  const [embargoCountries, setEmbargoCountries] = useState<string[]>([]);
+  const [embargoSaving, setEmbargoSaving] = useState(false);
+  const [embargoMessage, setEmbargoMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -438,6 +691,10 @@ export function PlatformSettingsTab() {
     if (data?.emailBlocklist) {
       setBlocklistEnabled(data.emailBlocklist.enabled);
       setBlocklistDomains(data.emailBlocklist.domains);
+    }
+    if (data?.embargo) {
+      setEmbargoEnabled(data.embargo.enabled);
+      setEmbargoCountries(data.embargo.countries);
     }
   }, [data]);
 
@@ -861,6 +1118,56 @@ export function PlatformSettingsTab() {
           )}
         </div>
       </div>
+
+      {/* ── Embargo Country Screening ── */}
+      <EmbargoScreeningSection
+        enabled={embargoEnabled}
+        countries={embargoCountries}
+        defaultCountries={data?.embargo?.defaultCountries || []}
+        message={embargoMessage}
+        saving={embargoSaving}
+        onToggle={async (enabled) => {
+          setEmbargoEnabled(enabled);
+          setEmbargoSaving(true);
+          setEmbargoMessage(null);
+          try {
+            const countriesToSave = enabled && embargoCountries.length === 0
+              ? (data?.embargo?.defaultCountries || []) : undefined;
+            if (countriesToSave) setEmbargoCountries(countriesToSave);
+            const res = await fetch("/api/admin/platform-settings", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ embargo: { enabled, ...(countriesToSave ? { countries: countriesToSave } : {}) } }),
+            });
+            if (res.ok) {
+              setEmbargoMessage({ type: "success", text: enabled ? "Embargo screening enabled" : "Embargo screening disabled" });
+            } else {
+              setEmbargoMessage({ type: "error", text: "Failed to update" });
+              setEmbargoEnabled(!enabled);
+            }
+          } catch {
+            setEmbargoMessage({ type: "error", text: "Failed to update" });
+            setEmbargoEnabled(!enabled);
+          } finally {
+            setEmbargoSaving(false);
+            setTimeout(() => setEmbargoMessage(null), 3000);
+          }
+        }}
+        onUpdate={(countries) => {
+          setEmbargoCountries(countries);
+          fetch("/api/admin/platform-settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ embargo: { countries } }),
+          }).then(() => {
+            setEmbargoMessage({ type: "success", text: "Country list updated" });
+            setTimeout(() => setEmbargoMessage(null), 3000);
+          }).catch(() => {
+            setEmbargoMessage({ type: "error", text: "Failed to save" });
+            setTimeout(() => setEmbargoMessage(null), 3000);
+          });
+        }}
+      />
 
       {SERVICE_ORDER.map((serviceName) => {
         const service = data.services[serviceName];

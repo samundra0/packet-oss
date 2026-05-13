@@ -1,18 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
-import { getConnectionInfo } from "@/lib/hostedai";
-import Stripe from "stripe";
-
-interface DiscoveredService {
-  id?: number;
-  service_name?: string;
-  ip?: string;
-  internal_port?: number;
-  port?: number;
-  node_port?: number;
-  external_port?: number;
-}
+import { getExposedServices } from "@/lib/hostedai";
 
 interface GPUMetrics {
   // vLLM metrics
@@ -139,36 +127,36 @@ export async function GET(
       return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
     }
 
-    // Get team ID from Stripe customer
-    const stripe = await getStripe();
-    const customerResult = await stripe.customers.retrieve(payload.customerId);
-    if ("deleted" in customerResult && customerResult.deleted) {
-      return NextResponse.json({ error: "Customer not found" }, { status: 404 });
-    }
-    const customer = customerResult as Stripe.Customer;
-    const teamId = (customer.metadata?.team_id || customer.metadata?.teamId || customer.metadata?.hostedai_team_id) as string;
-
-    if (!teamId) {
-      return NextResponse.json({ error: "No team associated with account" }, { status: 400 });
-    }
-
-    // Get connection info for this subscription
-    const connectionInfo = await getConnectionInfo(teamId);
-    const connInfo = connectionInfo.find((c) => String(c.id) === String(subscriptionId));
-
-    if (!connInfo?.pods?.[0]) {
-      return NextResponse.json({ error: "Instance not found or not running" }, { status: 404 });
+    // HAI 2.2: fetch exposed services for this instance
+    let exposedServices;
+    try {
+      exposedServices = await getExposedServices(subscriptionId);
+    } catch (err) {
+      console.error(`[gpu-metrics] getExposedServices failed for ${subscriptionId}:`, err);
+      return NextResponse.json(
+        { error: "Instance not found or not running" },
+        { status: 404 }
+      );
     }
 
-    const pod = connInfo.pods[0];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const services = ((pod as any).discovered_services as DiscoveredService[]) || [];
+    // HAI sometimes returns a non-array shape (object with items, error envelope,
+    // or null) when no services are exposed. Defend against .find() crashing on
+    // those cases — surfacing as "Internal server error" hides the real issue.
+    if (!Array.isArray(exposedServices)) {
+      console.error(
+        `[gpu-metrics] getExposedServices returned non-array for ${subscriptionId}:`,
+        exposedServices,
+      );
+      return NextResponse.json(
+        { error: "vLLM service not exposed yet. Click 'Expose API Endpoint' to enable metrics." },
+        { status: 404 }
+      );
+    }
 
-    // Find vLLM service (port 8000)
-    const vllmService = services.find(
+    // Find vLLM service (internal port 8000)
+    const vllmService = exposedServices.find(
       (s) =>
         s.internal_port === 8000 ||
-        s.port === 8000 ||
         s.service_name?.includes("vllm") ||
         s.service_name?.includes("inference")
     );
@@ -180,7 +168,7 @@ export async function GET(
       );
     }
 
-    const servicePort = vllmService.port || vllmService.external_port || vllmService.node_port;
+    const servicePort = vllmService.external_port;
     if (!servicePort) {
       return NextResponse.json({ error: "vLLM service port not found" }, { status: 404 });
     }
@@ -250,6 +238,12 @@ export async function GET(
     });
   } catch (err) {
     console.error("GPU metrics error:", err);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    // Surface the actual error so the dashboard "Internal server error" toast
+    // is diagnostic instead of a black box.
+    const detail = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      { error: `Failed to fetch metrics: ${detail}` },
+      { status: 500 },
+    );
   }
 }

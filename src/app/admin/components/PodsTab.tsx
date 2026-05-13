@@ -129,7 +129,7 @@ export function PodsTab() {
   // Fetch GPU metrics for running pods with SSH access
   const loadGpuMetrics = useCallback(async () => {
     const runningPodsWithSSH = pods.filter(
-      (p) => (p.status === "subscribed" || p.status === "active") && p.ssh?.password
+      (p) => (p.status === "running" || p.status === "subscribed" || p.status === "active") && p.ssh?.password
     );
 
     if (runningPodsWithSSH.length === 0) return;
@@ -220,13 +220,24 @@ export function PodsTab() {
       return "bg-red-100 text-red-700 border border-red-200";
     }
     switch (status) {
-      case "subscribed":
+      case "running":
       case "active":
+      case "subscribed":
         return "bg-green-100 text-green-700 border border-green-200";
+      case "pending":
+      case "starting":
+      case "restarting":
       case "subscribing":
         return "bg-yellow-100 text-yellow-700 border border-yellow-200";
+      case "stopping":
       case "un_subscribing":
         return "bg-orange-100 text-orange-700 border border-orange-200";
+      case "stopped":
+      case "terminated":
+        return "bg-gray-100 text-gray-600 border border-gray-200";
+      case "error":
+      case "failed":
+        return "bg-red-100 text-red-700 border border-red-200";
       default:
         return "bg-gray-100 text-gray-700 border border-gray-200";
     }
@@ -272,7 +283,8 @@ export function PodsTab() {
       if (filter === "unowned" && pod.owner) return false;
       if (filter === "dead" && !pod.isDead) return false;
       if (filter === "unbilled") {
-        const isActive = (pod.status === "subscribed" || pod.status === "active") && !pod.isDead;
+        const activeStatuses = ["running", "pending", "starting", "restarting", "subscribed", "active"];
+        const isActive = activeStatuses.includes(pod.status) && !pod.isDead;
         const isBilled = pod.billing && ((pod.billing.hourlyRateCents && pod.billing.hourlyRateCents > 0) || (pod.billing.monthlyRateCents && pod.billing.monthlyRateCents > 0));
         if (!isActive || isBilled) return false;
       }
@@ -707,7 +719,8 @@ export function PodsTab() {
                     </td>
                     <td className="px-4 py-3">
                       {(() => {
-                        const isActive = (pod.status === "subscribed" || pod.status === "active") && !pod.isDead;
+                        const activeStatuses = ["running", "pending", "starting", "restarting", "subscribed", "active"];
+                        const isActive = activeStatuses.includes(pod.status) && !pod.isDead;
                         if (!isActive) {
                           return <span className="text-xs text-[#9ca3af]">-</span>;
                         }

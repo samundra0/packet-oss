@@ -25,14 +25,8 @@ export async function GET(request: NextRequest) {
       orderBy: { createdAt: "desc" },
     });
 
-    // Filter out expired auto-preserved snapshots (cleanup cron handles deletion, but hide from UI)
-    const now = new Date();
-    const activeSnapshots = snapshots.filter(
-      (s) => !s.expiresAt || new Date(s.expiresAt) > now
-    );
-
     // Transform for API response
-    const formattedSnapshots = activeSnapshots.map((s) => ({
+    const formattedSnapshots = snapshots.map((s) => ({
       id: s.id,
       displayName: s.displayName,
       notes: s.notes,
@@ -58,8 +52,6 @@ export async function GET(request: NextRequest) {
             deployScript: s.deployScript,
           }
         : null,
-      autoPreserved: s.autoPreserved,
-      expiresAt: s.expiresAt,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
     }));

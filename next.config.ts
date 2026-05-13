@@ -10,6 +10,50 @@ function getPackageVersion(): string {
   }
 }
 
+// Marketing site lives at packet.ai (separate repo). 301 redirect any
+// marketing URLs that still resolve on dash to their canonical home so we
+// don't compete with packet.ai for the same SEO surface.
+const MARKETING_HOST =
+  process.env.NEXT_PUBLIC_MARKETING_URL?.replace(/\/$/, "") || "https://packet.ai";
+
+const MARKETING_PATHS = [
+  "about",
+  "blackwell",
+  "blog",
+  "cli",
+  "clusters",
+  "contact",
+  "demand",
+  "features",
+  "for-providers",
+  "gpu",
+  "privacy",
+  "providers/apply",
+  "pxl",
+  "request-quote",
+  "sla",
+  "technology",
+  "terms",
+  "token-factory",
+  "use-cases",
+  "vs",
+];
+
+function marketingRedirects() {
+  return MARKETING_PATHS.flatMap((p) => [
+    {
+      source: `/${p}`,
+      destination: `${MARKETING_HOST}/${p}`,
+      permanent: true,
+    },
+    {
+      source: `/${p}/:path*`,
+      destination: `${MARKETING_HOST}/${p}/:path*`,
+      permanent: true,
+    },
+  ]);
+}
+
 const nextConfig: NextConfig = {
   serverExternalPackages: ["nodemailer"],
   env: {
@@ -25,6 +69,9 @@ const nextConfig: NextConfig = {
         hostname: process.env.NEXT_PUBLIC_APP_HOSTNAME || "packet.ai",
       },
     ],
+  },
+  async redirects() {
+    return marketingRedirects();
   },
   async headers() {
     return [

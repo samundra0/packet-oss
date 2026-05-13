@@ -135,7 +135,7 @@ function CheckoutContent() {
     }
 
     if (!termsAccepted) {
-      setErrorMessage("Please accept the Terms of Service and Privacy Policy");
+      setErrorMessage("Please accept the Legal Policies and Privacy Policies");
       setStatus("error");
       return;
     }
@@ -151,6 +151,7 @@ function CheckoutContent() {
           email,
           productId: selectedProduct.id,
           voucherCode: validatedVoucher?.code,
+          termsAccepted,
         }),
       });
 
@@ -198,7 +199,6 @@ function CheckoutContent() {
             height={64}
             className="h-12 w-auto"
           />
-          <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-gradient-to-r from-teal-500 to-teal-600 text-white">Beta</span>
         </Link>
 
         <h1 className="text-2xl font-bold mb-2">
@@ -395,9 +395,9 @@ function CheckoutContent() {
             />
             <span className="text-sm text-[#5b6476]">
               I agree to the{" "}
-              <a href="/terms" target="_blank" className="text-[#1a4fff] hover:underline">Terms of Service</a>
+              <a href="/terms" target="_blank" className="text-[#1a4fff] hover:underline">Legal Policies</a>
               {" "}and{" "}
-              <a href="/privacy" target="_blank" className="text-[#1a4fff] hover:underline">Privacy Policy</a>
+              <a href="/privacy" target="_blank" className="text-[#1a4fff] hover:underline">Privacy Policies</a>
             </span>
           </label>
 

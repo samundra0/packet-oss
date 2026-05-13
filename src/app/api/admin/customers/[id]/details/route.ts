@@ -85,10 +85,16 @@ export async function GET(
     // Get activity events for the customer
     const activityEvents = await getActivityEvents(customerId, 200);
 
-    // Get customer settings (bare metal flag)
+    // Get customer settings (bare metal flag, suspension)
     const customerSettings = await prisma.customerSettings.findUnique({
       where: { stripeCustomerId: customerId },
-      select: { bareMetalEnabled: true },
+      select: {
+        bareMetalEnabled: true,
+        suspended: true,
+        suspendedAt: true,
+        suspendedReason: true,
+        suspendedBy: true,
+      },
     });
 
     // Calculate stats
@@ -162,6 +168,12 @@ export async function GET(
       } : null,
       activityEvents,
       bareMetalEnabled: customerSettings?.bareMetalEnabled ?? false,
+      suspension: {
+        suspended: customerSettings?.suspended ?? false,
+        suspendedAt: customerSettings?.suspendedAt ?? null,
+        suspendedReason: customerSettings?.suspendedReason ?? null,
+        suspendedBy: customerSettings?.suspendedBy ?? null,
+      },
     });
   } catch (error) {
     console.error("Failed to get customer details:", error);

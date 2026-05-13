@@ -19,8 +19,10 @@ import type {
   DeploymentStatus,
 } from "./types";
 import { isChatModel, getVramBadge, getCompatibilityBadge } from "./helpers";
+import { GPUPicker, type GPUPickerSelection } from "@/components/GPUPicker";
 
 interface DeployModalProps {
+  token: string;
   selectedItem: CatalogItem | SearchResult;
   launchOptions: LaunchOptions | null;
   existingSubscriptions: ExistingSubscription[];
@@ -53,6 +55,7 @@ interface DeployModalProps {
 }
 
 export function DeployModal({
+  token,
   selectedItem,
   launchOptions,
   existingSubscriptions,
@@ -89,18 +92,15 @@ export function DeployModal({
       : 0;
 
   const products = launchOptions?.products ?? [];
-  const selectedProductDetails = products.find((p) => p.id === selectedProduct);
-  const regions = selectedProductDetails?.regions ?? [];
+  const categories = launchOptions?.categories ?? [];
+  const selectedProductDetails = products.find(p => p.id === selectedProduct);
 
-  /** When the user clicks a product card, auto-select first region */
-  const handleSelectProduct = (productId: string) => {
-    setSelectedProduct(productId);
-    const product = products.find((p) => p.id === productId);
-    if (product && product.regions.length > 0) {
-      setSelectedRegion(product.regions[0].id);
-    } else {
-      setSelectedRegion(null);
+  /** Handle GPU picker selection changes */
+  const handleGPUSelection = (selection: GPUPickerSelection) => {
+    if (selection.product) {
+      setSelectedProduct(selection.product.id);
     }
+    setSelectedRegion(selection.region?.id ?? null);
   };
 
   return (
@@ -204,113 +204,16 @@ export function DeployModal({
             </div>
           )}
 
-          {/* New GPU Options — Product Picker + Region Pills */}
+          {/* New GPU Options — Category-based GPU Picker */}
           {(deployMode === "new" || existingSubscriptions.length === 0) && (
             <>
-              {/* Product Cards */}
-              {products.length > 0 && (
-                <div className="mb-4">
-                  <label className="block text-xs font-medium text-[var(--muted)] mb-3 uppercase tracking-wide">
-                    Select a GPU
-                  </label>
-                  <div className="space-y-2">
-                    {products.map((product) => {
-                      const isSelected = selectedProduct === product.id;
-                      const isAvailable = product.available;
-                      const pricePerHour = (
-                        product.pricePerHourCents / 100
-                      ).toFixed(2);
-
-                      return (
-                        <button
-                          key={product.id}
-                          type="button"
-                          disabled={!isAvailable}
-                          onClick={() => {
-                            if (isAvailable) handleSelectProduct(product.id);
-                          }}
-                          className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
-                            !isAvailable
-                              ? "border-[var(--line)] bg-zinc-50 opacity-60 cursor-not-allowed"
-                              : isSelected
-                                ? "border-teal-500 bg-teal-50"
-                                : "border-[var(--line)] hover:border-teal-300 hover:bg-zinc-50"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 min-w-0">
-                              <span className="font-medium text-[var(--ink)]">
-                                {product.name}
-                              </span>
-                              {product.vramGb && (
-                                <div className="text-sm text-[var(--muted)] mt-0.5">
-                                  {product.vramGb}GB VRAM
-                                  {product.description
-                                    ? ` · ${product.description}`
-                                    : ""}
-                                </div>
-                              )}
-                            </div>
-                            <div className="text-right flex-shrink-0 ml-3">
-                              {!isAvailable ? (
-                                <span className="text-xs font-medium text-zinc-400">
-                                  Unavailable
-                                </span>
-                              ) : (
-                                <div className="flex items-center gap-2">
-                                  <div>
-                                    <span className="text-lg font-bold text-[var(--ink)]">
-                                      ${pricePerHour}
-                                    </span>
-                                    <span className="text-xs text-[var(--muted)]">
-                                      /hr
-                                    </span>
-                                  </div>
-                                  <span className="w-2 h-2 bg-emerald-500 rounded-full" />
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {products.length === 0 && launchOptions && (
-                <div className="mb-4 text-center py-6 text-[var(--muted)] text-sm">
-                  No GPUs available right now. Check back later.
-                </div>
-              )}
-
-              {/* Region Pills */}
-              {selectedProduct && regions.length > 0 && (
-                <div className="mb-4">
-                  <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
-                    Region
-                  </label>
-                  <div className="flex flex-wrap gap-2">
-                    {regions.map((region) => {
-                      const isSelected = selectedRegion === region.id;
-                      return (
-                        <button
-                          key={region.id}
-                          type="button"
-                          onClick={() => setSelectedRegion(region.id)}
-                          className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
-                            isSelected
-                              ? "bg-teal-100 text-teal-700 border border-teal-300"
-                              : "bg-zinc-100 text-zinc-600 border border-transparent hover:bg-zinc-200"
-                          }`}
-                        >
-                          {region.region_name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+              <GPUPicker
+                token={token}
+                categories={categories}
+                products={products}
+                onSelectionChange={handleGPUSelection}
+                compact
+              />
 
               {/* Wallet + pricing summary */}
               {selectedProduct && selectedProductDetails && launchOptions && (

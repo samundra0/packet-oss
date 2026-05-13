@@ -44,7 +44,7 @@ sleep 2
 
 # Install system dependencies
 sudo apt-get update -qq
-sudo apt-get install -y python3-venv curl > /dev/null 2>&1
+sudo apt-get install -y python3-venv python3-dev curl > /dev/null 2>&1
 
 # Create venv for vLLM
 VLLM_DIR=/opt/vllm
@@ -68,6 +68,7 @@ sudo tee /opt/start-vllm-tinyllama.sh > /dev/null << 'STARTSCRIPT'
 #!/bin/bash
 source /opt/vllm/venv/bin/activate
 export VLLM_USE_V1=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
 # Kill any existing vLLM processes
 pkill -f "vllm.entrypoints" 2>/dev/null || true
@@ -149,7 +150,7 @@ sleep 2
 
 # Install system dependencies
 sudo apt-get update -qq
-sudo apt-get install -y python3-venv curl > /dev/null 2>&1
+sudo apt-get install -y python3-venv python3-dev curl > /dev/null 2>&1
 
 # Create venv for vLLM
 VLLM_DIR=/opt/vllm
@@ -173,6 +174,7 @@ sudo tee /opt/start-vllm.sh > /dev/null << 'STARTSCRIPT'
 #!/bin/bash
 source /opt/vllm/venv/bin/activate
 export VLLM_USE_V1=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
 # Kill any existing vLLM processes
 pkill -f "vllm.entrypoints" 2>/dev/null || true
@@ -266,7 +268,7 @@ echo "INFO=Test with: /opt/test-vllm.sh"
 echo "=== Installing Text Generation WebUI ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y git python3-pip python3-venv > /dev/null 2>&1
+sudo apt-get install -y git python3-pip python3-venv python3-dev > /dev/null 2>&1
 
 # Clone text-generation-webui (if not already cloned)
 cd /opt
@@ -348,7 +350,7 @@ if command -v docker &> /dev/null; then
 else
   # Install via pip in virtual environment
   sudo apt-get update -qq
-  sudo apt-get install -y python3-pip python3-venv nodejs npm > /dev/null 2>&1
+  sudo apt-get install -y python3-pip python3-venv python3-dev nodejs npm > /dev/null 2>&1
 
   # Create virtual environment using real python (avoids vllm-wrapper issues)
   sudo mkdir -p /opt/open-webui-env
@@ -403,7 +405,7 @@ echo "INFO=Connect to Ollama at localhost:11434"
 echo "=== Installing Hugging Face TGI ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y python3-pip python3-venv build-essential curl > /dev/null 2>&1
+sudo apt-get install -y python3-pip python3-venv python3-dev build-essential curl > /dev/null 2>&1
 
 # Create virtual environment
 sudo mkdir -p /opt/tgi-env
@@ -532,7 +534,7 @@ echo "INFO=Set TGI_MODEL env var to change model. For faster inference, use vLLM
 echo "=== Installing NVIDIA Triton Inference Server ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y python3-pip python3-venv curl wget > /dev/null 2>&1
+sudo apt-get install -y python3-pip python3-venv python3-dev curl wget > /dev/null 2>&1
 
 # Create model repository directory
 mkdir -p ~/triton-models

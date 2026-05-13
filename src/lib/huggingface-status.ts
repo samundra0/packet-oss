@@ -1,12 +1,72 @@
 /**
  * Shared HuggingFace deployment status helpers
  * Used by both /api/huggingface/deploy-status and /api/cron/check-hf-deployments
+ *
+ * All SSH credential retrieval uses the HAI 2.2 instance credentials API
+ * (GET /instance/{id}/credentials). No legacy pool subscription APIs.
  */
 
 import { spawn } from "child_process";
 import { validateSSHParams } from "@/lib/ssh-validation";
+import { getInstanceCredentials } from "@/lib/hostedai";
 
 const MAX_SSH_RETRIES = 2;
+const CREDENTIAL_RETRY_DELAY_MS = 3000;
+const MAX_CREDENTIAL_RETRIES = 2;
+
+/**
+ * SSH credentials resolved from HAI 2.2 instance credentials API
+ */
+export interface SSHCredentials {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+}
+
+/**
+ * Fetch SSH credentials for an instance via HAI 2.2 API with retry logic.
+ *
+ * Returns null if credentials are not yet available (instance still provisioning).
+ * Throws on unexpected errors (network failure, auth error).
+ */
+export async function getSSHCredentials(
+  instanceId: string,
+  retries = MAX_CREDENTIAL_RETRIES
+): Promise<SSHCredentials | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const creds = await getInstanceCredentials(instanceId);
+
+      // Validate all required fields are present and non-null
+      if (!creds.ip || !creds.port || !creds.username || !creds.password) {
+        if (attempt < retries) {
+          console.log(`[HF Credentials] Instance ${instanceId}: incomplete credentials (attempt ${attempt + 1}/${retries + 1}), retrying...`);
+          await new Promise(r => setTimeout(r, CREDENTIAL_RETRY_DELAY_MS));
+          continue;
+        }
+        console.log(`[HF Credentials] Instance ${instanceId}: credentials still incomplete after ${retries + 1} attempts — ip=${!!creds.ip} port=${!!creds.port} user=${!!creds.username} pass=${!!creds.password}`);
+        return null;
+      }
+
+      return {
+        host: creds.ip,
+        port: creds.port,
+        username: creds.username,
+        password: creds.password,
+      };
+    } catch (err) {
+      if (attempt < retries) {
+        console.log(`[HF Credentials] Instance ${instanceId}: API error (attempt ${attempt + 1}/${retries + 1}): ${err instanceof Error ? err.message : err}`);
+        await new Promise(r => setTimeout(r, CREDENTIAL_RETRY_DELAY_MS));
+        continue;
+      }
+      console.error(`[HF Credentials] Instance ${instanceId}: failed after ${retries + 1} attempts:`, err);
+      return null;
+    }
+  }
+  return null;
+}
 
 export type DeploymentStatus =
   | "not_started"
@@ -167,8 +227,24 @@ export const STATUS_CHECK_SCRIPT = `
   WORKSPACE="$HOME/hf-workspace"
 
   if [ ! -f "$WORKSPACE/install.log" ]; then
-    echo "STATUS:not_started"
-    echo "PROGRESS:0"
+    # install.log may be absent when vLLM was pre-installed and the deploy
+    # script skipped the background installer. Check for a live server process
+    # before reporting not_started, to avoid a permanently-stuck status.
+    if pgrep -f "vllm.entrypoints" > /dev/null 2>&1; then
+      # Use /v1/models (which exposes the real model name) as the readiness
+      # signal, not /health 200 — the install-time stub server returns 200 on
+      # /health which would falsely flip status to "running".
+      if curl -s --max-time 3 http://localhost:8000/v1/models 2>/dev/null | grep -q '"data"'; then
+        echo "STATUS:running"
+        echo "PROGRESS:100"
+      else
+        echo "STATUS:starting"
+        echo "PROGRESS:80"
+      fi
+    else
+      echo "STATUS:not_started"
+      echo "PROGRESS:0"
+    fi
     exit 0
   fi
 
@@ -189,10 +265,11 @@ export const STATUS_CHECK_SCRIPT = `
     SERVER_RUNNING=true
   fi
 
+  # Real vLLM exposes /v1/models with the configured model in a "data" array.
+  # The install-time stub server returns 200 on /health but never produces a
+  # vLLM-shaped /v1/models response, so this is the reliable readiness check.
   SERVER_HEALTHY=false
-  if curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/health 2>/dev/null | grep -q "200"; then
-    SERVER_HEALTHY=true
-  elif curl -s http://localhost:8000/v1/models 2>/dev/null | grep -q "data"; then
+  if curl -s --max-time 3 http://localhost:8000/v1/models 2>/dev/null | grep -q '"data"'; then
     SERVER_HEALTHY=true
   fi
 

@@ -2,19 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken, generateCustomerToken } from "@/lib/customer-auth";
 import { getStripe } from "@/lib/stripe";
 import {
-  subscribeToPool,
-  getAllPools,
-  getPoolEphemeralStorageBlocks,
+  createInstance,
+  getServiceProvisioningInfo,
+  getServiceCompatibleGPUPools,
+  getTeamWorkspaces,
   getSharedVolumes,
-  selectOptimalPool,
-  subscribeWithFallback,
-  getPoolInstanceTypes,
 } from "@/lib/hostedai";
 import { logGPULaunched } from "@/lib/activity";
 import { getWalletBalance, deductUsage, refundDeployment } from "@/lib/wallet";
 import { getProductByPoolId } from "@/lib/products";
 import { prisma } from "@/lib/prisma";
 import { sendGpuLaunchedEmail } from "@/lib/email";
+import { installMetricsCollector } from "@/lib/metrics-collector";
+import { runStartupScript } from "@/lib/startup-script-runner";
+import { WORKSPACE_SETUP_SCRIPT } from "@/lib/startup-scripts";
+import { randomBytes } from "crypto";
 import Stripe from "stripe";
 import { z } from "zod";
 
@@ -94,82 +96,128 @@ export async function POST(
     }
 
     // Determine final configuration (options override snapshot)
-    let poolId = options.pool_id || snapshot.poolId;
+    const poolId = options.pool_id || snapshot.poolId;
     const vgpus = options.vgpus || snapshot.vgpus;
     const displayName = options.name || snapshot.displayName;
-    let instanceTypeId = options.instance_type_id || snapshot.instanceTypeId;
 
-    // Get pool info
-    const pools = await getAllPools();
-    let pool = pools.find((p) => String(p.id) === String(poolId));
-
-    if (!pool) {
+    // ============================================================
+    // RESOLVE GPU PRODUCT → SERVICE ID
+    // Snapshots store a poolId; look up the GpuProduct to get the
+    // HAI 2.2 serviceId required for create-instance.
+    // ============================================================
+    const product = await getProductByPoolId(poolId);
+    if (!product || !product.serviceId) {
       return NextResponse.json(
-        { error: "GPU pool not found" },
-        { status: 404 }
+        { error: "No GPU product with a linked HAI service found for this snapshot's pool." },
+        { status: 400 }
       );
     }
 
-    const regionId = pool.region_id || 2;
+    const serviceId = product.serviceId;
+    const hourlyRateCents = product.hourly_rate_cents;
 
-    // CRITICAL: Select the optimal pool using centralized logic
-    // Enforces: 1) one pod per pool per user, 2) least-used pool first
-    let fallbackPools: Awaited<ReturnType<typeof selectOptimalPool>>["fallbackPools"] = [];
-    try {
-      const optimalResult = await selectOptimalPool({
-        requestedPoolId: poolId,
-        teamId,
-        gpuCount: vgpus,
-        allPools: pools,
-      });
-      poolId = optimalResult.pool.id;
-      pool = optimalResult.pool;
-      fallbackPools = optimalResult.fallbackPools;
-    } catch (poolErr: any) {
-      const status = poolErr.status || 500;
-      return NextResponse.json({ error: poolErr.message || "Failed to select GPU pool" }, { status });
+    if (hourlyRateCents === 0) {
+      return NextResponse.json(
+        { error: "No valid pricing found for this GPU pool." },
+        { status: 400 }
+      );
     }
 
-    // Get instance type if not specified
-    if (!instanceTypeId) {
-      const compatibleTypes = await getPoolInstanceTypes(String(regionId), teamId);
-      if (compatibleTypes.length > 0) {
-        instanceTypeId = compatibleTypes[0].id;
-        console.log(`[Snapshot Restore] Selected instance type: ${compatibleTypes[0].name} (${compatibleTypes[0].id})`);
-      } else {
-        throw new Error("No compatible instance types available for this region");
+    // ============================================================
+    // RESOLVE PROVISIONING DEFAULTS FROM HAI SERVICE
+    // ============================================================
+    const regionId = snapshot.regionId ? Number(snapshot.regionId) : 2;
+
+    let selectedInstanceType = options.instance_type_id || snapshot.instanceTypeId || undefined;
+    let selectedImage: string | undefined;
+    let selectedStorage: string | undefined;
+    let selectedPoolId: number | undefined;
+    let workspaceId: string | undefined;
+
+    // Use snapshot's image if it's a valid UUID (custom image)
+    const imageUuid = snapshot.imageUuid;
+    const isValidUUID =
+      imageUuid &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imageUuid);
+    if (isValidUUID) {
+      selectedImage = imageUuid;
+    }
+
+    // Fetch workspace (required for create-instance)
+    try {
+      const workspaces = await getTeamWorkspaces(teamId);
+      if (workspaces.length > 0) {
+        workspaceId = workspaces[0].id;
+        console.log(`[Snapshot Restore] Using workspace: ${workspaces[0].name} (${workspaceId})`);
+      }
+    } catch (wsErr) {
+      console.error("[Snapshot Restore] Failed to fetch workspaces:", wsErr);
+    }
+
+    // Get provisioning info (locked defaults) from the service
+    if (!selectedInstanceType || !selectedImage || !selectedStorage) {
+      try {
+        const provInfo = await getServiceProvisioningInfo(serviceId, teamId, regionId);
+        const itDetails = provInfo.instance_type_details as { default?: { id: string } } | undefined;
+        const imgDetails = provInfo.image_details as { default?: { hash?: string; id?: string } } | undefined;
+        const sbDetails = provInfo.storage_block_details as { default?: { id: string } } | undefined;
+
+        if (!selectedInstanceType && itDetails?.default?.id) {
+          selectedInstanceType = itDetails.default.id;
+          console.log(`[Snapshot Restore] From provisioning-info: instance_type=${selectedInstanceType}`);
+        }
+        if (!selectedImage && imgDetails?.default) {
+          selectedImage = imgDetails.default.hash || imgDetails.default.id;
+          console.log(`[Snapshot Restore] From provisioning-info: image=${selectedImage}`);
+        }
+        if (!selectedStorage && sbDetails?.default?.id) {
+          selectedStorage = sbDetails.default.id;
+          console.log(`[Snapshot Restore] From provisioning-info: storage=${selectedStorage}`);
+        }
+      } catch (provErr) {
+        console.error("[Snapshot Restore] Provisioning-info failed:", provErr);
       }
     }
 
-    // Get ephemeral storage
-    const storageBlocks = await getPoolEphemeralStorageBlocks(String(regionId), teamId);
-    if (storageBlocks.length === 0) {
-      throw new Error("No compatible ephemeral storage blocks available");
+    if (!selectedInstanceType || !selectedImage || !selectedStorage) {
+      return NextResponse.json(
+        { error: "Could not resolve instance configuration. The service may not be fully configured." },
+        { status: 400 }
+      );
     }
-    const ephemeralStorageBlockId = storageBlocks[0].id;
 
-    // Determine shared volumes to attach
+    // Get compatible pool from HAI
+    try {
+      const pools = await getServiceCompatibleGPUPools(serviceId, teamId, regionId);
+      if (pools.length > 0) {
+        const sorted = [...pools].sort((a, b) => (b.available_vgpus || 0) - (a.available_vgpus || 0));
+        selectedPoolId = sorted[0].id;
+        console.log(`[Snapshot Restore] Selected pool: ${sorted[0].name} (id=${selectedPoolId}, available=${sorted[0].available_vgpus})`);
+      }
+    } catch (poolErr) {
+      console.error("[Snapshot Restore] Compatible pools lookup failed:", poolErr);
+      // Pool selection is optional — HAI will auto-select if service has gpu_pool_locked
+    }
+
+    // ============================================================
+    // RESOLVE SHARED VOLUMES TO ATTACH
+    // ============================================================
     const sharedVolumeIds: number[] = [];
 
-    // Attach saved persistent storage if requested and available
     console.log(`[Snapshot Restore] attachStorage option: ${options.attachStorage}`);
     console.log(`[Snapshot Restore] Snapshot has persistentVolumeId: ${snapshot.persistentVolumeId}`);
     console.log(`[Snapshot Restore] Snapshot has persistentVolumeName: ${snapshot.persistentVolumeName}`);
 
     if (options.attachStorage) {
       if (snapshot.persistentVolumeId) {
-        // Use the saved volume ID directly
         sharedVolumeIds.push(snapshot.persistentVolumeId);
         console.log(`[Snapshot Restore] Using saved volume ID: ${snapshot.persistentVolumeId}`);
       } else if (snapshot.persistentVolumeName) {
-        // Snapshot has volume name but not ID (legacy snapshots or API inconsistency)
-        // Look up the volume by name from the team's volumes
         console.log(`[Snapshot Restore] No volume ID saved, looking up by name: ${snapshot.persistentVolumeName}`);
         try {
           const teamVolumes = await getSharedVolumes(teamId);
           console.log(`[Snapshot Restore] Found ${teamVolumes.length} volumes for team ${teamId}`);
 
-          // First try exact name match with AVAILABLE status
           const matchingVolume = teamVolumes.find(
             (v) => v.name === snapshot.persistentVolumeName && v.status === "AVAILABLE"
           );
@@ -177,7 +225,6 @@ export async function POST(
             sharedVolumeIds.push(matchingVolume.id);
             console.log(`[Snapshot Restore] Found AVAILABLE volume by name: ID ${matchingVolume.id}`);
           } else {
-            // Try without AVAILABLE filter in case status is different
             const anyMatchingVolume = teamVolumes.find(
               (v) => v.name === snapshot.persistentVolumeName
             );
@@ -201,37 +248,25 @@ export async function POST(
 
     console.log(`[Snapshot Restore] Final sharedVolumeIds to attach: ${JSON.stringify(sharedVolumeIds)}`);
 
-    // Only use image_uuid if it's in valid UUID format
-    const imageUuid = snapshot.imageUuid;
-    const isValidUUID =
-      imageUuid &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imageUuid);
-    const validImageUuid = isValidUUID ? imageUuid : "";
-
-    console.log("Restoring from snapshot:", {
+    console.log("[Snapshot Restore] Deploying via create-instance:", {
       snapshotId,
-      poolId,
-      instanceTypeId,
-      ephemeralStorageBlockId,
+      serviceId,
+      regionId,
+      selectedPoolId,
+      selectedInstanceType,
+      selectedImage,
+      selectedStorage,
       sharedVolumeIds,
-      imageUuid: validImageUuid,
       vgpus,
       displayName,
     });
 
-    // CRITICAL: Check wallet balance BEFORE deploying
+    // ============================================================
+    // WALLET CHECK + PRE-CHARGE
+    // ============================================================
     const MINIMUM_BILLING_MINUTES = 30;
-    const product = await getProductByPoolId(poolId);
-    const hourlyRateCents = product?.hourly_rate_cents || 0;
-
-    if (hourlyRateCents === 0) {
-      return NextResponse.json(
-        { error: "No valid pricing found for this GPU pool." },
-        { status: 400 }
-      );
-    }
-
-    const prepaidAmountCents = Math.round((MINIMUM_BILLING_MINUTES / 60) * hourlyRateCents * vgpus);
+    const gpuCount = 1; // Unified instances are single-GPU
+    const prepaidAmountCents = Math.round((MINIMUM_BILLING_MINUTES / 60) * hourlyRateCents * gpuCount);
     const walletBalance = await getWalletBalance(payload.customerId);
 
     if (walletBalance.availableBalance < prepaidAmountCents) {
@@ -244,13 +279,13 @@ export async function POST(
     }
 
     // CHARGE BEFORE DEPLOYMENT - deduct from wallet upfront
-    const preDeployId = `predeploy_${payload.customerId}_${Date.now()}`;
     console.log(`[Snapshot Restore] Pre-charging $${(prepaidAmountCents / 100).toFixed(2)} BEFORE deployment`);
 
+    const preDeployId = `predeploy_${payload.customerId}_${Date.now()}`;
     const deductResult = await deductUsage(
       payload.customerId,
-      (MINIMUM_BILLING_MINUTES / 60) * vgpus,
-      `GPU deploy (snapshot restore): pool ${poolId} - ${vgpus} GPU(s) @ $${(hourlyRateCents / 100).toFixed(2)}/hr`,
+      (MINIMUM_BILLING_MINUTES / 60) * gpuCount,
+      `GPU deploy (snapshot restore): ${product.name} @ $${(hourlyRateCents / 100).toFixed(2)}/hr`,
       hourlyRateCents,
       preDeployId
     );
@@ -265,25 +300,27 @@ export async function POST(
 
     console.log(`[Snapshot Restore] Pre-charged $${(prepaidAmountCents / 100).toFixed(2)} successfully. Now deploying...`);
 
-    // DEPLOY AFTER PAYMENT - refund if deployment fails
-    // Uses subscribeWithFallback to automatically retry on "Insufficient resources"
-    let result;
+    // ============================================================
+    // DEPLOY VIA CREATE-INSTANCE (HAI 2.2)
+    // ============================================================
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let instance: any;
     try {
-      const deployResult = await subscribeWithFallback({
-        primaryPool: pool!,
-        fallbackPools,
-        subscribeParams: {
-          team_id: teamId,
-          vgpus,
-          instance_type_id: instanceTypeId!,
-          ephemeral_storage_block_id: ephemeralStorageBlockId,
-          shared_volumes: sharedVolumeIds,
-          image_uuid: validImageUuid || undefined,
+      instance = await createInstance({
+        name: displayName,
+        service_id: serviceId,
+        region_id: regionId,
+        instance_type_id: selectedInstanceType,
+        image_hash: selectedImage,
+        root_storage_type_id: selectedStorage,
+        team_id: teamId,
+        workspace_id: workspaceId,
+        pod_opts: {
+          ...(selectedPoolId ? { pool_id: selectedPoolId } : {}),
+          vgpus: 1,
+          shared_volumes: sharedVolumeIds.length > 0 ? sharedVolumeIds : [],
         },
       });
-      result = { subscription_id: deployResult.subscription_id };
-      poolId = deployResult.pool.id;
-      pool = deployResult.pool;
     } catch (deployError) {
       const errMsg = deployError instanceof Error ? deployError.message : "";
       console.log(`[Snapshot Restore] Deployment failed, refunding pre-charge of $${(prepaidAmountCents / 100).toFixed(2)}`);
@@ -295,28 +332,52 @@ export async function POST(
       throw deployError;
     }
 
-    const subscriptionId = String(result!.subscription_id);
-    const deployId = `deploy_${subscriptionId}`;
+    // create-instance may return the instance ID as a plain string or as { id: "..." }
+    const instanceId = typeof instance === "string" ? instance : instance.id;
+    const metricsToken = randomBytes(32).toString("hex");
+    const deployTime = new Date();
+    const prepaidUntil = new Date(deployTime.getTime() + MINIMUM_BILLING_MINUTES * 60 * 1000);
+    const derivedPoolId: string | null = selectedPoolId ? String(selectedPoolId) : null;
 
-    // Calculate prepaid period (30 minutes minimum billing)
-    const prepaidUntil = new Date(Date.now() + MINIMUM_BILLING_MINUTES * 60 * 1000);
+    console.log(`[Snapshot Restore] Deployment succeeded. Instance: ${instanceId}`);
 
-    console.log(`[Snapshot Restore] Deployment succeeded. Pre-charge of $${(prepaidAmountCents / 100).toFixed(2)} confirmed.`);
-
-    // Save pod metadata with pricing info for billing
+    // ============================================================
+    // SAVE POD METADATA WITH INSTANCE ID
+    // ============================================================
     try {
       await prisma.podMetadata.create({
         data: {
-          subscriptionId,
+          subscriptionId: `instance-${instanceId}`, // Unique placeholder for legacy compat
+          instanceId,
           stripeCustomerId: payload.customerId,
           displayName,
           notes: `Restored from snapshot: ${snapshot.displayName}`,
-          hourlyRateCents,
+          deployTime,
           prepaidUntil,
+          prepaidAmountCents,
+          poolId: derivedPoolId,
+          productId: product.id,
+          hourlyRateCents,
+          metricsToken,
+          startupScript: snapshot.deployScript || null,
+          startupScriptStatus: "pending",
+          billingType: "hourly",
+          sharedVolumeId: sharedVolumeIds[0] || null,
         },
       });
+      console.log(`[Snapshot Restore] Saved PodMetadata for instance ${instanceId}`);
+
+      // Install metrics collector and run startup/deploy script
+      installMetricsCollector(instanceId, teamId, metricsToken).catch((err) => {
+        console.error(`[Metrics] Failed to install for ${instanceId}:`, err);
+      });
+
+      const fullStartup = WORKSPACE_SETUP_SCRIPT + "\n" + (snapshot.deployScript || "");
+      runStartupScript(instanceId, teamId, fullStartup).catch((err) => {
+        console.error(`[Startup] Failed for ${instanceId}:`, err);
+      });
     } catch (metadataError) {
-      console.error("Failed to save pod metadata:", metadataError);
+      console.error("[Snapshot Restore] Failed to save pod metadata:", metadataError);
     }
 
     // Log deploy charge to local WalletTransaction table
@@ -326,13 +387,13 @@ export async function POST(
         teamId,
         type: "gpu_deploy",
         amountCents: prepaidAmountCents,
-        description: `GPU deploy (snapshot restore): pool ${poolId} - ${vgpus} GPU(s) @ $${(hourlyRateCents / 100).toFixed(2)}/hr`,
-        subscriptionId,
-        poolId: parseInt(String(poolId), 10) || null,
-        gpuCount: vgpus,
+        description: `GPU deploy (snapshot restore): ${product.name} @ $${(hourlyRateCents / 100).toFixed(2)}/hr`,
+        subscriptionId: instanceId,
+        poolId: derivedPoolId ? parseInt(derivedPoolId, 10) || null : null,
+        gpuCount,
         hourlyRateCents,
         billingMinutes: MINIMUM_BILLING_MINUTES,
-        syncCycleId: deployId,
+        syncCycleId: `deploy_${instanceId}`,
       },
     }).catch((e) => console.error(`[Snapshot Restore] Failed to log WalletTransaction:`, e));
 
@@ -341,23 +402,22 @@ export async function POST(
       try {
         await prisma.huggingFaceDeployment.create({
           data: {
-            subscriptionId,
+            subscriptionId: instanceId,
             stripeCustomerId: payload.customerId,
             hfItemId: snapshot.hfItemId,
             hfItemType: snapshot.hfItemType || "model",
             hfItemName: snapshot.hfItemName || snapshot.hfItemId,
             deployScript: snapshot.deployScript || "vllm",
-            status: "pending", // Will be updated when deployment runs
+            status: "pending",
           },
         });
       } catch (hfError) {
-        console.error("Failed to save HF deployment record:", hfError);
+        console.error("[Snapshot Restore] Failed to save HF deployment record:", hfError);
       }
     }
 
-    // Log activity (include pod name for tracking)
-    const poolName = pool.name || "GPU Pool";
-    await logGPULaunched(payload.customerId, poolName, vgpus, displayName, subscriptionId);
+    // Log activity
+    await logGPULaunched(payload.customerId, product.name, gpuCount, displayName, instanceId);
 
     // Send email
     try {
@@ -366,24 +426,24 @@ export async function POST(
       await sendGpuLaunchedEmail({
         to: customer.email!,
         customerName: customer.name || customer.email!.split("@")[0],
-        poolName,
-        gpuCount: vgpus,
+        poolName: product.name,
+        gpuCount,
         dashboardUrl,
       });
     } catch (emailError) {
-      console.error("Failed to send GPU launched email:", emailError);
+      console.error("[Snapshot Restore] Failed to send GPU launched email:", emailError);
     }
 
     return NextResponse.json({
       success: true,
-      subscription_id: subscriptionId,
+      instance_id: instanceId,
       message: "Pod restored from snapshot successfully",
       restored: {
         snapshotId: snapshot.id,
         snapshotName: snapshot.displayName,
-        poolId,
-        poolName,
-        vgpus,
+        regionId,
+        productName: product.name,
+        vgpus: gpuCount,
         storageAttached: sharedVolumeIds.length > 0,
         hfModel: snapshot.hfItemName,
       },

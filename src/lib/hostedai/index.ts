@@ -76,10 +76,12 @@ export {
   getServiceCompatibleRegions,
   getServiceCompatibleGPUPools,
   getServiceProvisioningInfo,
+  getHAIService,
   updateHAIService,
   getTeamWorkspaces,
   getUnifiedInstances,
   getUnifiedInstanceDetail,
+  getAllUnifiedInstances,
   podVolumeAction,
 } from "./instances";
 
@@ -104,10 +106,7 @@ export {
   getAllPoolsWithRegions,
   getConnectionInfo,
   podAction,
-  restartPoolSubscription,
   reimagePoolSubscription,
-  getPoolSubscriptionStoragePricing,
-  addStorageToPoolSubscription,
   // Shared volume management
   createSharedVolume,
   getSharedVolumes,
@@ -120,8 +119,6 @@ export {
 } from "./pools";
 
 export type {
-  AddStorageToSubscriptionParams,
-  StoragePricingInfo,
   SelectOptimalPoolParams,
   SelectOptimalPoolResult,
 } from "./pools";

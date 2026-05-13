@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCronAuth } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 import { getStripe } from "@/lib/stripe";
-import { getUnifiedInstances, getInstanceCredentials } from "@/lib/hostedai";
+import { getUnifiedInstances } from "@/lib/hostedai";
 import { getExposedServices } from "@/lib/hostedai/services";
 import { sendHfDeploymentEmail } from "@/lib/email";
 import { generateCustomerToken } from "@/lib/customer-auth";
@@ -10,6 +10,7 @@ import { logActivity } from "@/lib/activity";
 import {
   executeRemoteCommand,
   parseStatusOutput,
+  getSSHCredentials,
   ERROR_MESSAGES,
   STATUS_CHECK_SCRIPT,
 } from "@/lib/huggingface-status";
@@ -82,23 +83,11 @@ export async function POST(request: NextRequest) {
           continue;
         }
 
-        // Find the instance — check PodMetadata for instanceId, fall back to subscriptionId
-        const podMeta = await prisma.podMetadata.findFirst({
-          where: {
-            OR: [
-              { instanceId: deployment.subscriptionId },
-              { subscriptionId: deployment.subscriptionId },
-            ],
-          },
-        });
+        // HAI 2.2: Look up instance directly by the stored instance ID
+        const instanceId = deployment.subscriptionId;
 
-        const instanceId = podMeta?.instanceId || deployment.subscriptionId;
-
-        // Verify instance exists in HAI
         const instancesResult = await getUnifiedInstances(teamId);
-        const instance = instancesResult.items.find(
-          (i) => i.id === instanceId || i.id === deployment.subscriptionId
-        );
+        const instance = instancesResult.items.find(i => i.id === instanceId);
 
         if (!instance) {
           results.push({ id: deployment.id, model: deployment.hfItemName, action: "skipped", error: "instance not found" });
@@ -106,14 +95,6 @@ export async function POST(request: NextRequest) {
         }
 
         const podStatusLower = (instance.status || "").toLowerCase();
-
-        // Get SSH credentials
-        let credentials: { ip: string | null; username: string | null; password: string | null; port: number | null } | null = null;
-        try {
-          credentials = await getInstanceCredentials(instance.id);
-        } catch {
-          // Credentials may not be available yet
-        }
 
         // Pod terminated
         if (["succeeded", "failed", "terminated", "stopped", "error", "crashloopbackoff"].includes(podStatusLower)) {
@@ -128,17 +109,21 @@ export async function POST(request: NextRequest) {
           continue;
         }
 
-        // Pod not running yet or no credentials — skip, let it boot
-        if (podStatusLower !== "running" || !credentials?.ip || !credentials?.password) {
-          results.push({ id: deployment.id, model: deployment.hfItemName, action: "skipped", error: "pod not ready" });
+        // Pod not running — skip, let it boot
+        if (podStatusLower !== "running") {
+          results.push({ id: deployment.id, model: deployment.hfItemName, action: "skipped", error: "pod not running" });
+          continue;
+        }
+
+        // HAI 2.2: Get SSH credentials via instance credentials API
+        const creds = await getSSHCredentials(instance.id, 1);
+        if (!creds) {
+          results.push({ id: deployment.id, model: deployment.hfItemName, action: "skipped", error: "credentials not ready" });
           continue;
         }
 
         // SSH in and check status
-        const host = credentials.ip;
-        const port = credentials.port || 22;
-        const username = credentials.username || "ubuntu";
-        const sshResult = await executeRemoteCommand(host, port, username, credentials.password, STATUS_CHECK_SCRIPT);
+        const sshResult = await executeRemoteCommand(creds.host, creds.port, creds.username, creds.password, STATUS_CHECK_SCRIPT);
 
         if (!sshResult.success) {
           results.push({ id: deployment.id, model: deployment.hfItemName, action: "skipped", error: "SSH failed" });

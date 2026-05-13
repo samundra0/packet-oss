@@ -20,8 +20,8 @@ import type {
   DeploymentStatus,
   HfMemResult,
 } from "./huggingface-tab/types";
-import { DeployModal } from "./huggingface-tab/DeployModal";
 import { MemoryModal } from "./huggingface-tab/MemoryModal";
+import { LaunchGPUModal, type DeployContext } from "@/app/dashboard/components/LaunchGPUModal";
 import { ItemCard } from "./huggingface-tab/ItemCard";
 import { FilterPanel } from "./huggingface-tab/FilterPanel";
 
@@ -245,6 +245,7 @@ export default function HuggingFaceTab({
         const data = await launchRes.json();
         const products = data.products || [];
         setLaunchOptions({
+          categories: data.categories || [],
           products,
           walletBalanceCents: data.walletBalanceCents || 0,
         });
@@ -667,38 +668,50 @@ export default function HuggingFaceTab({
         </>
       )}
 
-      {/* Deploy Modal */}
+      {/* Deploy Modal — uses shared LaunchGPUModal with HF deploy context */}
       {showDeployModal && selectedItem && (
-        <DeployModal
-          selectedItem={selectedItem}
-          launchOptions={launchOptions}
-          existingSubscriptions={existingSubscriptions}
-          deployMode={deployMode}
-          setDeployMode={setDeployMode}
-          selectedSubscription={selectedSubscription}
-          setSelectedSubscription={setSelectedSubscription}
-          selectedProduct={selectedProduct}
-          setSelectedProduct={setSelectedProduct}
-          selectedRegion={selectedRegion}
-          setSelectedRegion={setSelectedRegion}
-          gpuCount={gpuCount}
-          setGpuCount={setGpuCount}
-          hfToken={hfToken}
-          setHfToken={setHfToken}
-          addOpenWebUI={addOpenWebUI}
-          setAddOpenWebUI={setAddOpenWebUI}
-          deploying={deploying}
-          deployError={deployError}
-          deploySuccess={deploySuccess}
-          deployLogs={deployLogs}
-          showLogs={showLogs}
-          setShowLogs={setShowLogs}
-          deployResult={deployResult}
-          isPolling={isPolling}
-          deploymentStatus={deploymentStatus}
-          deploymentMessage={deploymentMessage}
+        <LaunchGPUModal
+          isOpen={showDeployModal}
           onClose={closeDeployModal}
-          onDeploy={handleDeploy}
+          token={token}
+          onSuccess={() => {
+            closeDeployModal();
+            onDeploymentStarted?.();
+          }}
+          onError={(msg) => setDeployError(msg)}
+          deployContext={{
+            type: "huggingface",
+            title: `Deploy ${selectedItem.name}`,
+            subtitle: selectedItem.description,
+            modelId: selectedItem.id,
+            isGated: "gated" in selectedItem && selectedItem.gated,
+            vramGb: "vramGb" in selectedItem ? selectedItem.vramGb : undefined,
+            onDeploy: async (params) => {
+              const body: Record<string, unknown> = {
+                hfItemId: selectedItem.id,
+                product_id: params.product_id,
+                region_id: params.region_id,
+                gpuCount: 1,
+                openWebUI: params.openWebUI,
+                netdata: true,
+              };
+              if (params.hfToken) body.hfToken = params.hfToken;
+
+              const res = await fetch("/api/huggingface/deploy", {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(body),
+              });
+
+              if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.error || "Failed to deploy");
+              }
+            },
+          }}
         />
       )}
 

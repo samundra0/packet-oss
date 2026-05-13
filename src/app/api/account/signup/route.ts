@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
 import { prisma } from "@/lib/prisma";
+import { getSetting } from "@/lib/settings";
 import { rateLimit, getClientIp } from "@/lib/ratelimit";
 import { generateCustomerToken } from "@/lib/customer-auth";
 import { generateApiKey } from "@/lib/api";
@@ -20,6 +21,7 @@ import { cacheCustomer } from "@/lib/customer-cache";
 import { getBrandName, getDashboardUrl, getCompanyName } from "@/lib/branding";
 import { sendLoginEmailForCustomer } from "@/lib/customer-login-email";
 import { isBlockedDomain } from "@/lib/email-blocklist";
+import { embargoCheck } from "@/lib/embargo";
 import crypto from "crypto";
 
 const FREE_TRIAL_TOKENS = 10000;
@@ -171,7 +173,7 @@ export async function POST(request: NextRequest) {
 
     if (!termsAccepted) {
       return NextResponse.json(
-        { error: "You must accept the Terms of Service and Privacy Policy" },
+        { error: "You must accept the Legal Policies and Privacy Policies" },
         { status: 400 }
       );
     }
@@ -184,6 +186,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Invalid email address" },
         { status: 400 }
+      );
+    }
+
+    // Block signups from embargoed countries (CF-IPCountry header)
+    const embargo = await embargoCheck(request, "/api/account/signup", customerEmail);
+    if (embargo.blocked) {
+      return NextResponse.json(
+        { error: "Signups are not available in your region." },
+        { status: 403 }
       );
     }
 
@@ -342,6 +353,26 @@ export async function POST(request: NextRequest) {
       },
     });
     console.log(`✅ Created API key for ${customerEmail}`);
+
+    // Record TOS acceptance (non-fatal: signup must succeed even if this fails)
+    try {
+      const tosVersion = await getSetting("TOS_VERSION");
+      if (tosVersion) {
+        const ipAddress = getClientIp(request);
+        const userAgent = request.headers.get("user-agent") || null;
+        await prisma.tosAcceptance.create({
+          data: {
+            stripeCustomerId: stripeCustomer.id,
+            tosVersion,
+            ipAddress,
+            userAgent,
+          },
+        });
+        console.log(`✅ Recorded TOS v${tosVersion} acceptance for ${customerEmail}`);
+      }
+    } catch (tosError) {
+      console.warn("⚠️ Failed to record TOS acceptance (non-fatal):", tosError);
+    }
 
     // Generate dashboard URL with token
     const token = generateCustomerToken(customerEmail, stripeCustomer.id);

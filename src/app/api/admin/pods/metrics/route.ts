@@ -112,7 +112,10 @@ async function fetchPodGPUMetrics(
   username: string,
   password: string
 ): Promise<GPUMetrics | null> {
-  const metricsCommand = `nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null`;
+  // power.limit is intentionally excluded — it is not supported on Blackwell GPUs
+  // (B200, etc.) and returns "[Not Supported]", which previously caused NaN
+  // validation to reject the entire response for those cards.
+  const metricsCommand = `nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null`;
 
   const result = await executeSSHCommand(host, port, username, password, metricsCommand);
 
@@ -121,9 +124,11 @@ async function fetchPodGPUMetrics(
   }
 
   const output = result.output.trim();
-  const values = output.split(",").map(v => parseFloat(v.trim()));
+  // Convert unsupported fields to 0 rather than NaN so newer GPU architectures
+  // (e.g. B200) that don't expose every nvidia-smi field still return metrics.
+  const values = output.split(",").map(v => { const n = parseFloat(v.trim()); return isNaN(n) ? 0 : n; });
 
-  if (values.length >= 5 && !values.some(isNaN)) {
+  if (values.length >= 5) {
     return {
       utilization: values[0] || 0,
       memoryUsed: values[1] || 0,

@@ -281,7 +281,7 @@ export function ApiKeysSettings({ token }: ApiKeysSettingsProps) {
       <div className="px-6 py-4 bg-zinc-50 border-t border-[var(--line)]">
         <p className="text-xs text-[var(--muted)]">
           API keys provide full access to your account via the REST API.{" "}
-          <a href="/dashboard?tab=docs" className="text-[var(--blue)] hover:underline">
+          <a href="/docs/api-reference" target="_blank" rel="noopener noreferrer" className="text-[var(--blue)] hover:underline">
             View API documentation →
           </a>
         </p>

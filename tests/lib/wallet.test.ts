@@ -10,6 +10,7 @@ import {
   formatCents,
   WALLET_CONFIG,
 } from '@/lib/wallet';
+import { createInvoiceForPayment } from '@/lib/invoice';
 
 // Mock dependencies
 vi.mock('@/lib/stripe', () => ({
@@ -20,6 +21,11 @@ vi.mock('@/lib/pricing', () => ({
   getHourlyRateCents: vi.fn(() => 200), // $2/hour
   getAutoRefillThresholdCents: vi.fn(() => 2000), // $20
   getAutoRefillAmountCents: vi.fn(() => 10000), // $100
+}));
+
+// Mock the invoice module - use the real Stripe mock to verify invoice API calls
+vi.mock('@/lib/invoice', () => ({
+  createInvoiceForPayment: vi.fn().mockResolvedValue({ id: 'inv_mock' }),
 }));
 
 // Create mock Stripe instance
@@ -33,6 +39,14 @@ const mockStripe = {
   paymentIntents: {
     create: vi.fn(),
     list: vi.fn(),
+  },
+  invoices: {
+    create: vi.fn(),
+    finalizeInvoice: vi.fn(),
+    pay: vi.fn(),
+  },
+  invoiceItems: {
+    create: vi.fn(),
   },
 } as unknown as Stripe;
 
@@ -256,6 +270,75 @@ describe('Wallet Module', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Card declined');
+    });
+
+    it('should create a Stripe invoice for successful auto-refill payments (PA-102)', async () => {
+      const mockPaymentIntent = {
+        id: 'pi_test123',
+        status: 'succeeded',
+      } as Stripe.PaymentIntent;
+
+      const mockTransactions = {
+        data: [],
+      } as Stripe.ApiList<Stripe.CustomerBalanceTransaction>;
+
+      vi.mocked(mockStripe.paymentIntents.create).mockResolvedValue(mockPaymentIntent);
+      vi.mocked(mockStripe.customers.listBalanceTransactions).mockResolvedValue(mockTransactions);
+      vi.mocked(mockStripe.customers.createBalanceTransaction).mockResolvedValue({} as Stripe.CustomerBalanceTransaction);
+
+      const result = await fundWallet('cus_test123', 5000, 'pm_test456');
+
+      expect(result.success).toBe(true);
+      // PA-102: An invoice MUST be created for auto-refill payments
+      expect(createInvoiceForPayment).toHaveBeenCalledWith(
+        mockStripe,         // stripe instance
+        'cus_test123',      // customerId
+        5000,               // amount
+        'Wallet auto-refill', // description
+        'pi_test123'        // paymentIntentId
+      );
+    });
+
+    it('should NOT create an invoice when payment fails (PA-102)', async () => {
+      const mockPaymentIntent = {
+        id: 'pi_test123',
+        status: 'requires_action',
+      } as Stripe.PaymentIntent;
+
+      vi.mocked(mockStripe.paymentIntents.create).mockResolvedValue(mockPaymentIntent);
+      vi.mocked(createInvoiceForPayment).mockClear();
+
+      const result = await fundWallet('cus_test123', 5000, 'pm_test456');
+
+      expect(result.success).toBe(false);
+      expect(createInvoiceForPayment).not.toHaveBeenCalled();
+    });
+
+    it('should NOT create an invoice for duplicate refills (PA-102)', async () => {
+      const mockPaymentIntent = {
+        id: 'pi_test123',
+        status: 'succeeded',
+      } as Stripe.PaymentIntent;
+
+      const mockTransactions = {
+        data: [
+          {
+            id: 'txn_existing',
+            created: Math.floor(Date.now() / 1000),
+            metadata: { payment_intent_id: 'pi_test123' },
+          } as Stripe.CustomerBalanceTransaction,
+        ],
+      } as Stripe.ApiList<Stripe.CustomerBalanceTransaction>;
+
+      vi.mocked(mockStripe.paymentIntents.create).mockResolvedValue(mockPaymentIntent);
+      vi.mocked(mockStripe.customers.listBalanceTransactions).mockResolvedValue(mockTransactions);
+      vi.mocked(createInvoiceForPayment).mockClear();
+
+      const result = await fundWallet('cus_test123', 5000, 'pm_test456');
+
+      expect(result.success).toBe(true);
+      // Duplicate — no invoice should be created
+      expect(createInvoiceForPayment).not.toHaveBeenCalled();
     });
   });
 

@@ -65,8 +65,10 @@ Sent from ${getBrandName()} contact form`;
     text: fallbackText,
   });
 
+  const recipients = [getSupportEmail(), "hello@hosted.ai"].join(", ");
+
   await sendEmailDirect({
-    to: getSupportEmail(),
+    to: recipients,
     reply_to: email,
     subject: template.subject,
     html: template.html,

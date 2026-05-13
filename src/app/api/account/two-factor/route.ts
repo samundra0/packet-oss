@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyCustomerToken } from "@/lib/customer-auth";
+import { verifyCustomerToken, generateTwoFactorVerifiedToken } from "@/lib/customer-auth";
 import {
   getTwoFactorStatus,
   startTwoFactorSetup,
@@ -180,9 +180,14 @@ export async function POST(request: NextRequest) {
           );
         }
 
+        // Issue a new token with twoFactorVerified claim so refreshes
+        // don't re-prompt for 2FA
+        const verifiedToken = generateTwoFactorVerifiedToken(token);
+
         return NextResponse.json({
           success: true,
           usedBackupCode: verifyResult.usedBackupCode,
+          token: verifiedToken,
         });
       }
 

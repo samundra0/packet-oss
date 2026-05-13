@@ -13,8 +13,8 @@ import type {
   DeploymentStatus,
 } from "./types";
 import { ItemCard } from "./ItemCard";
-import { DeployModal } from "./DeployModal";
 import { ProgressModal } from "./ProgressModal";
+import { LaunchGPUModal, type DeployContext } from "@/app/dashboard/components/LaunchGPUModal";
 import { FilterPanel } from "./FilterPanel";
 
 function HuggingFacePageContent() {
@@ -152,6 +152,7 @@ function HuggingFacePageContent() {
         const data = await res.json();
         const products = data.products || [];
         setLaunchOptions({
+          categories: data.categories || [],
           products,
           walletBalanceCents: data.walletBalanceCents || 0,
         });
@@ -467,23 +468,60 @@ function HuggingFacePageContent() {
         )}
       </main>
 
-      {/* Deploy Modal */}
+      {/* Deploy Modal — shared LaunchGPUModal with HF deploy context */}
       {showDeployModal && selectedItem && (
-        <DeployModal
-          item={selectedItem}
-          launchOptions={launchOptions}
-          selectedProduct={selectedProduct}
-          setSelectedProduct={setSelectedProduct}
-          selectedRegion={selectedRegion}
-          setSelectedRegion={setSelectedRegion}
-          gpuCount={gpuCount}
-          setGpuCount={setGpuCount}
-          hfToken={hfToken}
-          setHfToken={setHfToken}
-          deploying={deploying}
-          deployError={deployError}
+        <LaunchGPUModal
+          isOpen={showDeployModal}
           onClose={closeDeployModal}
-          onDeploy={handleDeploy}
+          token={token || ""}
+          onSuccess={() => {
+            closeDeployModal();
+          }}
+          onError={(msg) => setDeployError(msg)}
+          deployContext={{
+            type: "huggingface",
+            title: `Deploy ${selectedItem.name}`,
+            subtitle: selectedItem.description,
+            modelId: selectedItem.id,
+            isGated: "gated" in selectedItem && selectedItem.gated,
+            vramGb: "vramGb" in selectedItem ? selectedItem.vramGb : undefined,
+            onDeploy: async (params) => {
+              const body: Record<string, unknown> = {
+                hfItemId: selectedItem.id,
+                gpuCount: 1,
+                product_id: params.product_id,
+                region_id: params.region_id,
+              };
+              if (params.hfToken) body.hfToken = params.hfToken;
+
+              const res = await fetch("/api/huggingface/deploy", {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(body),
+              });
+              const data = await res.json();
+
+              if (!res.ok) {
+                throw new Error(data.error || "Failed to deploy");
+              }
+
+              const subId = data.deployment?.subscriptionId || data.subscriptionId;
+              if (subId) {
+                setDeploymentSubscriptionId(String(subId));
+                setDeploymentStatus(data.installing ? "installing" : "starting");
+                setDeploymentMessage(data.message || "Deployment started...");
+                setDeploymentLogs(data.logs || "");
+                setNotifyRequested(false);
+                setApiEndpoint(null);
+                setShowProgressModal(true);
+              } else if (data.deployment?.id) {
+                router.push(`/dashboard?token=${token}&hf_deploy=${data.deployment.id}`);
+              }
+            },
+          }}
         />
       )}
 

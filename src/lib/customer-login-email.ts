@@ -21,6 +21,7 @@ import { getTeamMemberships, acceptTeamInvite } from "@/lib/team-members";
 import { logLoginLinkSent } from "@/lib/admin-activity";
 import { prisma } from "@/lib/prisma";
 import { getBrandName, getDashboardUrl } from "@/lib/branding";
+import { findSuspension } from "@/lib/customer-suspension";
 import type Stripe from "stripe";
 
 // ── Session timeout ──────────────────────────────────────────────────────────
@@ -264,6 +265,14 @@ export async function sendLoginEmailForCustomer(email: string): Promise<boolean>
   });
 
   if (customers.data.length > 0) {
+    // Refuse to send login links to suspended customers (fraud lockout).
+    // Returns true so the calling endpoint reveals nothing about the block.
+    const suspension = await findSuspension(customers.data.map(c => c.id));
+    if (suspension) {
+      console.warn(`[LoginEmail] Refused login link for suspended customer: ${normalizedEmail}`);
+      return true;
+    }
+
     // Resolve the best customer (same priority as login route)
     const customer =
       customers.data.find(c => c.metadata?.hostedai_team_id && c.metadata?.billing_type === "hourly") ||
@@ -335,6 +344,13 @@ export async function sendLoginEmailForCustomer(email: string): Promise<boolean>
 
     if (!ownerCustomer || ("deleted" in ownerCustomer && ownerCustomer.deleted)) {
       return false;
+    }
+
+    // If team owner is suspended, refuse to send team-member login link too
+    const ownerSuspension = await findSuspension([membership.stripeCustomerId]);
+    if (ownerSuspension) {
+      console.warn(`[LoginEmail] Refused team-member login for ${normalizedEmail} — owner ${membership.stripeCustomerId} suspended`);
+      return true;
     }
 
     const sessionTimeout = await getSessionTimeout(membership.stripeCustomerId);

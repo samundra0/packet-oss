@@ -22,8 +22,10 @@ interface LaunchProduct {
   badgeText: string | null;
   vramGb: number | null;
   cudaCores: number | null;
-  available: boolean;
-  regions: Array<{ id: number; region_name: string; name?: string }>;
+  categoryIds?: string[];
+  gpuFamily: string | null;
+  available: boolean | null; // null = not yet checked (deferred to category-check)
+  regions?: Array<{ id: number; region_name: string; name?: string }>;
 }
 
 interface SharedVolume {
@@ -50,12 +52,45 @@ interface SSHKeyOption {
   createdAt: string;
 }
 
+interface LaunchCategory {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  displayOrder: number;
+  icon: string | null;
+  scenarioConfigured: boolean;
+  products: LaunchProduct[];
+}
+
 interface LaunchOptionsData {
+  categories?: LaunchCategory[];
   products: LaunchProduct[];
   existingSharedVolumes: SharedVolume[];
   sshKeys: SSHKeyOption[];
   teamId: string;
   walletBalanceCents: number;
+}
+
+export interface DeployContext {
+  type: "huggingface" | "app";
+  title: string;              // e.g. "Deploy Mistral 7B"
+  subtitle?: string;          // e.g. model description
+  modelId: string;            // HF model ID
+  hfToken?: string;           // pre-filled token
+  isGated?: boolean;          // show token input
+  openWebUI?: boolean;        // show Open WebUI checkbox
+  vramGb?: number;            // model VRAM requirement (for display)
+  onDeploy: (params: {
+    product_id: string;
+    region_id: number;
+    name: string;
+    hfToken?: string;
+    openWebUI?: boolean;
+    ssh_key_ids?: string[];
+    new_storage_block_id?: string;
+    existing_shared_volume_id?: number;
+  }) => Promise<void>;
 }
 
 interface LaunchGPUModalProps {
@@ -69,6 +104,12 @@ interface LaunchGPUModalProps {
   onTopup?: (amount: number, voucherCode?: string, launchProductId?: string) => void;
   topupLoading?: boolean;
   initialProductId?: string;
+  /** When set, the product picker is locked to this product — used when
+   *  deploying against an existing monthly subscription. */
+  lockedProductId?: string;
+  /** Stripe subscription ID to bill the deploy against (monthly flow). */
+  stripeSubscriptionId?: string;
+  deployContext?: DeployContext;
 }
 
 export function LaunchGPUModal({
@@ -82,6 +123,9 @@ export function LaunchGPUModal({
   onTopup,
   topupLoading,
   initialProductId,
+  lockedProductId,
+  stripeSubscriptionId,
+  deployContext,
 }: LaunchGPUModalProps) {
   const [loading, setLoading] = useState(true);
   const [loadingSeconds, setLoadingSeconds] = useState(0);
@@ -90,10 +134,25 @@ export function LaunchGPUModal({
   const [error, setError] = useState("");
   const [options, setOptions] = useState<LaunchOptionsData | null>(null);
 
+  // Step state: 1 = pick category, 2 = pick product + region, 3 = configure + launch
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+
   // Form state
   const [selectedProduct, setSelectedProduct] = useState<string>("");
+  const [selectedGpuFamily, setSelectedGpuFamily] = useState<string | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<number | null>(null);
-  const [instanceName, setInstanceName] = useState("");
+  const [categoryCheckLoading, setCategoryCheckLoading] = useState(false);
+  // Stores compatibility + regions per service after category-check
+  const [categoryCheckResult, setCategoryCheckResult] = useState<{
+    categoryId: string;
+    compatibleServiceIds: string[];
+    serviceRegions: Record<string, Array<{ id: number; region_name: string; city?: string; country?: string; country_code?: string }>>;
+  } | null>(null);
+  const [instanceName, setInstanceName] = useState(
+    deployContext?.modelId
+      ? deployContext.modelId.split("/").pop()?.replace(/[^a-z0-9-]/gi, "-").toLowerCase().slice(0, 30) || "gpu-instance"
+      : ""
+  );
   const [storageMode, setStorageMode] = useState<"none" | "create" | "existing">("none");
   const [selectedExistingVolume, setSelectedExistingVolume] = useState<number | null>(null);
   const [storageBlocks, setStorageBlocks] = useState<StorageBlockOption[]>([]);
@@ -106,16 +165,128 @@ export function LaunchGPUModal({
   const [showFundWallet, setShowFundWallet] = useState(false);
   const [selectedSSHKeyIds, setSelectedSSHKeyIds] = useState<Set<string>>(new Set());
 
+  // Deploy context state (HF-specific)
+  const [hfToken, setHfToken] = useState(deployContext?.hfToken || "");
+  const [addOpenWebUI, setAddOpenWebUI] = useState(deployContext?.openWebUI ?? false);
+
+  // Check category compatibility when a category is selected
+  const checkCategoryAvailability = async (categoryId: string) => {
+    setCategoryCheckLoading(true);
+    setCategoryCheckResult(null);
+    try {
+      const res = await fetch(`/api/instances/category-check?categoryId=${categoryId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCategoryCheckResult(data);
+        // Auto-select first available product
+        const cat = options?.categories?.find(c => c.id === categoryId);
+        if (cat) {
+          // Don't clobber a locked product — the user is deploying against a
+          // specific subscription and must stay on that product.
+          if (lockedProductId) {
+            setSelectedProduct(lockedProductId);
+          } else {
+            const firstAvailable = cat.products
+              .filter(p => data.compatibleServiceIds.includes(p.serviceId))
+              .sort((a, b) => a.displayOrder - b.displayOrder)[0];
+            if (firstAvailable) setSelectedProduct(firstAvailable.id);
+            else setSelectedProduct("");
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Category check failed:", err);
+    } finally {
+      setCategoryCheckLoading(false);
+    }
+  };
+
+  // Derive product availability and regions from category check result
+  const getProductAvailability = (product: LaunchProduct) => {
+    if (!categoryCheckResult) return product.available ?? false;
+    return product.serviceId ? categoryCheckResult.compatibleServiceIds.includes(product.serviceId) : false;
+  };
+
+  const getProductRegions = (product: LaunchProduct) => {
+    if (!categoryCheckResult || !product.serviceId) return product.regions || [];
+    const byService = categoryCheckResult.serviceRegions[product.serviceId] || [];
+    // Locked products (deploying against a monthly subscription) must always
+    // offer at least one region. When the product's own service has no
+    // regions (e.g. the monthly SKU isn't wired for direct instance creation),
+    // fall back to the union of regions across every compatible service in
+    // the category — the subscription-to-pool binding on the backend
+    // determines where it actually lands.
+    if (byService.length === 0 && lockedProductId === product.id) {
+      const seen = new Set<number>();
+      const union: Array<{ id: number; region_name: string; city?: string; country?: string; country_code?: string }> = [];
+      for (const regions of Object.values(categoryCheckResult.serviceRegions)) {
+        if (!Array.isArray(regions)) continue;
+        for (const r of regions) {
+          if (r && typeof r.id === "number" && !seen.has(r.id)) {
+            seen.add(r.id);
+            union.push(r);
+          }
+        }
+      }
+      return union;
+    }
+    return byService;
+  };
+
   const selectedProductDetails = options?.products?.find((p) => p.id === selectedProduct);
 
-  // Auto-select first region when product changes
+  // Use categories from API if available, fall back to gpuFamily derivation
+  const hasCategories = (options?.categories?.length ?? 0) > 0;
+
+  const gpuFamilies: string[] = hasCategories
+    ? (options?.categories ?? []).map(c => c.name)
+    : options?.products
+      ? [...new Set(
+          [...options.products]
+            .sort((a, b) => a.displayOrder - b.displayOrder)
+            .map((p) => p.gpuFamily)
+            .filter((f): f is string => !!f)
+        )]
+      : [];
+
+  // Products filtered to the selected GPU family/category.
+  // When a product is locked (deploying against a specific subscription),
+  // narrow the list to just that product. Otherwise, hide monthly-billed
+  // products entirely — they can only be deployed via an existing
+  // subscription entitlement (the "Deploy GPU" button on a sub card), not
+  // picked from the general on-demand list.
+  const filteredProducts = (() => {
+    if (!options?.products) return [];
+    if (lockedProductId) {
+      const locked = options.products.find(p => p.id === lockedProductId);
+      return locked ? [locked] : [];
+    }
+    const onDemand = options.products.filter(p => p.billingType !== "monthly");
+    if (!selectedGpuFamily) return onDemand;
+    if (hasCategories) {
+      const cat = options.categories?.find(c => c.name === selectedGpuFamily);
+      const list = cat ? cat.products : onDemand;
+      return list.filter(p => p.billingType !== "monthly");
+    }
+    return onDemand.filter(p => p.gpuFamily === selectedGpuFamily);
+  })();
+
+  // Derive regions for selected product from category check result
+  const selectedProductRegions = selectedProductDetails
+    ? getProductRegions(selectedProductDetails)
+    : [];
+
+  // Auto-select first region when product or category check changes
   useEffect(() => {
-    if (selectedProductDetails?.regions?.length) {
-      setSelectedRegion(selectedProductDetails.regions[0].id);
+    if (selectedProductRegions.length) {
+      setSelectedRegion(selectedProductRegions[0].id);
     } else {
       setSelectedRegion(null);
     }
-  }, [selectedProduct, selectedProductDetails?.regions]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProduct, categoryCheckResult]);
 
   // Fetch storage blocks when region changes — reset storage selection
   useEffect(() => {
@@ -195,21 +366,38 @@ export function LaunchGPUModal({
             setSelectedSSHKeyIds(new Set(data.sshKeys.map(k => k.id)));
           }
 
-          // Auto-select product
-          if (data.products?.length > 0) {
-            if (initialProductId) {
-              const target = data.products.find((p) => p.id === initialProductId);
-              if (target) {
-                setSelectedProduct(target.id);
+          // With categories: start at step 1, user picks category first
+          // Without categories (legacy): auto-select product like before
+          if (data.categories?.length) {
+            setStep(1);
+            // If initialProductId or lockedProductId provided, find its
+            // category and skip to step 2. Locked takes priority — it's used
+            // when deploying a specific subscription entitlement.
+            const preselectId = lockedProductId || initialProductId;
+            if (preselectId) {
+              const targetProduct = data.products?.find(p => p.id === preselectId);
+              if (targetProduct?.categoryIds?.length) {
+                const cat = data.categories.find(c => c.id === targetProduct.categoryIds![0]);
+                if (cat) {
+                  setSelectedGpuFamily(cat.name);
+                  setSelectedProduct(preselectId);
+                  setStep(2);
+                  // Trigger category check
+                  checkCategoryAvailability(cat.id);
+                }
               }
             }
-
-            if (!initialProductId || !data.products.find((p) => p.id === initialProductId)) {
-              // Pick first available product, preferring featured
-              const featured = data.products.find((p) => p.available && p.featured);
-              const firstAvailable = data.products.find((p) => p.available);
-              const pick = featured || firstAvailable || data.products[0];
-              if (pick) setSelectedProduct(pick.id);
+          } else if (data.products?.length > 0) {
+            // Legacy: no categories, auto-select product
+            setStep(2); // skip category step
+            const featured = data.products.find((p) => p.available && p.featured);
+            const firstAvailable = data.products.find((p) => p.available);
+            const targetProduct = featured || firstAvailable || data.products[0];
+            if (targetProduct) {
+              setSelectedProduct(targetProduct.id);
+              if (targetProduct.gpuFamily) {
+                setSelectedGpuFamily(targetProduct.gpuFamily);
+              }
             }
           }
         } else {
@@ -228,10 +416,13 @@ export function LaunchGPUModal({
   // Reset state when modal closes
   useEffect(() => {
     if (!isOpen) {
+      setStep(1);
       setInstanceName("");
       setError("");
       setLaunching(false);
       setSelectedProduct("");
+      setSelectedGpuFamily(null);
+      setCategoryCheckResult(null);
       setSelectedStartupScript("");
       setCustomScript("");
       setShowCustomScript(false);
@@ -273,7 +464,7 @@ export function LaunchGPUModal({
       return;
     }
 
-    if (!selectedProductDetails?.available) {
+    if (!selectedProductDetails || !getProductAvailability(selectedProductDetails)) {
       setError("This GPU is not currently available");
       return;
     }
@@ -301,33 +492,7 @@ export function LaunchGPUModal({
     setError("");
 
     try {
-      // If "create" storage mode, create the shared volume first
-      let sharedVolumeIds: number[] | undefined;
-
-      if (storageMode === "create" && selectedStorageBlock && selectedRegion) {
-        const volumeName = `${instanceName.trim()}-storage`;
-        const volRes = await fetch("/api/instances/shared-volumes", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: volumeName,
-            region_id: selectedRegion,
-            storage_block_id: selectedStorageBlock,
-          }),
-        });
-        if (!volRes.ok) {
-          const volErr = await volRes.json();
-          setError(volErr.error || "Failed to create storage volume");
-          setLaunching(false);
-          return;
-        }
-        const { volume } = await volRes.json();
-        sharedVolumeIds = [volume.id];
-      } else if (storageMode === "existing" && selectedExistingVolume) {
-        sharedVolumeIds = [selectedExistingVolume];
-      }
-
-      // Optimistic close — modal closes immediately, API fires in background
+      // Optimistic close — modal closes immediately
       import("@/lib/plerdy")
         .then(({ trackPlerdy, PLERDY_EVENTS }) => trackPlerdy(PLERDY_EVENTS.GPU_DEPLOYED))
         .catch(() => {});
@@ -340,31 +505,45 @@ export function LaunchGPUModal({
       onSuccess({ name: instanceName.trim(), poolName: productName });
       onClose();
 
-      // Fire the instance creation in the background
-      const response = await fetch("/api/instances", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: instanceName.trim(),
+      if (deployContext?.onDeploy) {
+        // Custom deploy handler (HF, apps, etc.)
+        await deployContext.onDeploy({
           product_id: selectedProduct,
-          region_id: selectedRegion,
-          startup_script: startupScript || undefined,
-          startup_script_preset_id: startupScriptPresetId || undefined,
-          shared_volume_ids: sharedVolumeIds,
+          region_id: selectedRegion!,
+          name: instanceName.trim(),
+          hfToken: hfToken || undefined,
+          openWebUI: addOpenWebUI || undefined,
           ssh_key_ids: selectedSSHKeyIds.size > 0 ? Array.from(selectedSSHKeyIds) : undefined,
-          billingType: selectedProductDetails?.billingType || undefined,
-          vgpus: 1,
-        }),
-      });
+          new_storage_block_id: storageMode === "create" && selectedStorageBlock ? selectedStorageBlock : undefined,
+          existing_shared_volume_id: storageMode === "existing" && selectedExistingVolume ? selectedExistingVolume : undefined,
+        });
+      } else {
+        // Standard GPU launch
+        const response = await fetch("/api/instances", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: instanceName.trim(),
+            product_id: selectedProduct,
+            region_id: selectedRegion,
+            startup_script: startupScript || undefined,
+            startup_script_preset_id: startupScriptPresetId || undefined,
+            new_storage_block_id: storageMode === "create" && selectedStorageBlock ? selectedStorageBlock : undefined,
+            existing_shared_volume_id: storageMode === "existing" && selectedExistingVolume ? selectedExistingVolume : undefined,
+            ssh_key_ids: selectedSSHKeyIds.size > 0 ? Array.from(selectedSSHKeyIds) : undefined,
+            billingType: selectedProductDetails?.billingType || undefined,
+            stripeSubscriptionId: stripeSubscriptionId || undefined,
+          }),
+        });
 
-      if (!response.ok) {
-        const data = await response.json();
-        onError?.(data.error || "Failed to launch GPU");
+        if (!response.ok) {
+          const data = await response.json();
+          onError?.(data.error || "Failed to launch GPU");
+        }
       }
     } catch (err) {
-      // Network timeout — the server likely processed the request (GPU spins up)
-      // but the response took longer than the proxy timeout. Don't alarm the user.
-      console.warn("Launch request network error (GPU likely provisioning):", err);
+      console.warn("Launch request error:", err);
+      onError?.(err instanceof Error ? err.message : "Deploy failed");
     } finally {
       setLaunching(false);
     }
@@ -377,19 +556,26 @@ export function LaunchGPUModal({
     !!selectedProduct &&
     !!selectedRegion &&
     !!instanceName.trim() &&
-    !!selectedProductDetails?.available &&
+    !!(selectedProductDetails && getProductAvailability(selectedProductDetails)) &&
     !launching;
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full max-h-[90vh] overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="border-b border-[var(--line)] px-6 py-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-[var(--ink)]">New GPU</h2>
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <h2 className="text-lg font-semibold text-[var(--ink)]">
+                {deployContext?.title || "New GPU"}
+              </h2>
+              {deployContext?.subtitle && (
+                <p className="text-sm text-[var(--muted)] mt-1 line-clamp-2">{deployContext.subtitle}</p>
+              )}
+            </div>
             <button
               onClick={onClose}
-              className="p-1.5 text-zinc-400 hover:text-zinc-600 transition-colors"
+              className="p-1.5 text-zinc-400 hover:text-zinc-600 transition-colors shrink-0"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path
@@ -404,7 +590,7 @@ export function LaunchGPUModal({
         </div>
 
         {/* Body */}
-        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+        <div className="p-6 overflow-y-auto flex-1 min-h-0">
           {DEPLOY_MAINTENANCE ? (
             <div className="text-center py-8">
               <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -438,10 +624,7 @@ export function LaunchGPUModal({
           ) : loading ? (
             <div className="flex flex-col items-center justify-center py-12 gap-3">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-zinc-900"></div>
-              <p className="text-sm text-[var(--muted)]">Checking GPU availability...</p>
-              <p className="text-xs text-zinc-400">
-                This can take up to 15 seconds ({Math.max(0, 15 - loadingSeconds)}s)
-              </p>
+              <p className="text-sm text-[var(--muted)]">Loading GPU options...</p>
             </div>
           ) : error && !options ? (
             <div className="text-center py-8">
@@ -543,23 +726,127 @@ export function LaunchGPUModal({
             </div>
           ) : (
             <>
-              {/* GPU Product Selection */}
-              {options?.products && options.products.length > 0 ? (
+              {/* Step indicator */}
+              {hasCategories && (
+                <div className="flex items-center gap-2 mb-5">
+                  {[
+                    { n: 1, label: "GPU Type" },
+                    { n: 2, label: "Product" },
+                    { n: 3, label: "Configure" },
+                  ].map(({ n, label }, i) => (
+                    <div key={n} className="flex items-center gap-2">
+                      {i > 0 && <div className={`w-8 h-px ${step >= n ? "bg-teal-400" : "bg-zinc-200"}`} />}
+                      <button
+                        type="button"
+                        onClick={() => { if (n < step) setStep(n as 1 | 2 | 3); }}
+                        disabled={n > step}
+                        className={`flex items-center gap-1.5 text-xs font-medium transition-colors ${
+                          step === n
+                            ? "text-teal-700"
+                            : step > n
+                              ? "text-teal-500 cursor-pointer hover:text-teal-600"
+                              : "text-zinc-300 cursor-default"
+                        }`}
+                      >
+                        <span className={`w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center ${
+                          step > n
+                            ? "bg-teal-500 text-white"
+                            : step === n
+                              ? "bg-teal-100 text-teal-700 ring-2 ring-teal-500"
+                              : "bg-zinc-100 text-zinc-400"
+                        }`}>
+                          {step > n ? "✓" : n}
+                        </span>
+                        {label}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* ====== STEP 1: GPU Category ====== */}
+              {step === 1 && hasCategories && (
+                <>
+                  <div className="mb-4">
+                    <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
+                      Select GPU Type
+                    </label>
+                    <div className="space-y-2">
+                      {gpuFamilies.map((family) => {
+                        const cat = options?.categories?.find(c => c.name === family);
+                        const isPending = cat && !cat.scenarioConfigured;
+                        const productCount = cat?.products?.length ?? 0;
+                        return (
+                          <button
+                            key={family}
+                            type="button"
+                            disabled={!!isPending}
+                            onClick={() => {
+                              setSelectedGpuFamily(family);
+                              setSelectedProduct("");
+                              setCategoryCheckResult(null);
+                              setStep(2);
+                              if (cat) checkCategoryAvailability(cat.id);
+                            }}
+                            className={`w-full text-left px-4 py-3 rounded-lg border-2 transition-all ${
+                              isPending
+                                ? "border-dashed border-gray-200 text-gray-400 cursor-not-allowed"
+                                : "border-[var(--line)] hover:border-teal-400 hover:bg-teal-50/50"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium text-[var(--ink)]">{family}</span>
+                              <span className="text-xs text-[var(--muted)]">
+                                {isPending ? "Pending setup" : `${productCount} product${productCount !== 1 ? "s" : ""}`}
+                              </span>
+                            </div>
+                            {cat?.description && (
+                              <p className="text-xs text-[var(--muted)] mt-0.5">{cat.description}</p>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* ====== STEP 2: Product + Region ====== */}
+              {step === 2 && (
+                <>
+                  {/* GPU Product Selection */}
+                  {categoryCheckLoading ? (
+                    <div className="flex flex-col items-center justify-center py-8 gap-2">
+                      <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
+                        <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" className="opacity-25" /><path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="3" strokeLinecap="round" /></svg>
+                        Checking GPU availability...
+                      </div>
+                      <p className="text-xs text-zinc-400">This can take a few seconds</p>
+                    </div>
+                  ) : filteredProducts.length > 0 ? (
                 <div className="mb-5">
                   <label className="block text-xs font-medium text-[var(--muted)] mb-3 uppercase tracking-wide">
                     Select a GPU
                   </label>
+                  <div className="mb-3 p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 leading-relaxed">
+                    <span className="font-semibold">Dedicated GPU</span> is the whole card, yours alone. <span className="font-semibold">Dynamic GPU</span> is shared infrastructure that delivers the same peak performance and VRAM capacity.
+                  </div>
                   <div className="space-y-2">
-                    {options.products.map((product) => {
+                    {filteredProducts.map((product) => {
                       const isSelected = selectedProduct === product.id;
-                      const isAvailable = product.available;
+                      const isAvailable = getProductAvailability(product);
                       const pricePerHour = (product.pricePerHourCents / 100).toFixed(2);
                       const hasMonthly =
                         product.pricePerMonthCents && product.pricePerMonthCents > 0;
                       const monthlyHourlyRate = hasMonthly
                         ? (product.pricePerMonthCents! / 100 / 730).toFixed(2)
                         : null;
-                      const savingsPercent = hasMonthly
+                      // Savings vs on-demand only makes sense when the product
+                      // carries a non-zero hourly "list" rate. Monthly-only
+                      // products store pricePerHourCents = 0, which would
+                      // produce a -Infinity% savings display.
+                      const hasListHourly = product.pricePerHourCents > 0;
+                      const savingsPercent = hasMonthly && hasListHourly
                         ? Math.round(
                             (1 -
                               product.pricePerMonthCents! /
@@ -625,14 +912,16 @@ export function LaunchGPUModal({
                                     </span>
                                     <span className="text-xs text-[var(--muted)]">eff/hr</span>
                                   </div>
-                                  <div className="flex items-center gap-1.5 justify-end">
-                                    <span className="text-xs text-[var(--muted)] line-through">
-                                      ${pricePerHour}/hr
-                                    </span>
-                                    <span className="text-xs font-medium text-teal-600">
-                                      Save {savingsPercent}%
-                                    </span>
-                                  </div>
+                                  {hasListHourly && savingsPercent > 0 && (
+                                    <div className="flex items-center gap-1.5 justify-end">
+                                      <span className="text-xs text-[var(--muted)] line-through">
+                                        ${pricePerHour}/hr
+                                      </span>
+                                      <span className="text-xs font-medium text-teal-600">
+                                        Save {savingsPercent}%
+                                      </span>
+                                    </div>
+                                  )}
                                   <div className="text-xs text-[var(--muted)] mt-0.5">
                                     ${(product.pricePerMonthCents! / 100).toFixed(0)}/mo commitment
                                   </div>
@@ -698,30 +987,66 @@ export function LaunchGPUModal({
               )}
 
               {/* Region Picker */}
-              {selectedProductDetails && selectedProductDetails.regions.length > 0 && (
+              {selectedProductDetails && selectedProductRegions.length > 0 && (
                 <div className="mb-5">
                   <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
                     Region
                   </label>
-                  <div className="flex flex-wrap gap-2">
-                    {selectedProductDetails.regions.map((region) => (
-                      <button
-                        key={region.id}
-                        type="button"
-                        onClick={() => setSelectedRegion(region.id)}
-                        className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
-                          selectedRegion === region.id
-                            ? "border-teal-500 bg-teal-50 text-teal-700 font-medium"
-                            : "border-[var(--line)] text-[var(--muted)] hover:border-zinc-300"
-                        }`}
-                      >
-                        {region.region_name || region.name}
-                      </button>
-                    ))}
+                  <div className="space-y-2">
+                    {selectedProductRegions.map((region) => {
+                      const cc = (region as { country_code?: string }).country_code?.toLowerCase();
+                      const flag = cc
+                        ? String.fromCodePoint(...[...cc].map(c => 0x1F1E6 + c.charCodeAt(0) - 97))
+                        : "";
+                      return (
+                        <button
+                          key={region.id}
+                          type="button"
+                          onClick={() => setSelectedRegion(region.id)}
+                          className={`w-full text-left px-4 py-3 rounded-lg border-2 transition-all ${
+                            selectedRegion === region.id
+                              ? "border-teal-500 bg-teal-50"
+                              : "border-[var(--line)] hover:border-teal-300"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            {flag && <span className="text-xl">{flag}</span>}
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium text-[var(--ink)]">
+                                {(region as { city?: string }).city || region.region_name}
+                                {(region as { country?: string }).country && (
+                                  <span className="text-[var(--muted)] font-normal">, {(region as { country?: string }).country}</span>
+                                )}
+                              </div>
+                              <div className="text-xs text-[var(--muted)]">{region.region_name}</div>
+                            </div>
+                            {selectedRegion === region.id && (
+                              <svg className="w-5 h-5 text-teal-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}
 
+                  {/* Next button for step 2 → step 3 */}
+                  {selectedProduct && selectedRegion && (
+                    <button
+                      type="button"
+                      onClick={() => setStep(3)}
+                      className="w-full mt-4 px-4 py-3 bg-teal-600 text-white rounded-xl font-medium hover:bg-teal-700 transition-colors"
+                    >
+                      Continue to Configuration
+                    </button>
+                  )}
+                </>
+              )}
+
+              {/* ====== STEP 3: Configure + Launch ====== */}
+              {step === 3 && (
+                <>
               {/* Instance Name */}
               <div className="mb-5">
                 <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
@@ -736,7 +1061,75 @@ export function LaunchGPUModal({
                 />
               </div>
 
-              {/* Advanced Options (collapsible) */}
+              {/* Persistent Storage (visible by default) */}
+              {selectedRegion && (
+                <div className="mb-5">
+                  <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
+                    Persistent Storage
+                  </label>
+                  {storageBlocksLoading ? (
+                    <div className="flex items-center gap-2 p-3 text-sm text-[var(--muted)]">
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Loading storage options...
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
+                        <input type="radio" name="storage-mode-top" checked={storageMode === "none"} onChange={() => { setStorageMode("none"); setSelectedExistingVolume(null); }} className="w-4 h-4 accent-teal-500" />
+                        <div>
+                          <span className="text-sm font-medium text-[var(--ink)]">None</span>
+                          <p className="text-xs text-[var(--muted)]">Ephemeral storage only (data lost on termination)</p>
+                        </div>
+                      </label>
+                      {storageBlocks.length > 0 && (
+                        <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
+                          <input type="radio" name="storage-mode-top" checked={storageMode === "create"} onChange={() => { setStorageMode("create"); setSelectedExistingVolume(null); if (storageBlocks.length > 0 && !selectedStorageBlock) setSelectedStorageBlock(storageBlocks[0].id); }} className="w-4 h-4 accent-teal-500" />
+                          <div>
+                            <span className="text-sm font-medium text-[var(--ink)]">Create new volume</span>
+                            <p className="text-xs text-[var(--muted)]">Persistent storage that survives termination</p>
+                          </div>
+                        </label>
+                      )}
+                      {(() => {
+                        const regionVolumes = options?.existingSharedVolumes?.filter(v => v.region_id === selectedRegion) || [];
+                        if (regionVolumes.length === 0) return null;
+                        return (
+                          <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
+                            <input type="radio" name="storage-mode-top" checked={storageMode === "existing"} onChange={() => { setStorageMode("existing"); setSelectedExistingVolume(regionVolumes[0].id); }} className="w-4 h-4 accent-teal-500" />
+                            <div className="flex-1">
+                              <span className="text-sm font-medium text-[var(--ink)]">Use existing volume</span>
+                              <p className="text-xs text-[var(--muted)]">Attach a volume you already own</p>
+                            </div>
+                            <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">{regionVolumes.length} available</span>
+                          </label>
+                        );
+                      })()}
+                    </div>
+                  )}
+                  {storageMode === "create" && storageBlocks.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {storageBlocks.map(block => (
+                        <button key={block.id} type="button" onClick={() => setSelectedStorageBlock(block.id)} className={`px-3 py-2 text-sm rounded-lg border transition-colors ${selectedStorageBlock === block.id ? "border-teal-500 bg-teal-50 text-teal-700 font-medium" : "border-[var(--line)] text-[var(--muted)] hover:border-zinc-300"}`}>
+                          {block.size}GB{block.cost !== "0" && block.cost !== "0.00" && <span className="text-xs ml-1">(${block.cost}/hr)</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {storageMode === "existing" && options?.existingSharedVolumes && (
+                    <select value={selectedExistingVolume || ""} onChange={e => setSelectedExistingVolume(Number(e.target.value))} className="w-full mt-2 px-4 py-3 rounded-xl border border-[var(--line)] bg-white text-sm focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 outline-none">
+                      {options.existingSharedVolumes.filter(v => v.region_id === selectedRegion).map(vol => (
+                        <option key={vol.id} value={vol.id}>{vol.name} ({vol.size_in_gb}GB) - {vol.status}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* Advanced Options (collapsible) — Startup scripts only, hidden for deploy contexts */}
+              {!deployContext && (
               <div className="mb-5">
                 <button
                   type="button"
@@ -757,26 +1150,10 @@ export function LaunchGPUModal({
                     />
                   </svg>
                   <span>Advanced options</span>
-                  {/* Badges showing active selections when collapsed */}
-                  {!showAdvanced && (
-                    <div className="flex gap-1.5">
-                      {selectedStartupScript && (
-                        <span className="px-2 py-0.5 text-xs bg-teal-100 text-teal-700 rounded-full">
-                          {STARTUP_SCRIPT_PRESETS.find((p) => p.id === selectedStartupScript)
-                            ?.name || "Custom script"}
-                        </span>
-                      )}
-                      {storageMode === "create" && selectedStorageBlock && (
-                        <span className="px-2 py-0.5 text-xs bg-teal-100 text-teal-700 rounded-full">
-                          +{storageBlocks.find(b => b.id === selectedStorageBlock)?.size || ""}GB storage
-                        </span>
-                      )}
-                      {storageMode === "existing" && selectedExistingVolume && (
-                        <span className="px-2 py-0.5 text-xs bg-teal-100 text-teal-700 rounded-full">
-                          Storage attached
-                        </span>
-                      )}
-                    </div>
+                  {!showAdvanced && selectedStartupScript && (
+                    <span className="px-2 py-0.5 text-xs bg-teal-100 text-teal-700 rounded-full">
+                      {STARTUP_SCRIPT_PRESETS.find((p) => p.id === selectedStartupScript)?.name || "Custom script"}
+                    </span>
                   )}
                 </button>
 
@@ -882,149 +1259,13 @@ export function LaunchGPUModal({
                       </div>
                     </div>
 
-                    {/* Persistent Storage */}
-                    {selectedRegion && (
-                      <div>
-                        <label className="block text-xs font-medium text-[var(--muted)] mb-2">
-                          Persistent Storage
-                        </label>
-                        {storageBlocksLoading ? (
-                          <div className="flex items-center gap-2 p-3 text-sm text-[var(--muted)]">
-                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
-                            Loading storage options...
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {/* No persistent storage */}
-                            <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
-                              <input
-                                type="radio"
-                                name="storage-mode"
-                                checked={storageMode === "none"}
-                                onChange={() => {
-                                  setStorageMode("none");
-                                  setSelectedExistingVolume(null);
-                                }}
-                                className="w-4 h-4 accent-teal-500"
-                              />
-                              <div>
-                                <span className="text-sm font-medium text-[var(--ink)]">None</span>
-                                <p className="text-xs text-[var(--muted)]">
-                                  Ephemeral storage only (data lost on termination)
-                                </p>
-                              </div>
-                            </label>
-
-                            {/* Create new volume */}
-                            {storageBlocks.length > 0 && (
-                              <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
-                                <input
-                                  type="radio"
-                                  name="storage-mode"
-                                  checked={storageMode === "create"}
-                                  onChange={() => {
-                                    setStorageMode("create");
-                                    setSelectedExistingVolume(null);
-                                    if (storageBlocks.length > 0 && !selectedStorageBlock) {
-                                      setSelectedStorageBlock(storageBlocks[0].id);
-                                    }
-                                  }}
-                                  className="w-4 h-4 accent-teal-500"
-                                />
-                                <div>
-                                  <span className="text-sm font-medium text-[var(--ink)]">Create new volume</span>
-                                  <p className="text-xs text-[var(--muted)]">
-                                    Persistent storage that survives termination
-                                  </p>
-                                </div>
-                              </label>
-                            )}
-
-                            {/* Use existing volume — only show volumes in the selected region */}
-                            {(() => {
-                              const regionVolumes = options?.existingSharedVolumes?.filter(
-                                (v) => v.region_id === selectedRegion
-                              ) || [];
-                              if (regionVolumes.length === 0) return null;
-                              return (
-                                <label className="flex items-center gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
-                                  <input
-                                    type="radio"
-                                    name="storage-mode"
-                                    checked={storageMode === "existing"}
-                                    onChange={() => {
-                                      setStorageMode("existing");
-                                      setSelectedExistingVolume(regionVolumes[0].id);
-                                    }}
-                                    className="w-4 h-4 accent-teal-500"
-                                  />
-                                  <div className="flex-1">
-                                    <span className="text-sm font-medium text-[var(--ink)]">
-                                      Use existing volume
-                                    </span>
-                                    <p className="text-xs text-[var(--muted)]">
-                                      Attach a volume you already own
-                                    </p>
-                                  </div>
-                                  <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">
-                                    {regionVolumes.length} available
-                                  </span>
-                                </label>
-                              );
-                            })()}
-                          </div>
-                        )}
-
-                        {/* Block size picker for "create" mode */}
-                        {storageMode === "create" && storageBlocks.length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {storageBlocks.map((block) => (
-                              <button
-                                key={block.id}
-                                type="button"
-                                onClick={() => setSelectedStorageBlock(block.id)}
-                                className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
-                                  selectedStorageBlock === block.id
-                                    ? "border-teal-500 bg-teal-50 text-teal-700 font-medium"
-                                    : "border-[var(--line)] text-[var(--muted)] hover:border-zinc-300"
-                                }`}
-                              >
-                                {block.size}GB
-                                {block.cost !== "0" && block.cost !== "0.00" && (
-                                  <span className="text-xs ml-1">(${block.cost}/hr)</span>
-                                )}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-
-                        {/* Existing volume picker — filtered by selected region */}
-                        {storageMode === "existing" && options?.existingSharedVolumes && (
-                          <select
-                            value={selectedExistingVolume || ""}
-                            onChange={(e) => setSelectedExistingVolume(Number(e.target.value))}
-                            className="w-full mt-2 px-4 py-3 rounded-xl border border-[var(--line)] bg-white text-sm focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 outline-none"
-                          >
-                            {options.existingSharedVolumes
-                              .filter((vol) => vol.region_id === selectedRegion)
-                              .map((vol) => (
-                                <option key={vol.id} value={vol.id}>
-                                  {vol.name} ({vol.size_in_gb}GB) - {vol.status}
-                                </option>
-                              ))}
-                          </select>
-                        )}
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
+              )}
 
               {/* Wallet + Cost Summary */}
-              {selectedProductDetails?.available && (
+              {selectedProductDetails && getProductAvailability(selectedProductDetails) && (
                 <div className="p-4 bg-zinc-50 border border-[var(--line)] rounded-xl">
                   <div className="flex items-center justify-between">
                     <div className="text-sm text-[var(--muted)]">
@@ -1038,6 +1279,47 @@ export function LaunchGPUModal({
                       </span>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* Deploy context fields (HF token, Open WebUI, etc.) */}
+              {deployContext?.type === "huggingface" && (
+                <div className="space-y-4 mb-5">
+                  {/* HF Token (for gated models) */}
+                  {deployContext.isGated && (
+                    <div>
+                      <label className="block text-xs font-medium text-[var(--muted)] mb-2 uppercase tracking-wide">
+                        HuggingFace Token
+                      </label>
+                      <input
+                        type="password"
+                        value={hfToken}
+                        onChange={e => setHfToken(e.target.value)}
+                        placeholder="hf_..."
+                        className="w-full px-4 py-3 rounded-xl border border-[var(--line)] focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 outline-none text-sm font-mono"
+                      />
+                      <p className="text-xs text-[var(--muted)] mt-1">
+                        Required for gated models. Get yours at{" "}
+                        <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer" className="text-teal-600 hover:underline">
+                          huggingface.co/settings/tokens
+                        </a>
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Open WebUI checkbox */}
+                  <label className="flex items-start gap-3 p-3 rounded-xl border border-[var(--line)] cursor-pointer hover:border-teal-300 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={addOpenWebUI}
+                      onChange={e => setAddOpenWebUI(e.target.checked)}
+                      className="w-4 h-4 mt-0.5 accent-teal-500"
+                    />
+                    <div>
+                      <span className="text-sm font-medium text-[var(--ink)]">Add Chat UI (Open WebUI)</span>
+                      <p className="text-xs text-[var(--muted)]">Deploy a ChatGPT-like interface alongside your model</p>
+                    </div>
+                  </label>
                 </div>
               )}
 
@@ -1115,6 +1397,8 @@ export function LaunchGPUModal({
                   <p className="text-sm text-red-600">{error}</p>
                 </div>
               )}
+                </>
+              )}
             </>
           )}
         </div>
@@ -1123,31 +1407,36 @@ export function LaunchGPUModal({
         {!DEPLOY_MAINTENANCE && !loading && options && !showFundWallet && !(error && !options) && (
           <div className="border-t border-[var(--line)] p-6 flex gap-3">
             <button
-              onClick={onClose}
+              onClick={() => {
+                if (step > 1 && hasCategories) setStep((step - 1) as 1 | 2 | 3);
+                else onClose();
+              }}
               className="flex-1 py-3 px-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-medium rounded-xl transition-colors"
             >
-              Cancel
+              {step > 1 && hasCategories ? "Back" : "Cancel"}
             </button>
-            <button
-              onClick={handleLaunch}
-              disabled={!canLaunch}
-              className="flex-1 py-3 px-4 bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white font-medium rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
+            {step === 3 && (
+              <button
+                onClick={handleLaunch}
+                disabled={!canLaunch}
+                className="flex-1 py-3 px-4 bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white font-medium rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M13 10V3L4 14h7v7l9-11h-7z"
-                />
-              </svg>
-              Launch GPU
-            </button>
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M13 10V3L4 14h7v7l9-11h-7z"
+                  />
+                </svg>
+                {deployContext ? "Deploy" : "Launch GPU"}
+              </button>
+            )}
           </div>
         )}
 

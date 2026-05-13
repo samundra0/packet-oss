@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getBrandName, getLogoUrl } from "@/lib/branding";
+import { getBrandName, getLogoUrl, getSupportEmail } from "@/lib/branding";
 import { useBranding } from "@/hooks/useBranding";
 
 function SuccessContent() {
@@ -294,19 +294,22 @@ function SuccessContent() {
           </div>
 
           {/* Actions */}
-          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <div className="flex flex-col items-center gap-4">
             <Link
               href="/account"
               className="px-6 py-3 bg-zinc-900 hover:bg-zinc-800 text-white rounded-lg text-sm font-medium transition-colors"
             >
               Resend Login Link
             </Link>
-            <Link
-              href="/contact"
-              className="px-6 py-3 border border-zinc-200 hover:border-zinc-300 text-zinc-700 rounded-lg text-sm font-medium transition-colors"
-            >
-              Contact Support
-            </Link>
+            <p className="text-sm text-zinc-500">
+              Need help? Reach us at{" "}
+              <a
+                href={`mailto:${branding?.supportEmail || getSupportEmail()}`}
+                className="font-medium text-zinc-700 hover:text-zinc-900 transition-colors"
+              >
+                {branding?.supportEmail || getSupportEmail()}
+              </a>
+            </p>
           </div>
         </div>
       </div>

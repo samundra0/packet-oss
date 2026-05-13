@@ -34,6 +34,7 @@ Installs to `/opt/packet-oss` with MariaDB, systemd, and Apache reverse proxy. R
 - **[hosted.ai](https://hosted.ai) account** - Required for GPU pod management
 - **Node.js 18+** and **pnpm 8+**
 - **MariaDB 10.6+** (or MySQL 8.0+)
+- **Domain + SSL/HTTPS** - Required for any non-localhost deploy. Admin session cookies are marked `secure`, so login breaks over plain HTTP. `install.sh` provisions this automatically via Let's Encrypt + Apache when you supply a domain.
 - **Stripe account** (optional) - For billing features
 
 ## Manual Setup

@@ -130,25 +130,54 @@ export function useDashboardActions({
     link.click();
   }, [activityEvents]);
 
-  // Download transactions as CSV
-  const downloadTransactionsCSV = useCallback(() => {
-    if (!data || data.transactions.length === 0) return;
+  // Download complete transaction history as CSV.
+  // Fetches all transactions from /api/billing/history (full Stripe pagination)
+  // rather than the 100-item capped set held in memory.
+  const downloadTransactionsCSV = useCallback(async () => {
+    if (!token) return;
+
+    interface TxnRow {
+      created: number;
+      type: string;
+      description: string;
+      amountFormatted: string;
+    }
+
+    let txns: TxnRow[] = [];
+    try {
+      const response = await fetch("/api/billing/history", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) {
+        const result = await response.json() as { transactions?: TxnRow[] };
+        txns = result.transactions ?? [];
+      }
+    } catch {
+      // fall through to cached data
+    }
+
+    // Fall back to the cached 100-transaction set if the API call failed
+    if (txns.length === 0 && data?.transactions.length) {
+      txns = data.transactions;
+    }
+
+    if (txns.length === 0) return;
 
     const headers = ["Date", "Time", "Type", "Description", "Amount"];
-    const rows = data.transactions.map(txn => {
+    const rows = txns.map(txn => {
       const date = new Date(txn.created * 1000);
       return [
         date.toLocaleDateString(),
         date.toLocaleTimeString(),
         txn.type,
         txn.description,
-        (txn.type === "credit" ? "+" : "-") + txn.amountFormatted
+        (txn.type === "credit" ? "+" : "-") + txn.amountFormatted,
       ];
     });
 
     const csvContent = [
       headers.join(","),
-      ...rows.map(row => row.map(cell => `"${cell}"`).join(","))
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(",")),
     ].join("\n");
 
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
@@ -156,7 +185,7 @@ export function useDashboardActions({
     link.href = URL.createObjectURL(blob);
     link.download = `transactions-${new Date().toISOString().split("T")[0]}.csv`;
     link.click();
-  }, [data]);
+  }, [token, data]);
 
   // Handle wallet top-up
   // When called from TopupModal: handleTopup(amount, voucherCode)

@@ -9,7 +9,7 @@ import { useBranding } from "@/hooks/useBranding";
 interface TwoFactorVerifyProps {
   token: string;
   userEmail: string;
-  onSuccess: () => void;
+  onSuccess: (newToken?: string) => void;
 }
 
 export default function TwoFactorVerify({
@@ -63,10 +63,10 @@ export default function TwoFactorVerify({
           setUsedBackupCode(true);
           // Brief delay to show backup code warning before continuing
           setTimeout(() => {
-            onSuccess();
+            onSuccess(data.token);
           }, 2000);
         } else {
-          onSuccess();
+          onSuccess(data.token);
         }
       }
     } catch {

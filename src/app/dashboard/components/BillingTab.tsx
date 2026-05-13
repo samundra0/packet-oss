@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { UsageChart } from "./UsageChart";
 
 interface Transaction {
@@ -30,6 +30,13 @@ interface Subscription {
   pricePerMonthCents: number | null;
 }
 
+interface AllTimeStats {
+  totalSpent: number;
+  totalCredits: number;
+  netSpend: number;
+  transactionCount: number;
+}
+
 interface BillingTabProps {
   transactions: Transaction[];
   walletBalance: string;
@@ -39,6 +46,7 @@ interface BillingTabProps {
   payments?: Payment[];
   billingPortalUrl?: string;
   subscriptions?: Subscription[];
+  token: string;
 }
 
 type PeriodType = "day" | "week" | "month" | "year" | "all";
@@ -53,10 +61,29 @@ export function BillingTab({
   payments = [],
   billingPortalUrl,
   subscriptions = [],
+  token,
 }: BillingTabProps) {
   const [period, setPeriod] = useState<PeriodType>("all");
   const [filter, setFilter] = useState<FilterType>("all");
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Lazy-load accurate all-time stats from the server (full Stripe pagination).
+  // The transactions prop is capped at 100 for fast initial page load, so
+  // client-side totals would under-count for customers with more history.
+  const [serverAllTimeStats, setServerAllTimeStats] = useState<AllTimeStats | null>(null);
+  const [allTimeStatsLoading, setAllTimeStatsLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/billing/history", {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((data: { allTimeStats?: AllTimeStats }) => {
+        if (data.allTimeStats) setServerAllTimeStats(data.allTimeStats);
+      })
+      .catch((err) => console.error("[BillingTab] Failed to fetch all-time stats:", err))
+      .finally(() => setAllTimeStatsLoading(false));
+  }, [token]);
 
   // Calculate period boundaries
   const periodBoundaries = useMemo(() => {
@@ -253,8 +280,18 @@ export function BillingTab({
 
         <div className="bg-white rounded-2xl p-5 border border-[var(--line)]">
           <div className="text-xs text-[var(--muted)] mb-1">All-Time Spend</div>
-          <div className="text-2xl font-bold text-[var(--ink)]">${allTimeStats.netSpend.toFixed(2)}</div>
-          <div className="text-xs text-zinc-400">${allTimeStats.totalSpent.toFixed(2)} - ${allTimeStats.totalCredits.toFixed(2)} credits</div>
+          {allTimeStatsLoading ? (
+            <div className="text-2xl font-bold text-zinc-300 animate-pulse">$—</div>
+          ) : (
+            <>
+              <div className="text-2xl font-bold text-[var(--ink)]">
+                ${(serverAllTimeStats ?? allTimeStats).netSpend.toFixed(2)}
+              </div>
+              <div className="text-xs text-zinc-400">
+                ${(serverAllTimeStats ?? allTimeStats).totalSpent.toFixed(2)} - ${(serverAllTimeStats ?? allTimeStats).totalCredits.toFixed(2)} credits
+              </div>
+            </>
+          )}
         </div>
 
         <div className="bg-white rounded-2xl p-5 border border-[var(--line)]">

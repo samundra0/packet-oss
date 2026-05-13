@@ -42,6 +42,7 @@ export interface AccountData {
     poolIds: string[];
     pricePerMonthCents: number | null;
     stripePriceId: string | null;
+    quantity: number;
   }>;
   recentPayments: Array<{
     id: string;
@@ -322,8 +323,6 @@ export interface PodSnapshot {
     type: string | null;
     deployScript: string | null;
   } | null;
-  autoPreserved: boolean;
-  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

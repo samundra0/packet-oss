@@ -167,6 +167,7 @@ export async function uploadRecipe(slug: string): Promise<number> {
         if (errBody.includes("FAILURE")) {
           throw new Error(`Cannot delete existing recipe "${slug}" — it may have associated pods. Remove them first.`);
         }
+        throw new Error(`Failed to delete existing recipe "${slug}" (${delResp.status}): ${errBody}`);
       }
       console.log(`[Recipes] Deleted existing template ${slug}`);
     }
@@ -198,6 +199,22 @@ export async function uploadRecipe(slug: string): Promise<number> {
   });
 
   if (!initResp.ok && initResp.status !== 201) {
+    if (initResp.status === 409) {
+      // Recipe name already exists in HAI (delete didn't fully clean up or was skipped).
+      // Look it up in admin templates and reuse its ID to keep the flow idempotent.
+      console.warn(`[Recipes] TUS init 409 — recipe "${slug}" already exists, looking up existing ID...`);
+      const retemplatesResp = await fetch(`${adminUrl}/api/recipes/templates`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (retemplatesResp.ok) {
+        const all = (await retemplatesResp.json()) as Array<{ id: number; name: string }>;
+        const found = all.find((t) => t.name === slug);
+        if (found) {
+          console.log(`[Recipes] Reusing existing recipe "${slug}" (ID: ${found.id})`);
+          return found.id;
+        }
+      }
+    }
     throw new Error(`TUS init failed (${initResp.status}): ${await initResp.text()}`);
   }
 

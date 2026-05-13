@@ -3,6 +3,7 @@ import { getStripe } from "./stripe";
 import { getAutoRefillThresholdCents, getAutoRefillAmountCents } from "./pricing";
 import { addSpend } from "./lifecycle";
 import { cacheCustomer } from "./customer-cache";
+import { createInvoiceForPayment } from "./invoice";
 
 export interface WalletBalance {
   availableBalance: number; // in cents
@@ -104,6 +105,17 @@ export async function fundWallet(
           payment_intent_id: paymentIntent.id,
         },
       });
+
+      // Create a Stripe invoice for this auto-refill so it appears in customer portal (PA-102)
+      // Awaited (not fire-and-forget) because the function temporarily neutralizes
+      // the customer balance — concurrent deductUsage calls would see $0 and reject.
+      await createInvoiceForPayment(
+        stripe,
+        customerId,
+        amountCents,
+        "Wallet auto-refill",
+        paymentIntent.id
+      );
 
       return { success: true, paymentIntentId: paymentIntent.id };
     }

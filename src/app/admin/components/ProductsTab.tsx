@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Plus, Pencil, Trash2, Check, X, GripVertical, Loader2, HardDrive, RefreshCw } from "lucide-react";
-import type { GpuProduct } from "../types";
+import { Plus, Pencil, Trash2, Check, X, GripVertical, Loader2, HardDrive, RefreshCw, FolderOpen, AlertCircle } from "lucide-react";
+import type { GpuProduct, GpuCategory } from "../types";
 import { isPro } from "@/lib/edition";
 import { ServicePickerDialog } from "./ServicePickerDialog";
 import dynamic from "next/dynamic";
@@ -48,6 +48,13 @@ export function ProductsTab() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
 
+  // Categories
+  const [categories, setCategories] = useState<GpuCategory[]>([]);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [categoryForm, setCategoryForm] = useState({ name: "", slug: "", description: "", displayOrder: 0, active: true });
+  const [savingCategory, setSavingCategory] = useState(false);
+
   // Stripe products for monthly billing
   const [stripeProducts, setStripeProducts] = useState<StripeProduct[]>([]);
   const [loadingStripeProducts, setLoadingStripeProducts] = useState(false);
@@ -73,7 +80,9 @@ export function ProductsTab() {
     badgeText: "",
     vramGb: "",
     cudaCores: "",
+    gpuFamily: "",
     serviceId: "" as string,
+    categoryIds: [] as string[],
   });
   const [servicePickerOpen, setServicePickerOpen] = useState(false);
 
@@ -93,6 +102,9 @@ export function ProductsTab() {
 
       if (productsData.success) {
         setProducts(productsData.data);
+        if (productsData.categories) {
+          setCategories(productsData.categories);
+        }
       }
       if (poolsData.success && poolsData.data.availablePools) {
         setPools(poolsData.data.availablePools);
@@ -146,7 +158,9 @@ export function ProductsTab() {
       badgeText: "",
       vramGb: "",
       cudaCores: "",
+      gpuFamily: "",
       serviceId: "",
+      categoryIds: [],
     });
   };
 
@@ -166,7 +180,9 @@ export function ProductsTab() {
       badgeText: product.badgeText || "",
       vramGb: product.vramGb?.toString() || "",
       cudaCores: product.cudaCores?.toString() || "",
+      gpuFamily: product.gpuFamily || "",
       serviceId: product.serviceId || "",
+      categoryIds: product.categoryIds || [],
     });
     setEditingId(product.id);
     setShowCreateModal(true);
@@ -190,6 +206,10 @@ export function ProductsTab() {
       alert("Price per month is required for monthly products");
       return;
     }
+    if (!formData.serviceId) {
+      alert("HAI Service is required");
+      return;
+    }
 
     setSaving(true);
     try {
@@ -210,7 +230,9 @@ export function ProductsTab() {
         badgeText: formData.badgeText || null,
         vramGb: formData.vramGb ? parseInt(formData.vramGb) : null,
         cudaCores: formData.cudaCores ? parseInt(formData.cudaCores) : null,
+        gpuFamily: formData.gpuFamily || null,
         serviceId: formData.serviceId || null,
+        categoryIds: formData.categoryIds,
       };
 
       const res = await fetch("/api/admin/gpu-products", {
@@ -258,13 +280,66 @@ export function ProductsTab() {
     }
   };
 
+  // Category CRUD handlers
+  const handleSaveCategory = async () => {
+    if (!categoryForm.name) { alert("Category name is required"); return; }
+    setSavingCategory(true);
+    try {
+      const res = await fetch("/api/admin/gpu-products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: editingCategoryId ? "update-category" : "create-category",
+          id: editingCategoryId,
+          ...categoryForm,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setShowCategoryModal(false);
+        setEditingCategoryId(null);
+        setCategoryForm({ name: "", slug: "", description: "", displayOrder: 0, active: true });
+        loadData();
+      } else {
+        alert(data.error || "Failed to save category");
+      }
+    } catch { alert("Failed to save category"); }
+    finally { setSavingCategory(false); }
+  };
+
+  const handleDeleteCategory = async (id: string) => {
+    if (!confirm("Delete this category? Products must be moved first.")) return;
+    try {
+      const res = await fetch("/api/admin/gpu-products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete-category", id }),
+      });
+      const data = await res.json();
+      if (data.success) { loadData(); }
+      else { alert(data.error || "Failed to delete category"); }
+    } catch { alert("Failed to delete category"); }
+  };
+
+  const getCategoryNames = (categoryIds: string[]) => {
+    if (!categoryIds?.length) return "Uncategorized";
+    return categoryIds.map(id => categories.find(c => c.id === id)?.name || "Unknown").join(", ");
+  };
+
   const togglePoolAssignment = (poolId: number) => {
-    setFormData((prev) => ({
-      ...prev,
-      poolIds: prev.poolIds.includes(poolId)
+    setFormData((prev) => {
+      const newPoolIds = prev.poolIds.includes(poolId)
         ? prev.poolIds.filter((id) => id !== poolId)
-        : [...prev.poolIds, poolId],
-    }));
+        : [...prev.poolIds, poolId];
+
+      // Auto-derive gpuFamily from the first selected pool's gpuModel (sourced from
+      // hostedai-user gpu_model_type) so the identifier stays consistent with the
+      // user panel service record. Only update if not manually overridden.
+      const firstPool = pools.find((p) => newPoolIds.includes(p.id));
+      const derivedFamily = firstPool?.gpuModel ?? prev.gpuFamily;
+
+      return { ...prev, poolIds: newPoolIds, gpuFamily: derivedFamily ?? "" };
+    });
   };
 
   // Get pool name by ID
@@ -402,6 +477,126 @@ export function ProductsTab() {
         </div>
       </div>
 
+      {/* GPU Categories */}
+      <div className="bg-white rounded-xl border border-[#e4e7ef] p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-[#f7f8fb] rounded-lg">
+              <FolderOpen className="w-5 h-5 text-[#1a4fff]" />
+            </div>
+            <div>
+              <h3 className="text-base font-semibold text-[#0b0f1c]">GPU Categories</h3>
+              <p className="text-xs text-[#5b6476]">Organize products by GPU type. Each category maps to an HAI scenario.</p>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              setCategoryForm({ name: "", slug: "", description: "", displayOrder: 0, active: true });
+              setEditingCategoryId(null);
+              setShowCategoryModal(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-[#1a4fff] text-white rounded-lg hover:bg-[#1a4fff]/90 transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add Category
+          </button>
+        </div>
+        {categories.length === 0 ? (
+          <p className="text-sm text-[#5b6476] py-4 text-center">No categories yet. Create one to organize your GPU products.</p>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {categories.map(cat => (
+              <div key={cat.id} className={`rounded-lg border p-3 ${cat.active ? "border-[#e4e7ef]" : "border-dashed border-gray-300 opacity-60"}`}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-medium text-sm text-[#0b0f1c]">{cat.name}</span>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => {
+                      setCategoryForm({ name: cat.name, slug: cat.slug, description: cat.description || "", displayOrder: cat.displayOrder, active: cat.active });
+                      setEditingCategoryId(cat.id);
+                      setShowCategoryModal(true);
+                    }} className="p-1 text-[#5b6476] hover:text-[#1a4fff] rounded" title="Edit">
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                    <button onClick={() => handleDeleteCategory(cat.id)} className="p-1 text-[#5b6476] hover:text-red-600 rounded" title="Delete">
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-[#5b6476]">
+                  <span>{products.filter(p => p.categoryIds?.includes(cat.id)).length} products</span>
+                  {!cat.scenarioId && (
+                    <span className="flex items-center gap-0.5 text-amber-600" title="HAI scenario not configured">
+                      <AlertCircle className="w-3 h-3" /> Pending
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Category Create/Edit Modal */}
+      {showCategoryModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+            <div className="p-6 border-b border-[#e4e7ef]">
+              <h3 className="text-lg font-semibold text-[#0b0f1c]">
+                {editingCategoryId ? "Edit Category" : "Create Category"}
+              </h3>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[#0b0f1c] mb-1">Name *</label>
+                <input
+                  type="text"
+                  value={categoryForm.name}
+                  onChange={e => setCategoryForm({ ...categoryForm, name: e.target.value, slug: e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") })}
+                  placeholder="e.g., H100"
+                  className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1a4fff]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#0b0f1c] mb-1">Slug</label>
+                <input
+                  type="text"
+                  value={categoryForm.slug}
+                  onChange={e => setCategoryForm({ ...categoryForm, slug: e.target.value })}
+                  placeholder="auto-generated"
+                  className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1a4fff] font-mono text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#0b0f1c] mb-1">Description</label>
+                <input
+                  type="text"
+                  value={categoryForm.description}
+                  onChange={e => setCategoryForm({ ...categoryForm, description: e.target.value })}
+                  placeholder="Optional"
+                  className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1a4fff]"
+                />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={categoryForm.active}
+                  onChange={e => setCategoryForm({ ...categoryForm, active: e.target.checked })}
+                  className="w-4 h-4 rounded border-[#e4e7ef] text-[#1a4fff] focus:ring-[#1a4fff]"
+                />
+                <span className="text-sm text-[#0b0f1c]">Active</span>
+              </label>
+            </div>
+            <div className="p-6 border-t border-[#e4e7ef] flex justify-end gap-3">
+              <button onClick={() => { setShowCategoryModal(false); setEditingCategoryId(null); }} className="px-4 py-2 text-[#5b6476] hover:bg-[#f7f8fb] rounded-lg transition-colors">Cancel</button>
+              <button onClick={handleSaveCategory} disabled={savingCategory} className="flex items-center gap-2 px-4 py-2 bg-[#1a4fff] text-white rounded-lg hover:bg-[#1a4fff]/90 disabled:opacity-50">
+                {savingCategory && <Loader2 className="w-4 h-4 animate-spin" />}
+                {editingCategoryId ? "Save" : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Products Table */}
       <div className="bg-white rounded-xl border border-[#e4e7ef] overflow-hidden">
         <table className="w-full">
@@ -412,6 +607,9 @@ export function ProductsTab() {
               </th>
               <th className="px-4 py-3 text-left text-xs font-medium text-[#5b6476] uppercase tracking-wider">
                 Product Name
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-[#5b6476] uppercase tracking-wider">
+                Category
               </th>
               <th className="px-4 py-3 text-left text-xs font-medium text-[#5b6476] uppercase tracking-wider">
                 Pricing
@@ -430,7 +628,7 @@ export function ProductsTab() {
           <tbody className="divide-y divide-[#e4e7ef]">
             {products.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-[#5b6476]">
+                <td colSpan={7} className="px-4 py-8 text-center text-[#5b6476]">
                   No products yet. Click &quot;Add Product&quot; to create one.
                 </td>
               </tr>
@@ -461,6 +659,11 @@ export function ProductsTab() {
                         {product.description}
                       </p>
                     )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="px-2 py-0.5 text-xs bg-[#f7f8fb] text-[#5b6476] rounded">
+                      {getCategoryNames(product.categoryIds)}
+                    </span>
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
@@ -785,6 +988,62 @@ export function ProductsTab() {
                 </div>
               </div>
 
+              {/* GPU Family — auto-derived from pool gpu_model_type, overridable */}
+              <div>
+                <label className="block text-sm font-medium text-[#0b0f1c] mb-1">
+                  GPU Family
+                </label>
+                <input
+                  type="text"
+                  value={formData.gpuFamily}
+                  onChange={(e) =>
+                    setFormData({ ...formData, gpuFamily: e.target.value })
+                  }
+                  placeholder="Auto-set from pool (e.g. H100, A100, B200)"
+                  className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1a4fff]"
+                />
+                <p className="text-xs text-[#5b6476] mt-1">
+                  Groups products in the launch modal filter. Auto-derived from the first assigned pool&apos;s GPU model — override only if needed.
+                </p>
+              </div>
+
+              {/* Category Assignment (multi-select) */}
+              <div>
+                <label className="block text-sm font-medium text-[#0b0f1c] mb-1">
+                  Categories
+                </label>
+                <p className="text-xs text-[#5b6476] mb-2">
+                  Assign to one or more GPU categories. Product appears in each selected category in the launch modal.
+                </p>
+                {categories.length === 0 ? (
+                  <p className="text-sm text-[#5b6476] py-2">No categories yet. Create one above first.</p>
+                ) : (
+                  <div className="border border-[#e4e7ef] rounded-lg max-h-36 overflow-y-auto divide-y divide-[#e4e7ef]">
+                    {categories.map(cat => (
+                      <label key={cat.id} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-[#f7f8fb]">
+                        <input
+                          type="checkbox"
+                          checked={formData.categoryIds.includes(cat.id)}
+                          onChange={() => {
+                            setFormData(prev => ({
+                              ...prev,
+                              categoryIds: prev.categoryIds.includes(cat.id)
+                                ? prev.categoryIds.filter(id => id !== cat.id)
+                                : [...prev.categoryIds, cat.id],
+                            }));
+                          }}
+                          className="w-4 h-4 rounded border-[#e4e7ef] text-[#1a4fff] focus:ring-[#1a4fff]"
+                        />
+                        <span className="text-sm font-medium text-[#0b0f1c]">{cat.name}</span>
+                        {!cat.scenarioId && (
+                          <span className="text-xs text-amber-600">(scenario pending)</span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {/* Toggles */}
               <div className="flex items-center gap-6">
                 <label className="flex items-center gap-2 cursor-pointer">
@@ -870,7 +1129,7 @@ export function ProductsTab() {
               {/* HAI Service (unified instance) */}
               <div>
                 <label className="block text-sm font-medium text-[#0b0f1c] mb-2">
-                  HAI Service (optional)
+                  HAI Service *
                 </label>
                 <p className="text-xs text-[#5b6476] mb-3">
                   Link to a HAI 2.2 service for unified instance creation. Products with a service use the new deployment path.
@@ -890,15 +1149,6 @@ export function ProductsTab() {
                   >
                     {formData.serviceId ? "Change" : "Select Service"}
                   </button>
-                  {formData.serviceId && (
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, serviceId: "" }))}
-                      className="px-2 py-1.5 text-xs text-zinc-400 hover:text-zinc-600"
-                    >
-                      Clear
-                    </button>
-                  )}
                 </div>
               </div>
             </div>

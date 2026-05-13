@@ -69,6 +69,13 @@ interface HostedAiTeam {
   suspended?: boolean;
 }
 
+interface SuspensionInfo {
+  suspended: boolean;
+  suspendedAt: string | null;
+  suspendedReason: string | null;
+  suspendedBy: string | null;
+}
+
 interface CustomerData {
   customer: CustomerDetails;
   hostedaiTeam: HostedAiTeam | null;
@@ -78,6 +85,7 @@ interface CustomerData {
   voucherRedemptions: VoucherRedemption[];
   referral: Referral | null;
   bareMetalEnabled?: boolean;
+  suspension?: SuspensionInfo;
 }
 
 interface CustomerDetailPanelProps {
@@ -185,6 +193,75 @@ export function CustomerDetailPanel({ customerId, onClose, onCustomerUpdated }: 
         window.open(result.url, "_blank");
       } else {
         alert(result.error || "Failed to generate login link");
+      }
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleSuspend = async () => {
+    if (!data) return;
+    const reasonChoice = prompt(
+      `Suspend "${data.customer.email}"?\n\n` +
+      `This will:\n` +
+      `  • Cancel all active subscriptions\n` +
+      `  • Suspend their hosted.ai team(s) (kills GPU access)\n` +
+      `  • Zero out their wallet balance\n` +
+      `  • Block them from logging in\n\n` +
+      `Applied to ALL Stripe customers sharing this email.\n\n` +
+      `Reason (e.g. "stolen card", "chargeback fraud"):`
+    );
+    if (!reasonChoice || !reasonChoice.trim()) return;
+
+    setActionLoading("suspend");
+    try {
+      const res = await fetch(`/api/admin/customers/${customerId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "suspend",
+          reason: "other",
+          reasonNote: reasonChoice.trim(),
+        }),
+      });
+      const result = await res.json();
+      if (res.ok) {
+        alert(result.message || "Customer suspended");
+        if (result.errors?.length) {
+          console.warn("Suspend non-fatal errors:", result.errors);
+        }
+        fetchData();
+        onCustomerUpdated();
+      } else {
+        alert(result.error || "Failed to suspend customer");
+      }
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleUnsuspend = async () => {
+    if (!data) return;
+    if (!confirm(
+      `Unsuspend "${data.customer.email}"?\n\n` +
+      `This re-enables login and unsuspends their hosted.ai team(s).\n` +
+      `Canceled subscriptions and zeroed wallet are NOT restored.`
+    )) return;
+
+    setActionLoading("unsuspend");
+    try {
+      const res = await fetch(`/api/admin/customers/${customerId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "unsuspend" }),
+      });
+      const result = await res.json();
+      if (res.ok) {
+        alert(result.message || "Customer unsuspended");
+        fetchData();
+        onCustomerUpdated();
+      } else {
+        alert(result.error || "Failed to unsuspend customer");
       }
     } finally {
       setActionLoading(null);
@@ -373,6 +450,24 @@ export function CustomerDetailPanel({ customerId, onClose, onCustomerUpdated }: 
                 >
                   {actionLoading === "send-credentials" ? "..." : "Send Credentials"}
                 </button>
+                {data.suspension?.suspended ? (
+                  <button
+                    onClick={handleUnsuspend}
+                    disabled={actionLoading === "unsuspend"}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-sm rounded-lg disabled:opacity-50"
+                  >
+                    {actionLoading === "unsuspend" ? "..." : "Unsuspend"}
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleSuspend}
+                    disabled={actionLoading === "suspend"}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-sm rounded-lg disabled:opacity-50"
+                    title="Suspend (fraud lockout): cancel subs, kill GPU, zero wallet, block login"
+                  >
+                    {actionLoading === "suspend" ? "..." : "Suspend"}
+                  </button>
+                )}
                 <button
                   onClick={handleDelete}
                   disabled={actionLoading === "delete"}
@@ -383,6 +478,31 @@ export function CustomerDetailPanel({ customerId, onClose, onCustomerUpdated }: 
               </div>
             </div>
           </div>
+
+          {/* Suspension banner */}
+          {data.suspension?.suspended && (
+            <div className="bg-amber-50 border-b border-amber-200 px-6 py-3">
+              <div className="flex items-start gap-3">
+                <svg className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                </svg>
+                <div className="text-sm">
+                  <p className="font-semibold text-amber-900">
+                    Suspended (fraud lockout)
+                    {data.suspension.suspendedAt && (
+                      <span className="font-normal text-amber-700"> — {formatDate(data.suspension.suspendedAt)}</span>
+                    )}
+                  </p>
+                  {data.suspension.suspendedReason && (
+                    <p className="text-amber-800 mt-0.5">Reason: {data.suspension.suspendedReason}</p>
+                  )}
+                  {data.suspension.suspendedBy && (
+                    <p className="text-amber-700 text-xs mt-0.5">By {data.suspension.suspendedBy}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Tabs */}
           <div className="bg-white border-b border-[#e4e7ef]">

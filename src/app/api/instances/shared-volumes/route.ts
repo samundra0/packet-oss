@@ -147,7 +147,7 @@ export async function DELETE(request: NextRequest) {
 
     // Get volume ID from request body
     const body = await request.json();
-    const { volume_id } = body;
+    const { volume_id, dryRun } = body;
 
     if (!volume_id) {
       return NextResponse.json(
@@ -205,6 +205,17 @@ export async function DELETE(request: NextRequest) {
         displayName: true,
       },
     });
+
+    // dryRun: return snapshot info without performing any deletion
+    if (dryRun) {
+      return NextResponse.json({
+        success: true,
+        affectedSnapshots: affectedSnapshots.map((s) => ({
+          id: s.id,
+          name: s.displayName,
+        })),
+      });
+    }
 
     const { deleteSnapshots } = body;
 

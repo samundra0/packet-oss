@@ -184,6 +184,43 @@ test.describe("Dashboard Overview", () => {
     }
     expect(hasActivitySection).toBeTruthy();
   });
+
+  test("sticky header polish engages on scroll", async ({ page }) => {
+    // Regression: the sentinel mounts behind a `loading` guard, so an
+    // effect-based observer attached on the first render never sees the
+    // sentinel. Polish only worked after a tab switch. The fix uses a
+    // callback ref so the observer attaches when the sentinel mounts.
+    await ensureAuthenticatedAndNavigate(page, "/dashboard");
+    await waitForDataLoad(page);
+
+    const isAccessDenied = await page.locator("text=/access denied/i").isVisible().catch(() => false);
+    if (isAccessDenied) {
+      test.skip(true, "Authentication not working");
+      return;
+    }
+
+    const sentinel = page.locator('div[aria-hidden][class*="h-px"]').first();
+    if (!(await sentinel.isVisible({ timeout: 5000 }).catch(() => false))) {
+      test.skip(true, "Sticky header sentinel not present");
+      return;
+    }
+
+    const headerHasStuckClass = () =>
+      page.evaluate(() => {
+        const s = document.querySelector('div[aria-hidden][class*="h-px"]');
+        return !!s?.nextElementSibling?.className.includes("bg-white/95");
+      });
+
+    expect(await headerHasStuckClass()).toBe(false);
+
+    await page.evaluate(() => {
+      const m = document.querySelector("main > div.overflow-y-auto") as HTMLElement | null;
+      if (m) m.scrollTop = 400;
+    });
+    await page.waitForTimeout(200);
+
+    expect(await headerHasStuckClass()).toBe(true);
+  });
 });
 
 test.describe("GPU Instances Tab", () => {

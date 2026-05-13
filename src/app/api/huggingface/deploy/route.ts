@@ -6,6 +6,7 @@ import {
   getServiceProvisioningInfo,
   getServiceCompatibleGPUPools,
   getTeamWorkspaces,
+  getStorageBlocks,
 } from "@/lib/hostedai";
 import { getWalletBalance, deductUsage, refundDeployment } from "@/lib/wallet";
 import { prisma } from "@/lib/prisma";
@@ -14,6 +15,7 @@ import {
   validateDeployParams,
   getDefaultPort,
 } from "@/lib/huggingface-deploy-scripts";
+import { getModelInfo, estimateDiskSizeFromModel, STANDARD_EPHEMERAL_STORAGE_GB } from "@/lib/huggingface-api";
 import { logActivity } from "@/lib/activity";
 
 /**
@@ -73,14 +75,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Product has no HAI service configured" }, { status: 400 });
     }
 
-    // Get catalog item (or construct one for HF Hub items)
+    // Get catalog item (or construct one for HF Hub items) and estimate model disk size
     const catalogItem: HFCatalogItem | undefined = getCatalogItem(hfItemId);
     let deployScript: DeployScriptType = "tgi";
+    let modelDiskSizeGb = 0;
 
     if (catalogItem) {
       deployScript = catalogItem.deployScript;
+      modelDiskSizeGb = catalogItem.diskSizeGb ?? 0;
     } else {
       deployScript = body.deployScript || "tgi";
+      const modelInfo = await getModelInfo(hfItemId).catch(() => null);
+      if (modelInfo) {
+        modelDiskSizeGb = estimateDiskSizeFromModel(modelInfo);
+      }
     }
 
     // Validate HF token if needed
@@ -108,6 +116,48 @@ export async function POST(request: NextRequest) {
     const validation = validateDeployParams(deployScript, scriptParams);
     if (!validation.valid) {
       return NextResponse.json({ error: validation.errors.join(", ") }, { status: 400 });
+    }
+
+    // Fetch provisioning info early (before charging) to get locked defaults and actual storage capacity
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let provisioningInfo: any;
+    try {
+      provisioningInfo = await getServiceProvisioningInfo(product.serviceId, teamId, Number(region_id));
+    } catch (err) {
+      console.error("[HF Deploy] Failed to get provisioning info:", err);
+      return NextResponse.json({ error: "Could not resolve GPU configuration. The product's service may not be fully set up." }, { status: 500 });
+    }
+
+    const instanceTypeId = provisioningInfo?.instance_type_details?.default?.id;
+    const imageHash = provisioningInfo?.image_details?.default?.hash;
+    const rootStorageTypeId = provisioningInfo?.storage_block_details?.default?.id;
+
+    if (!instanceTypeId || !imageHash || !rootStorageTypeId) {
+      return NextResponse.json({ error: "Product service is not fully configured (missing locked instance type, image, or storage)." }, { status: 500 });
+    }
+
+    // Determine actual pod storage capacity from the provisioned root storage block.
+    // Fall back to the standard ephemeral storage constant if the block size cannot be resolved.
+    let podStorageSizeGb = STANDARD_EPHEMERAL_STORAGE_GB;
+    try {
+      const storageBlocks = await getStorageBlocks();
+      const rootBlock = storageBlocks.find((b) => b.id === rootStorageTypeId);
+      if (rootBlock) {
+        const blockSizeGb = rootBlock.size_gb ?? rootBlock.size_in_gb;
+        if (blockSizeGb) podStorageSizeGb = blockSizeGb;
+      }
+    } catch { /* use fallback */ }
+
+    // Reject if the model's estimated disk footprint exceeds the pod's root storage
+    if (modelDiskSizeGb > 0 && modelDiskSizeGb > podStorageSizeGb) {
+      return NextResponse.json(
+        {
+          error: `This model requires approximately ${modelDiskSizeGb}GB of storage, which exceeds the ${podStorageSizeGb}GB available on this pod.`,
+          diskSizeGb: modelDiskSizeGb,
+          limitGb: podStorageSizeGb,
+        },
+        { status: 400 }
+      );
     }
 
     // CRITICAL: Check wallet balance BEFORE deploying
@@ -141,26 +191,6 @@ export async function POST(request: NextRequest) {
 
     if (!deductResult.success) {
       return NextResponse.json({ error: "Failed to process payment. Please try again." }, { status: 402 });
-    }
-
-    // Get provisioning-info from the product's service for locked defaults
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let provisioningInfo: any;
-    try {
-      provisioningInfo = await getServiceProvisioningInfo(product.serviceId, teamId, Number(region_id));
-    } catch (err) {
-      console.error("[HF Deploy] Failed to get provisioning info:", err);
-      await refundDeployment(payload.customerId, prepaidAmountCents, "Refund: Could not resolve service configuration");
-      return NextResponse.json({ error: "Could not resolve GPU configuration. The product's service may not be fully set up." }, { status: 500 });
-    }
-
-    const instanceTypeId = provisioningInfo?.instance_type_details?.default?.id;
-    const imageHash = provisioningInfo?.image_details?.default?.hash;
-    const rootStorageTypeId = provisioningInfo?.storage_block_details?.default?.id;
-
-    if (!instanceTypeId || !imageHash || !rootStorageTypeId) {
-      await refundDeployment(payload.customerId, prepaidAmountCents, "Refund: Service missing locked defaults");
-      return NextResponse.json({ error: "Product service is not fully configured (missing locked instance type, image, or storage)." }, { status: 500 });
     }
 
     // Get best pool from compatible pools

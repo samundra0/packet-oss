@@ -19,6 +19,13 @@ export default function AdminLoginPage() {
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
   const [loginMode, setLoginMode] = useState<LoginMode>("loading");
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("reason") === "session_expired") setSessionExpired(true);
+  }, []);
 
   // Detect if we're on a tenant subdomain
   const isTenantSubdomain = typeof window !== "undefined" &&
@@ -147,6 +154,12 @@ export default function AdminLoginPage() {
                 ? "Enter your admin credentials"
                 : "Enter your admin email to receive a login link"}
           </p>
+
+          {sessionExpired && (
+            <div className="mb-6 px-4 py-3 rounded-lg border border-amber-700/50 bg-amber-900/20 text-amber-200 text-sm text-center">
+              Your session expired. Please sign in again.
+            </div>
+          )}
 
           {!submitted ? (
             <form onSubmit={handleSubmit} className="space-y-4">

@@ -132,7 +132,7 @@ export function TopupModal({
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-white rounded-2xl p-6 w-full max-w-md mx-4 shadow-xl">
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-lg font-semibold text-[var(--ink)]">Top Up Wallet</h3>
+          <h3 className="text-lg font-semibold text-zinc-900">Top Up Wallet</h3>
           <button
             onClick={onClose}
             className="text-zinc-400 hover:text-zinc-600 p-1"
@@ -151,13 +151,13 @@ export function TopupModal({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             </div>
-            <p className="text-lg font-semibold text-[var(--ink)] mb-1">
+            <p className="text-lg font-semibold text-zinc-900 mb-1">
               ${(redeemSuccess / 100).toFixed(0)} added to your wallet
             </p>
             <p className="text-sm text-zinc-500 mb-6">Your voucher has been redeemed successfully.</p>
             <button
               onClick={onClose}
-              className="px-6 py-2 bg-[var(--ink)] text-white text-sm rounded-lg hover:bg-violet-600 transition-colors"
+              className="px-6 py-2 bg-violet-600 text-white text-sm rounded-lg hover:bg-violet-700 transition-colors"
             >
               Done
             </button>
@@ -172,19 +172,8 @@ export function TopupModal({
 
             {/* Voucher Code Input */}
             <div className={isFreeVoucher ? "mb-2" : "mb-4 pt-2 border-t border-[var(--line)]"}>
-              {!voucherCode && !validatedVoucher ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const input = document.getElementById("voucher-input");
-                    if (input) input.focus();
-                  }}
-                  className="text-xs text-[var(--muted)] hover:text-[var(--ink)] transition-colors"
-                >
-                  Have a voucher code?
-                </button>
-              ) : null}
-              <div className={`flex gap-2 mt-1 ${!voucherCode && !validatedVoucher ? "opacity-0 h-0 overflow-hidden focus-within:opacity-100 focus-within:h-auto" : ""}`}>
+              <label className="text-xs text-[var(--muted)] mb-1 block">Voucher code</label>
+              <div className="flex gap-2">
                 <input
                   id="voucher-input"
                   type="text"
@@ -192,12 +181,11 @@ export function TopupModal({
                   onChange={(e) => setVoucherCode(e.target.value.toUpperCase())}
                   placeholder="Enter voucher code"
                   className="flex-1 px-2 py-1.5 border border-[var(--line)] rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-500 uppercase"
-                  onFocus={(e) => e.target.parentElement?.classList.remove("opacity-0", "h-0", "overflow-hidden")}
                 />
                 <button
                   onClick={() => validateVoucherCode(voucherCode)}
                   disabled={!voucherCode.trim() || voucherValidating}
-                  className="px-2 py-1.5 bg-[var(--ink)] text-white text-xs rounded hover:bg-violet-600 disabled:opacity-50 transition-colors"
+                  className="px-3 py-1.5 bg-violet-600 text-white text-xs rounded hover:bg-violet-700 disabled:opacity-50 transition-colors whitespace-nowrap"
                 >
                   {voucherValidating ? "..." : "Apply"}
                 </button>
@@ -259,7 +247,7 @@ export function TopupModal({
                         disabled={topupLoading || !!belowMinimum}
                         className="flex flex-col items-center p-4 border border-[var(--line)] rounded-xl hover:border-violet-500 hover:bg-violet-50 transition-colors disabled:opacity-50"
                       >
-                        <span className="text-xl font-bold text-[var(--ink)]">{option.label}</span>
+                        <span className="text-xl font-bold text-zinc-900">{option.label}</span>
                         {validatedVoucher ? (
                           <span className="text-xs text-green-600 font-medium">
                             ~{totalHours}h GPU time (+{bonusHours}h bonus)

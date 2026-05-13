@@ -3,6 +3,7 @@
 import { createHash, randomBytes } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "./errors";
+import { embargoCheck } from "@/lib/embargo";
 import type { ApiKeyAuth } from "./types";
 
 const KEY_PREFIX = "pk_live_";
@@ -61,6 +62,14 @@ export async function authenticateApiKey(request: Request): Promise<ApiKeyAuth> 
 
   if (apiKey.expiresAt && apiKey.expiresAt < new Date()) {
     throw ApiError.expiredApiKey();
+  }
+
+  // Embargo check — block API access from sanctioned countries
+  let endpoint = "/api/v1";
+  try { endpoint = new URL(request.url).pathname; } catch { /* use default */ }
+  const embargo = await embargoCheck(request, endpoint);
+  if (embargo.blocked) {
+    throw ApiError.forbidden("Service not available in your region");
   }
 
   // Update last used timestamp (fire and forget)

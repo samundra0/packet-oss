@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken, type CustomerTokenPayload } from "./customer";
 import { getStripe } from "@/lib/stripe";
 import { resolveAllTeamsForEmail } from "@/lib/customer-resolver";
+import { findSuspension } from "@/lib/customer-suspension";
 import type Stripe from "stripe";
 
 /**
@@ -57,6 +58,18 @@ export async function getAuthenticatedCustomer(
     return NextResponse.json(
       { error: "Customer not found" },
       { status: 404 }
+    );
+  }
+
+  // Block suspended customers (fraud lockout). Checks all linked Stripe
+  // customer IDs since one suspended account locks the whole email out
+  // for the entire duration of any still-valid JWT.
+  const suspension = await findSuspension(resolved.allCustomerIds);
+  if (suspension) {
+    console.warn(`[Auth] Blocked suspended customer ${payload.email} (${resolved.primaryCustomer.id})`);
+    return NextResponse.json(
+      { error: "This account has been suspended. Contact support." },
+      { status: 403 }
     );
   }
 

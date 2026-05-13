@@ -107,13 +107,30 @@ while true; do
     # Get CPU usage
     CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' 2>/dev/null || echo "0")
 
-    # Get memory info
+    # Get memory info — use cgroup limit as MEM_TOTAL (pod reservation, not node total)
     MEM_INFO=$(free -m | grep Mem 2>/dev/null)
     MEM_USED=$(echo "$MEM_INFO" | awk '{print $3}')
-    MEM_TOTAL=$(echo "$MEM_INFO" | awk '{print $2}')
+    CGMEM_V2=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+    CGMEM_V1=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
+    if [ -n "$CGMEM_V2" ] && [ "$CGMEM_V2" != "max" ]; then
+      MEM_TOTAL=$(( CGMEM_V2 / 1048576 ))
+    elif [ -n "$CGMEM_V1" ] && [ "$CGMEM_V1" -lt 1125899906842624 ] 2>/dev/null; then
+      MEM_TOTAL=$(( CGMEM_V1 / 1048576 ))
+    else
+      MEM_TOTAL=$(echo "$MEM_INFO" | awk '{print $2}')
+    fi
 
-    # Get disk usage for /workspace (persistent storage) and root
-    DISK_WS=$(df -BM /workspace 2>/dev/null | tail -1 | awk '{gsub("M",""); print $3","$2}')
+    # Get disk usage for persistent NFS storage and root.
+    # Use the NFS mount directly (/data/share*) rather than /workspace —
+    # /workspace is a symlink to the NFS subdirectory when storage is attached,
+    # but falls back to an ephemeral local directory when it isn't, which would
+    # cause df to silently report root filesystem usage instead.
+    NFS_MOUNT=$(ls -d /data/share* 2>/dev/null | head -1)
+    if [ -n "$NFS_MOUNT" ]; then
+      DISK_WS=$(df -BM "$NFS_MOUNT" 2>/dev/null | tail -1 | awk '{gsub("M",""); print $3","$2}')
+    else
+      DISK_WS=""
+    fi
     DISK_ROOT=$(df -BM / 2>/dev/null | tail -1 | awk '{gsub("M",""); print $3","$2}')
 
     # Send metrics (includes per-process pod_gpu_util and pod_vram_mb)

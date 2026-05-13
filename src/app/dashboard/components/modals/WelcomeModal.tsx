@@ -105,6 +105,7 @@ export function WelcomeModal({
         body: JSON.stringify({
           productId: monthlyProduct.id,
           email: customerEmail,
+          termsAccepted: true,
         }),
       });
 
@@ -282,34 +283,6 @@ export function WelcomeModal({
               </div>
             ) : (
               <>
-                {/* Monthly flat rate option */}
-                {monthlyProduct && !isFreeVoucher && (
-                  <div className="px-8 pt-6 pb-2">
-                    <button
-                      onClick={handleMonthlyCheckout}
-                      disabled={subscribing || !customerEmail}
-                      className="w-full p-4 rounded-xl border border-[var(--line)] bg-zinc-50 hover:border-teal-400 hover:bg-teal-50/50 transition-all text-left disabled:opacity-60 disabled:cursor-not-allowed"
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide bg-teal-500 text-white rounded-full flex-shrink-0">
-                          New!
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-[var(--ink)]">Flat Rate Blackwell</p>
-                          <p className="text-sm text-[var(--muted)]">
-                            RTX 6000 Pro at ${monthlyPrice}/month (${hourlyEquivalent}/hr equivalent)
-                          </p>
-                        </div>
-                        {subscribing && (
-                          <div className="w-4 h-4 border-2 border-teal-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                        )}
-                      </div>
-                    </button>
-                    {subscribeError && (
-                      <p className="mt-2 text-xs text-red-600">{subscribeError}</p>
-                    )}
-                  </div>
-                )}
 
                 {/* PAYG wallet section — hidden when free voucher is validated */}
                 {!isFreeVoucher && (
@@ -358,19 +331,8 @@ export function WelcomeModal({
 
                 {/* Voucher section */}
                 <div className="px-8 pb-3">
-                  {!voucherCode && !validatedVoucher ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const input = document.getElementById("welcome-voucher-input");
-                        if (input) input.focus();
-                      }}
-                      className="text-xs text-[var(--muted)] hover:text-[var(--ink)] transition-colors"
-                    >
-                      Have a voucher code?
-                    </button>
-                  ) : null}
-                  <div className={`flex gap-2 mt-1 ${!voucherCode && !validatedVoucher ? "opacity-0 h-0 overflow-hidden focus-within:opacity-100 focus-within:h-auto" : ""}`}>
+                  <label className="text-xs text-zinc-500 mb-1 block">Voucher code</label>
+                  <div className="flex gap-2">
                     <input
                       id="welcome-voucher-input"
                       type="text"
@@ -378,12 +340,11 @@ export function WelcomeModal({
                       onChange={(e) => setVoucherCode(e.target.value.toUpperCase())}
                       placeholder="Enter voucher code"
                       className="flex-1 px-2 py-1.5 border border-[var(--line)] rounded text-xs focus:outline-none focus:ring-1 focus:ring-teal-500 uppercase"
-                      onFocus={(e) => e.target.parentElement?.classList.remove("opacity-0", "h-0", "overflow-hidden")}
                     />
                     <button
                       onClick={() => validateVoucherCode(voucherCode)}
                       disabled={!voucherCode.trim() || voucherValidating}
-                      className="px-2 py-1.5 bg-[var(--ink)] text-white text-xs rounded hover:bg-zinc-700 disabled:opacity-50 transition-colors"
+                      className="px-3 py-1.5 bg-zinc-800 text-white text-xs rounded hover:bg-zinc-700 disabled:opacity-50 transition-colors whitespace-nowrap"
                     >
                       {voucherValidating ? "..." : "Apply"}
                     </button>

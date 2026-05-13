@@ -2,6 +2,7 @@
 export {
   generateCustomerToken,
   generateAdminBypassToken,
+  generateTwoFactorVerifiedToken,
   verifyCustomerToken,
   generateUnsubscribeToken,
   verifyUnsubscribeToken,

@@ -19,6 +19,9 @@ export interface PricingContent {
   title: string; // e.g., "B200"
   subtitle: string; // e.g., "192GB HBM3e"
   features: string[]; // Feature bullet points
+  cardSubtitle?: string; // Override for the under-price subtitle (defaults to "Pay as you go. No minimum commitment.")
+  ctaText?: string; // Override for the Deploy CTA button label (defaults to "Deploy Now")
+  ctaSubtext?: string; // Override for the small text under the CTA (defaults to "Pay as you go · Cancel anytime")
 }
 
 // GPU Offering for landing page carousel
@@ -36,6 +39,7 @@ export interface GpuOffering {
   active: boolean;
   soldOut?: boolean;
   popular?: boolean;
+  heroPrice?: number; // Optional override for the hero chip price (e.g. L40S dynamic vs dedicated)
 }
 
 // Proof section stat

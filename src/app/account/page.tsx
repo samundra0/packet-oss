@@ -40,8 +40,13 @@ function AccountContent() {
   // Capture UTM if visitor lands directly on /account with utm params
   useEffect(() => { captureUtm(); }, []);
 
-  // Default to signup — this is a conversion page, not a login page
-  const [mode, setMode] = useState<Mode>("signup");
+  // Session-expired bounce: SessionGuard sends users here with ?reason=session_expired
+  // when an authenticated dashboard fetch returns 401. Flip to signin and show a banner.
+  const sessionExpired = searchParams.get("reason") === "session_expired";
+
+  // Default to signup — this is a conversion page, not a login page.
+  // If the user is returning after their session expired, start in signin mode.
+  const [mode, setMode] = useState<Mode>(sessionExpired ? "signin" : "signup");
   const [email, setEmail] = useState(urlEmail);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -55,7 +60,7 @@ function AccountContent() {
     setLoading(true);
 
     if (mode === "signup" && !termsAccepted) {
-      setError("Please accept the Terms of Service and Privacy Policy");
+      setError("Please accept the Legal Policies and Privacy Policies");
       setLoading(false);
       return;
     }
@@ -218,6 +223,22 @@ function AccountContent() {
           <div className="account-form-container">
             {!submitted ? (
               <>
+                {sessionExpired && (
+                  <div
+                    style={{
+                      padding: "12px 16px",
+                      marginBottom: "16px",
+                      background: "#FEF3C7",
+                      border: "1px solid #F59E0B",
+                      borderRadius: "8px",
+                      color: "#78350F",
+                      fontSize: "14px",
+                      textAlign: "center",
+                    }}
+                  >
+                    Your session expired. Please sign in again.
+                  </div>
+                )}
                 <div className="account-form-header">
                   <h2 className="account-form-title">
                     {mode === "signup" ? "Create free account" : "Welcome back"}
@@ -279,9 +300,9 @@ function AccountContent() {
                         />
                         <span className="account-terms-text">
                           I agree to the{" "}
-                          <a href="/terms" target="_blank">Terms of Service</a>
+                          <a href="/terms" target="_blank">Legal Policies</a>
                           {" "}and{" "}
-                          <a href="/privacy" target="_blank">Privacy Policy</a>
+                          <a href="/privacy" target="_blank">Privacy Policies</a>
                         </span>
                       </label>
                       <p className="account-consent-note">

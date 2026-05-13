@@ -17,42 +17,39 @@ export const logsCommand = new Command("logs")
     const fetchAndDisplay = async (): Promise<boolean> => {
       try {
         const data = await apiRequest<InstanceDetail>(`/instances/${id}`);
-        const sub = data.subscription;
+        const inst = data.instance;
 
         // Clear screen if following
         if (options.follow) {
           process.stdout.write("\x1B[2J\x1B[0f");
         }
 
-        const displayName = data.metadata?.displayName || `Instance ${id}`;
+        const displayName = data.metadata?.displayName || inst.name || `Instance ${id}`;
         console.log(chalk.cyan(`\n  ${displayName}\n`));
 
         // Basic info
-        const podStatus = sub.pods?.[0]?.pod_status;
-        console.log(chalk.white("  Status:     ") + formatStatus(sub.status, podStatus));
-        console.log(chalk.white("  GPU:        ") + chalk.gray(sub.pool_name || "Unknown"));
-        if (sub.created_at) {
-          console.log(chalk.white("  Created:    ") + chalk.gray(new Date(sub.created_at).toLocaleString()));
+        console.log(chalk.white("  Status:     ") + formatStatus(inst.status));
+        console.log(chalk.white("  GPU:        ") + chalk.gray(inst.gpu?.model || "Unknown"));
+        if (inst.created_at) {
+          console.log(chalk.white("  Created:    ") + chalk.gray(new Date(inst.created_at).toLocaleString()));
+        }
+        if (inst.region) {
+          console.log(chalk.white("  Region:     ") + chalk.gray(`${inst.region.city}, ${inst.region.country}`));
+        }
+        if (inst.ip && inst.ip.length > 0) {
+          console.log(chalk.white("  IP:         ") + chalk.gray(inst.ip.join(", ")));
         }
 
-        // Pod info
-        if (sub.pods && sub.pods.length > 0) {
-          console.log(chalk.white("\n  Pods:"));
-          for (const pod of sub.pods) {
-            const status = pod.pod_status === "Running"
-              ? chalk.green(pod.pod_status)
-              : pod.pod_status === "Pending"
-              ? chalk.yellow(pod.pod_status)
-              : chalk.gray(pod.pod_status);
-            console.log(chalk.gray(`    - ${pod.pod_name}: `) + status);
-          }
+        // Connection info
+        if (data.connectionInfo?.ssh_command) {
+          console.log(chalk.white("\n  SSH:        ") + chalk.gray(data.connectionInfo.ssh_command));
         }
 
         console.log();
 
         // Return true if still running (for --follow)
-        return !["terminated", "deleted", "cancelled", "un_subscribed"].includes(
-          (sub.status || "").toLowerCase()
+        return !["terminated", "deleted", "cancelled", "un_subscribed", "stopped"].includes(
+          (inst.status || "").toLowerCase()
         );
       } catch (error) {
         console.log(chalk.red(`\n  Error: ${error instanceof Error ? error.message : "Unknown error"}\n`));
@@ -78,21 +75,18 @@ export const logsCommand = new Command("logs")
     }
   });
 
-function formatStatus(status: string, podStatus?: string): string {
+function formatStatus(status: string): string {
   const s = (status || "").toLowerCase();
-  if (s === "running" || s === "active" || s === "subscribed") {
-    if (podStatus === "Running") {
-      return chalk.green("running");
-    } else if (podStatus === "Pending") {
-      return chalk.yellow("starting");
-    }
-    return chalk.yellow(status);
-  } else if (s === "subscribing" || s === "pending") {
+  if (s === "running" || s === "active") {
+    return chalk.green("running");
+  } else if (s === "starting" || s === "subscribing" || s === "pending") {
     return chalk.yellow("starting");
-  } else if (s === "un_subscribing" || s === "terminating") {
+  } else if (s === "stopping" || s === "un_subscribing" || s === "terminating") {
     return chalk.yellow("terminating");
-  } else if (s === "terminated" || s === "deleted" || s === "un_subscribed") {
+  } else if (s === "terminated" || s === "deleted" || s === "un_subscribed" || s === "stopped") {
     return chalk.gray("terminated");
+  } else if (s === "error") {
+    return chalk.red("error");
   }
   return chalk.gray(status);
 }

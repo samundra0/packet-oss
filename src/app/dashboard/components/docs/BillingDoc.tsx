@@ -48,7 +48,7 @@ export function BillingDoc() {
           <p className="text-xs font-semibold uppercase tracking-wider text-teal-600 mb-2">Option 2</p>
           <h3 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 mb-2">Monthly Subscription</h3>
           <ul className="text-sm text-zinc-600 dark:text-zinc-400 space-y-2 list-disc list-inside">
-            <li>$199/mo flat rate for one dedicated GPU</li>
+            <li>$299/mo flat rate for one dedicated GPU</li>
             <li>Paid via credit card (Stripe subscription)</li>
             <li>Completely independent of your wallet balance</li>
             <li>Renews automatically each month</li>
@@ -89,7 +89,7 @@ export function BillingDoc() {
         for always-on workloads where you know you&apos;ll use the GPU continuously.
       </p>
       <ul>
-        <li><strong>$199/month</strong> for one NVIDIA RTX PRO 6000 Blackwell (96GB VRAM)</li>
+        <li><strong>$299/month</strong> for one NVIDIA RTX PRO 6000 Blackwell (96GB VRAM)</li>
         <li>Paid via Stripe &mdash; billed to your credit card, not your wallet</li>
         <li>Your wallet balance is completely separate and unaffected</li>
         <li>Renews automatically on the same day each month</li>
@@ -99,10 +99,10 @@ export function BillingDoc() {
       <div className="not-prose bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 my-6">
         <h4 className="text-blue-800 dark:text-blue-200 font-semibold mb-2 text-base">Monthly vs. Hourly</h4>
         <p className="text-blue-700 dark:text-blue-300 text-sm mb-0">
-          The monthly subscription for the RTX PRO 6000 works out to ~$0.27/hr
-          (based on 730 hours/month) &mdash; a <strong>59% saving</strong> compared
+          The monthly subscription for the RTX PRO 6000 works out to ~$0.41/hr
+          (based on 730 hours/month) &mdash; a <strong>38% saving</strong> compared
           to the hourly rate of $0.66/hr. If you plan to run a GPU for more than
-          ~12 days in a month, the subscription is cheaper.
+          ~19 days in a month, the subscription is cheaper.
         </p>
       </div>
 
@@ -124,13 +124,13 @@ export function BillingDoc() {
             <td><strong>RTX PRO 6000 Blackwell</strong></td>
             <td>96 GB GDDR7</td>
             <td>$0.66/hr</td>
-            <td>$199/mo</td>
+            <td>$299/mo</td>
             <td>Inference, LoRA fine-tuning, Stable Diffusion, open-source models</td>
           </tr>
           <tr>
             <td><strong>NVIDIA B200</strong></td>
             <td>180 GB HBM3e</td>
-            <td>$2.25/hr</td>
+            <td>$3.75/hr</td>
             <td>&mdash;</td>
             <td>Large model training, 70B+ inference, production serving</td>
           </tr>
@@ -348,8 +348,8 @@ export function BillingDoc() {
 
       <h3>3. Consider Monthly for Long-Running Workloads</h3>
       <p>
-        If you&apos;ll run an RTX PRO 6000 for more than ~12 days in a month, the
-        $199/mo subscription is cheaper than hourly.
+        If you&apos;ll run an RTX PRO 6000 for more than ~19 days in a month, the
+        $299/mo subscription is cheaper than hourly.
       </p>
 
       <h3>4. Use Batch Processing for Token Factory</h3>
@@ -373,7 +373,7 @@ export function BillingDoc() {
       <h3>What&apos;s the difference between hourly and monthly?</h3>
       <p>
         <strong>Hourly</strong> is pay-as-you-go from your wallet &mdash; you pay only for the time you use.
-        <strong>Monthly</strong> is a flat $199/mo subscription billed to your credit card,
+        <strong>Monthly</strong> is a flat $299/mo subscription billed to your credit card,
         giving you a dedicated GPU for the entire month. The two are completely independent.
       </p>
 

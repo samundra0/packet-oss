@@ -15,6 +15,7 @@
   ansible.builtin.apt:
     name:
       - python3-venv
+      - python3-dev
       - curl
     state: present
     update_cache: yes

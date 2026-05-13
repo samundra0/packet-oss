@@ -16,6 +16,7 @@ import { isPro } from "@/lib/edition";
 import { checkAndProcessReferralQualification } from "@/lib/referral";
 import { cacheCustomer } from "@/lib/customer-cache";
 import { getBrandName } from "@/lib/branding";
+import { embargoCheck } from "@/lib/embargo";
 import crypto from "crypto";
 
 // Generate a secure password for hosted.ai account
@@ -38,12 +39,34 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Block checkout from embargoed countries (server-side complement to Stripe Radar)
+  const embargo = await embargoCheck(request, "/api/checkout");
+  if (embargo.blocked) {
+    return NextResponse.json(
+      { error: "Checkout is not available in your region." },
+      { status: 403 }
+    );
+  }
+
   try {
-    const { productId, email, checkOnly, voucherCode } = await request.json();
+    const { productId, email, checkOnly, voucherCode, termsAccepted, source } = await request.json();
+    // Dashboard-initiated checkouts come from an already-logged-in customer, so
+    // we skip the new-user welcome/success page and bounce them straight back
+    // to their dashboard. The webhook runs async — the dashboard will show the
+    // new subscription on its next data refresh.
+    const isDashboardInitiated = source === "dashboard";
 
     if (!productId) {
       return NextResponse.json(
         { error: "Product ID is required" },
+        { status: 400 }
+      );
+    }
+
+    // Server-side TOS validation (client has a checkbox but this enforces it)
+    if (!checkOnly && !termsAccepted) {
+      return NextResponse.json(
+        { error: "You must accept the Legal Policies and Privacy Policies" },
         { status: 400 }
       );
     }
@@ -78,41 +101,7 @@ export async function POST(request: NextRequest) {
         (c) => c.metadata?.billing_type === "hourly"
       ) || existingCustomers.data[0];
 
-      // For monthly products: check ALL Stripe customers for this email to prevent duplicate subscriptions.
-      // Monthly subs live on SEPARATE Stripe customers (to protect wallet), so we must check all of them.
-      if (product.billingType === "monthly" && product.stripePriceId) {
-        let alreadySubscribed = false;
-
-        for (const cust of existingCustomers.data) {
-          const subscriptions = await stripe.subscriptions.list({
-            customer: cust.id,
-            status: "active",
-            limit: 10,
-          });
-
-          alreadySubscribed = subscriptions.data.some((sub) => {
-            const priceId = sub.items?.data?.[0]?.price?.id;
-            return priceId === product.stripePriceId;
-          });
-
-          if (alreadySubscribed) break;
-        }
-
-        if (alreadySubscribed) {
-          const portalSession = await stripe.billingPortal.sessions.create({
-            customer: primaryCustomer.id,
-            return_url: `${process.env.NEXT_PUBLIC_APP_URL}`,
-          });
-
-          return NextResponse.json({
-            url: portalSession.url,
-            isPortal: true,
-            message: "You already have an active subscription for this product. Redirecting to manage your plan."
-          });
-        }
-
-        // Customer exists but doesn't have THIS product — allow checkout below
-      } else {
+      if (product.billingType !== "monthly") {
         // Hourly product: check if customer already has wallet set up
         if (primaryCustomer.metadata?.billing_type === "hourly") {
           const portalSession = await stripe.billingPortal.sessions.create({
@@ -359,7 +348,9 @@ export async function POST(request: NextRequest) {
           gpu_product_name: product.name,
           billing_type: "monthly",
         },
-        success_url: `${process.env.NEXT_PUBLIC_APP_URL}/success?session_id={CHECKOUT_SESSION_ID}&type=monthly`,
+        success_url: isDashboardInitiated
+          ? `${process.env.NEXT_PUBLIC_APP_URL}/subscribed?session_id={CHECKOUT_SESSION_ID}`
+          : `${process.env.NEXT_PUBLIC_APP_URL}/success?session_id={CHECKOUT_SESSION_ID}&type=monthly`,
         cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}?canceled=true`,
       });
 

@@ -81,6 +81,7 @@ export interface HFSearchResult {
   pipelineTag?: string;
   libraryName?: string;
   estimatedVramGb: number;
+  estimatedDiskSizeGb: number;
   estimatedParams?: number; // Parameter count in billions
   type: "model" | "space";
 }
@@ -186,6 +187,7 @@ export async function searchModels(
       pipelineTag: model.pipeline_tag,
       libraryName: model.library_name,
       estimatedVramGb: estimateVramFromModel(model),
+      estimatedDiskSizeGb: estimateDiskSizeFromModel(model),
       estimatedParams: estimateParamsFromModel(model),
       type: "model" as const,
     }));
@@ -250,6 +252,7 @@ export async function searchSpaces(
       gated: space.gated,
       tags: space.tags || [],
       estimatedVramGb: 0, // Spaces VRAM depends on what they run
+      estimatedDiskSizeGb: 0,
       type: "space" as const,
     }));
 
@@ -349,6 +352,23 @@ function formatPipelineTag(tag: string): string {
 
   return tagMap[tag] || tag.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
+/**
+ * Estimate total disk space required to download a model.
+ * Sums all sibling file sizes from the HF model card.
+ * Returns size in GB (0 if unknown).
+ */
+export function estimateDiskSizeFromModel(model: HFModel): number {
+  if (!model.siblings || model.siblings.length === 0) return 0;
+  const totalBytes = model.siblings.reduce((sum, s) => sum + (s.size || 0), 0);
+  return totalBytes > 0 ? Math.ceil(totalBytes / (1024 * 1024 * 1024)) : 0;
+}
+
+/**
+ * Standard ephemeral storage limit for GPU pods in GB.
+ * Models exceeding this cannot be deployed on standard pods.
+ */
+export const STANDARD_EPHEMERAL_STORAGE_GB = 150;
 
 /**
  * Estimate VRAM requirement from model metadata

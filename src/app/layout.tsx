@@ -83,8 +83,14 @@ export const metadata: Metadata = {
     images: ["/og-image.jpg"],
   },
   icons: {
-    icon: faviconUrl,
+    icon: [
+      { url: faviconUrl },
+      { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
+      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+    ],
+    apple: "/apple-touch-icon.png",
   },
+  manifest: "/site.webmanifest",
   alternates: {
     canonical: appUrl,
   },
@@ -279,7 +285,7 @@ c.parentNode.insertBefore(t,c)}();`}
                       price: "0.66",
                       priceCurrency: "USD",
                       unitText: "per hour",
-                      url: `${appUrl}/gpu/rtx-6000`,
+                      url: `${appUrl}/blackwell`,
                     },
                   ],
                 },

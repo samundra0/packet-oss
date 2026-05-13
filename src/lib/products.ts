@@ -9,6 +9,7 @@ export interface ProductPricing {
   name: string;
   hourly_rate_cents: number;
   poolIds: number[];
+  serviceId: string | null;
 }
 
 /**
@@ -35,6 +36,7 @@ export async function getProductByPoolId(poolId: string | number): Promise<Produ
             name: product.name,
             hourly_rate_cents: product.pricePerHourCents,
             poolIds,
+            serviceId: product.serviceId,
           };
         }
       } catch {

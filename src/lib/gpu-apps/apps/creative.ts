@@ -35,7 +35,7 @@ export const CREATIVE_APPS: GpuAppDefinition[] = [
 echo "=== Installing ComfyUI ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y git python3-pip python3-venv > /dev/null 2>&1
+sudo apt-get install -y git python3-pip python3-venv python3-dev > /dev/null 2>&1
 
 # Clone ComfyUI
 cd /opt
@@ -102,7 +102,7 @@ echo "=== Installing Automatic1111 Stable Diffusion WebUI ==="
 
 sudo apt-get update -qq
 # Install required dependencies including build tools for Pillow and SSL for tokenizers
-sudo apt-get install -y git python3-pip python3-venv wget libgl1 libglib2.0-0 \\
+sudo apt-get install -y git python3-pip python3-venv python3-dev wget libgl1 libglib2.0-0 \\
   libjpeg-dev zlib1g-dev libpng-dev libfreetype6-dev liblcms2-dev \\
   libwebp-dev libtiff5-dev libopenjp2-7-dev libimagequant-dev libraqm-dev \\
   libxcb1-dev build-essential curl libssl-dev pkg-config > /dev/null 2>&1
@@ -202,7 +202,7 @@ echo "INFO=Download models to /opt/stable-diffusion-webui/models/Stable-diffusio
 echo "=== Installing Fooocus ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y git python3-pip python3-venv libgl1 libglib2.0-0 > /dev/null 2>&1
+sudo apt-get install -y git python3-pip python3-venv python3-dev libgl1 libglib2.0-0 > /dev/null 2>&1
 
 # Clone Fooocus
 cd /opt
@@ -273,7 +273,7 @@ echo "INFO=Models auto-download on first use"
 echo "=== Installing CogVideoX ==="
 
 sudo apt-get update -qq
-sudo apt-get install -y git python3-pip python3-venv ffmpeg > /dev/null 2>&1
+sudo apt-get install -y git python3-pip python3-venv python3-dev ffmpeg > /dev/null 2>&1
 
 # Clone CogVideo
 cd /opt

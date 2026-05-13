@@ -10,6 +10,7 @@ export interface CustomerTokenPayload {
   customerId: string;
   type: "customer-dashboard";
   skipTwoFactor?: boolean; // Set to true for admin bypass tokens
+  twoFactorVerified?: boolean; // Set after user completes TOTP verification
 }
 
 export function generateCustomerToken(
@@ -43,6 +44,33 @@ export function generateAdminBypassToken(email: string, customerId: string): str
     getJwtSecret(),
     { expiresIn: "1h" }
   );
+}
+
+/**
+ * Re-sign a customer token with the twoFactorVerified flag set.
+ * Preserves the original token's expiry so the session isn't extended.
+ */
+export function generateTwoFactorVerifiedToken(originalToken: string): string | null {
+  try {
+    const decoded = jwt.verify(originalToken, getJwtSecret(), { algorithms: ['HS256'] }) as CustomerTokenPayload & { exp: number };
+    if (decoded.type !== "customer-dashboard") return null;
+
+    const remainingSeconds = decoded.exp - Math.floor(Date.now() / 1000);
+    if (remainingSeconds <= 0) return null;
+
+    return jwt.sign(
+      {
+        email: decoded.email,
+        customerId: decoded.customerId,
+        type: "customer-dashboard",
+        twoFactorVerified: true,
+      },
+      getJwtSecret(),
+      { expiresIn: remainingSeconds }
+    );
+  } catch {
+    return null;
+  }
 }
 
 export function verifyCustomerToken(token: string): CustomerTokenPayload | null {

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { getStripe } from "@/lib/stripe";
-import { unsubscribeFromPool, getPoolSubscriptions, deleteInstance } from "@/lib/hostedai";
+import { unsubscribeFromPool, getPoolSubscriptions, deleteInstance, getUnifiedInstanceDetail } from "@/lib/hostedai";
 import { logGPUTerminated } from "@/lib/activity";
 import { prisma } from "@/lib/prisma";
 import { sendGpuTerminatedEmail } from "@/lib/email";
@@ -242,8 +242,25 @@ export async function DELETE(
         await prisma.podMetadata.delete({ where: { id: podMetadata.id } }).catch(() => {});
       }
 
-      // Delete the instance via HAI 2.2 API
-      await deleteInstance(id);
+      // Delete the instance via HAI 2.2 API.
+      // If HAI rejects the delete but the instance is in a known-dead status,
+      // our local records are already cleaned up — treat it as effectively gone.
+      const HAI_DEAD_STATUSES = ["error", "failed", "unknown"];
+      try {
+        await deleteInstance(id);
+      } catch (deleteErr) {
+        let instanceStatus: string | null = null;
+        try {
+          const inst = await getUnifiedInstanceDetail(id);
+          instanceStatus = inst?.status?.toLowerCase() ?? null;
+        } catch { /* instance may not be fetchable in a dead state */ }
+
+        if (instanceStatus !== null && HAI_DEAD_STATUSES.includes(instanceStatus)) {
+          console.warn(`[HAI 2.2] deleteInstance failed for ${id} in state '${instanceStatus}'; local records already cleaned, treating as deleted`);
+        } else {
+          throw deleteErr;
+        }
+      }
 
       await logGPUTerminated(payload.customerId, "GPU Instance", displayName, id);
 

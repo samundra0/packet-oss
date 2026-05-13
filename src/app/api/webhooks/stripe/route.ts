@@ -21,6 +21,7 @@ import { sendOnboardingEvent } from "@/lib/email/onboarding-events";
 import { prisma } from "@/lib/prisma";
 import { cacheCustomer } from "@/lib/customer-cache";
 import { getBrandName } from "@/lib/branding";
+import { createInvoiceForPayment } from "@/lib/invoice";
 import Stripe from "stripe";
 import crypto from "crypto";
 
@@ -226,87 +227,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Create an invoice for a one-time payment so it shows in customer portal.
-// IMPORTANT: Stripe ALWAYS applies customer credit balance at finalization.
-// To prevent this (these are record-keeping invoices, not real charges),
-// we temporarily zero out the credit balance, finalize, then restore it.
-async function createInvoiceForPayment(
-  stripe: Stripe,
-  customerId: string,
-  amount: number,
-  description: string,
-  paymentIntentId?: string
-) {
-  try {
-    // Step 1: Create draft invoice
-    const invoice = await stripe.invoices.create({
-      customer: customerId,
-      auto_advance: false,
-      collection_method: "send_invoice",
-      days_until_due: 0,
-      pending_invoice_items_behavior: "exclude",
-      metadata: {
-        type: "wallet_payment",
-        payment_intent_id: paymentIntentId || "",
-      },
-    });
-
-    // Step 2: Attach the line item explicitly to this invoice
-    await stripe.invoiceItems.create({
-      customer: customerId,
-      invoice: invoice.id,
-      amount: amount,
-      currency: "usd",
-      description: description,
-    });
-
-    // Step 3: Read current customer balance (negative = credit, positive = owes)
-    const customer = await stripe.customers.retrieve(customerId);
-    if (customer && !("deleted" in customer)) {
-      cacheCustomer(customer).catch(() => {});
-    }
-    const currentBalance = "deleted" in customer ? 0 : customer.balance;
-
-    // Step 4: If customer has ANY non-zero balance, temporarily zero it out
-    // so Stripe doesn't apply credit or add debt to the invoice when we finalize
-    let balanceNeutralized = false;
-    if (currentBalance !== 0) {
-      await stripe.customers.createBalanceTransaction(customerId, {
-        amount: -currentBalance, // negate current balance to reach zero
-        currency: "usd",
-        description: "Temporary hold for invoice generation",
-        metadata: { type: "invoice_balance_hold", invoice_id: invoice.id },
-      });
-      balanceNeutralized = true;
-    }
-
-    try {
-      // Step 5: Finalize the invoice — balance is zero so nothing gets drained
-      await stripe.invoices.finalizeInvoice(invoice.id);
-
-      // Step 6: Mark as paid out of band (no real charge)
-      await stripe.invoices.pay(invoice.id, {
-        paid_out_of_band: true,
-      });
-    } finally {
-      // Step 7: ALWAYS restore the balance, even if finalize/pay fails
-      if (balanceNeutralized && currentBalance !== 0) {
-        await stripe.customers.createBalanceTransaction(customerId, {
-          amount: currentBalance, // restore original balance
-          currency: "usd",
-          description: "Restore after invoice generation",
-          metadata: { type: "invoice_balance_restore", invoice_id: invoice.id },
-        });
-      }
-    }
-
-    console.log(`Created invoice ${invoice.id} for $${amount / 100} for customer ${customerId}`);
-    return invoice;
-  } catch (error) {
-    console.error("Failed to create invoice:", error);
-    // Don't throw - invoice creation is nice-to-have, not critical
-  }
-}
+// createInvoiceForPayment is now imported from @/lib/invoice
 
 async function handleWalletTopup(
   session: Stripe.Checkout.Session,
@@ -680,7 +601,7 @@ async function handleCheckoutCompleted(
             "Team ID": existingTeamId,
             "Product": productName,
             "Billing Type": "monthly",
-            "Monthly Price": "$199/month",
+            "Monthly Price": "$299/month",
           },
         });
 
@@ -936,10 +857,12 @@ async function handleSubscriptionCanceled(
   // Resolve teamId: monthly customers on separate Stripe accounts store
   // primary_stripe_customer_id instead of hostedai_team_id
   let teamId = customer.metadata?.hostedai_team_id;
+  let primaryCust: Stripe.Customer | null = null;
   if (!teamId && customer.metadata?.primary_stripe_customer_id) {
     try {
-      const primaryCust = await stripe.customers.retrieve(customer.metadata.primary_stripe_customer_id);
-      if (!("deleted" in primaryCust && primaryCust.deleted)) {
+      const resolved = await stripe.customers.retrieve(customer.metadata.primary_stripe_customer_id);
+      if (!("deleted" in resolved && resolved.deleted)) {
+        primaryCust = resolved as Stripe.Customer;
         cacheCustomer(primaryCust).catch(() => {});
         teamId = primaryCust.metadata?.hostedai_team_id;
         console.log(`Resolved teamId ${teamId} from primary customer ${customer.metadata.primary_stripe_customer_id}`);
@@ -991,6 +914,16 @@ async function handleSubscriptionCanceled(
       });
 
       if (remainingSubs.data.length === 0) {
+        // Skip suspension if the primary hourly customer still has a healthy
+        // wallet balance — a canceled monthly subscription should not kill
+        // funded hourly pods on the same team.
+        if (primaryCust) {
+          const primaryWalletBalance = -(primaryCust.balance || 0); // positive = credit
+          if (primaryWalletBalance > 0) {
+            console.log(`Skipping team suspension for ${teamId} — primary hourly customer has $${(primaryWalletBalance / 100).toFixed(2)} wallet credit`);
+            return;
+          }
+        }
         await suspendTeam(teamId);
         console.log(`Suspended team ${teamId} (no remaining active subscriptions)`);
       } else {
@@ -1065,14 +998,10 @@ async function handlePaymentFailed(invoice: Stripe.Invoice, stripe: Stripe) {
     }
   }
 
-  if (teamId) {
-    try {
-      await suspendTeam(teamId);
-      console.log(`Suspended team due to payment failure: ${teamId}`);
-    } catch (error) {
-      console.error(`Failed to suspend team ${teamId}:`, error);
-    }
-  }
+  // Do NOT suspend the team on payment failure — Stripe will retry and
+  // eventually emit subscription.canceled if payment remains unresolved.
+  // Suspending here kills hourly pods that are fully funded from the wallet
+  // (PA-76). Monthly pod termination above is sufficient for now.
 }
 
 async function handlePaymentSucceeded(invoice: Stripe.Invoice, stripe: Stripe) {

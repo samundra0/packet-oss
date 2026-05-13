@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { getBrandName } from "@/lib/branding";
 
 interface Broadcast {
   id: string;
@@ -392,7 +393,7 @@ export function BroadcastTab() {
           htmlBody,
           useLayout,
           segmentType,
-          segmentFilter: JSON.stringify(segmentFilter),
+          segmentFilter,
         }),
       });
       const json = await res.json();
@@ -801,7 +802,7 @@ export function BroadcastTab() {
                       fontStyle: "italic",
                     }}
                   >
-                    Your HTML will be wrapped in the Packet.ai email template
+                    Your HTML will be wrapped in the {getBrandName()} email template
                     (header, footer, styles).
                   </div>
                 )}
@@ -825,7 +826,7 @@ export function BroadcastTab() {
                     onChange={(e) => setUseLayout(e.target.checked)}
                     style={{ accentColor: "#1a4fff" }}
                   />
-                  Use Packet.ai email template
+                  Use {getBrandName()} email template
                 </label>
               </div>
 

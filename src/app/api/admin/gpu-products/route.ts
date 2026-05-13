@@ -1,8 +1,8 @@
 /**
  * GPU Products Admin API
  *
- * GET - List all GPU products
- * POST - Create/update/delete GPU products
+ * GET - List all GPU products (with categories)
+ * POST - Create/update/delete GPU products and categories
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -24,7 +24,9 @@ interface GpuProductInput {
   badgeText?: string;
   vramGb?: number;
   cudaCores?: number;
+  gpuFamily?: string | null;
   serviceId?: string | null;
+  categoryIds?: string[];
 }
 
 interface HAIServiceFull {
@@ -119,17 +121,24 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const products = await prisma.gpuProduct.findMany({
-      orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
-    });
+    const [products, categories] = await Promise.all([
+      prisma.gpuProduct.findMany({
+        orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+        include: { categories: { select: { id: true, name: true } } },
+      }),
+      prisma.gpuCategory.findMany({
+        orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+      }).catch(() => []),
+    ]);
 
-    // Parse poolIds from JSON string
+    // Parse poolIds from JSON string, flatten categories to categoryIds
     const formattedProducts = products.map((p) => ({
       ...p,
       poolIds: JSON.parse(p.poolIds),
+      categoryIds: p.categories.map((c: { id: string }) => c.id),
     }));
 
-    return NextResponse.json({ success: true, data: formattedProducts });
+    return NextResponse.json({ success: true, data: formattedProducts, categories });
   } catch (err) {
     console.error("GPU Products GET error:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
@@ -157,13 +166,14 @@ export async function POST(request: NextRequest) {
         if (!data.name || data.pricePerHourCents === undefined) {
           return NextResponse.json({ error: "Name and price are required" }, { status: 400 });
         }
+        if (!data.serviceId) {
+          return NextResponse.json({ error: "HAI Service is required" }, { status: 400 });
+        }
 
         // Validate HAI service: uniqueness + type + config completeness
-        if (data.serviceId) {
-          const result = await validateServiceForProduct(data.serviceId);
-          if ("error" in result) {
-            return NextResponse.json({ error: result.error }, { status: 400 });
-          }
+        const result = await validateServiceForProduct(data.serviceId);
+        if ("error" in result) {
+          return NextResponse.json({ error: result.error }, { status: 400 });
         }
 
         const product = await prisma.gpuProduct.create({
@@ -182,13 +192,17 @@ export async function POST(request: NextRequest) {
             badgeText: data.badgeText || null,
             vramGb: data.vramGb || null,
             cudaCores: data.cudaCores || null,
+            gpuFamily: data.gpuFamily || null,
             serviceId: data.serviceId ?? null,
+            categories: data.categoryIds?.length
+              ? { connect: data.categoryIds.map(id => ({ id })) }
+              : undefined,
             createdBy: adminEmail,
             updatedBy: adminEmail,
           },
         });
 
-        // Sync pools to HAI service + assign to scenario (best-effort)
+        // Sync pools to HAI service (best-effort)
         if (data.serviceId) {
           const poolIdsArray = data.poolIds || [];
           import("@/lib/hostedai").then(({ updateHAIService }) => {
@@ -199,14 +213,23 @@ export async function POST(request: NextRequest) {
               },
             }).catch(err => console.error(`[Admin] Failed to sync pools to HAI service:`, err));
           });
-          import("@/lib/scenarios").then(({ assignGpuService }) => {
-            assignGpuService(data.serviceId!).catch(console.error);
-          });
+          // Sync service scenarios via PUT /api/service (updates scenarios array)
+          try {
+            if (data.categoryIds?.length) {
+              const { syncServiceScenarios } = await import("@/lib/scenarios");
+              await syncServiceScenarios(data.serviceId!, data.categoryIds!);
+            } else {
+              const { assignGpuService } = await import("@/lib/scenarios");
+              await assignGpuService(data.serviceId!);
+            }
+          } catch (err) {
+            console.error("[Admin] Scenario sync on create failed:", err);
+          }
         }
 
         return NextResponse.json({
           success: true,
-          data: { ...product, poolIds: JSON.parse(product.poolIds) },
+          data: { ...product, poolIds: JSON.parse(product.poolIds), categoryIds: data.categoryIds || [] },
         });
       }
 
@@ -215,10 +238,19 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: "Product ID is required" }, { status: 400 });
         }
 
-        // Fetch existing product to detect serviceId changes
-        const existing = await prisma.gpuProduct.findUnique({ where: { id } });
+        // Fetch existing product with categories to detect changes
+        const existing = await prisma.gpuProduct.findUnique({
+          where: { id },
+          include: { categories: { select: { id: true } } },
+        });
         if (!existing) {
           return NextResponse.json({ error: "Product not found" }, { status: 404 });
+        }
+        const existingCategoryIds = existing.categories.map((c: { id: string }) => c.id);
+
+        // HAI Service is required — reject explicit unset
+        if (data.serviceId !== undefined && !data.serviceId) {
+          return NextResponse.json({ error: "HAI Service is required" }, { status: 400 });
         }
 
         // Validate HAI service if being changed: uniqueness + type + config completeness
@@ -244,50 +276,82 @@ export async function POST(request: NextRequest) {
         if (data.badgeText !== undefined) updateData.badgeText = data.badgeText || null;
         if (data.vramGb !== undefined) updateData.vramGb = data.vramGb || null;
         if (data.cudaCores !== undefined) updateData.cudaCores = data.cudaCores || null;
+        if (data.gpuFamily !== undefined) updateData.gpuFamily = data.gpuFamily || null;
         if (data.serviceId !== undefined) updateData.serviceId = data.serviceId || null;
+
+        // Many-to-many categories: use `set` to replace all connections
+        if (data.categoryIds !== undefined) {
+          updateData.categories = { set: data.categoryIds.map(cid => ({ id: cid })) };
+        }
 
         const product = await prisma.gpuProduct.update({
           where: { id },
           data: updateData,
+          include: { categories: { select: { id: true } } },
         });
 
-        // Sync pools to HAI service when serviceId or poolIds change
+        // Single HAI service PUT: sync pools + scenarios together
         const effectiveServiceId = (data.serviceId !== undefined ? data.serviceId : existing.serviceId) || null;
-        const poolsChanged = data.poolIds !== undefined;
-        const serviceChanged = data.serviceId !== undefined && data.serviceId !== existing.serviceId;
+        const newCategoryIds = data.categoryIds ?? existingCategoryIds;
 
-        if (effectiveServiceId && (poolsChanged || serviceChanged)) {
-          const effectivePoolIds = data.poolIds !== undefined
-            ? data.poolIds
-            : JSON.parse(existing.poolIds || "[]");
-          import("@/lib/hostedai").then(({ updateHAIService }) => {
-            updateHAIService(effectiveServiceId, {
-              gpu_config: {
-                default_gpu_pools: effectivePoolIds,
-                gpu_pool_locked: true,
-              },
-            }).catch(err => console.error(`[Admin] Failed to sync pools to HAI service:`, err));
-          });
-        }
+        if (effectiveServiceId) {
+          try {
+            const { getHAIService, updateHAIService } = await import("@/lib/hostedai");
+            const { clearCache } = await import("@/lib/hostedai/client");
+            clearCache(`/service/${effectiveServiceId}`);
 
-        // Handle scenario assignment when serviceId changes
-        if (data.serviceId !== undefined) {
-          const oldServiceId = existing.serviceId;
-          const newServiceId = data.serviceId || null;
-          if (newServiceId && newServiceId !== oldServiceId) {
-            import("@/lib/scenarios").then(({ assignGpuService }) => {
-              assignGpuService(newServiceId).catch(console.error);
-            });
-          } else if (!newServiceId && oldServiceId) {
-            import("@/lib/scenarios").then(({ unassignGpuService }) => {
-              unassignGpuService(oldServiceId).catch(console.error);
-            });
+            // Build the update payload — one object, one PUT
+            const serviceUpdate: Record<string, unknown> = {};
+
+            // Pools
+            const effectivePoolIds = data.poolIds !== undefined
+              ? data.poolIds
+              : JSON.parse(existing.poolIds || "[]");
+            serviceUpdate.gpu_config = {
+              default_gpu_pools: effectivePoolIds,
+              gpu_pool_locked: true,
+            };
+
+            // Scenarios: resolve category scenarioIds + preserve non-category ones
+            // Get all Packet-managed scenario IDs to know which to strip/replace
+            const allCategoryScenarioIds = (await prisma.gpuCategory.findMany({
+              where: { scenarioId: { not: null } },
+              select: { scenarioId: true },
+            })).map(c => c.scenarioId!);
+
+            const svc = await getHAIService(effectiveServiceId);
+            const existingScenarios: string[] = Array.isArray(svc.scenarios) ? svc.scenarios as string[] : [];
+            const nonCategoryScenarios = existingScenarios.filter(s => !allCategoryScenarioIds.includes(s));
+
+            if (newCategoryIds.length > 0) {
+              const cats = await prisma.gpuCategory.findMany({
+                where: { id: { in: newCategoryIds } },
+                select: { scenarioId: true, name: true },
+              });
+              const categoryScenarioIds = cats.filter(c => c.scenarioId).map(c => c.scenarioId!);
+              serviceUpdate.scenarios = [...new Set([...nonCategoryScenarios, ...categoryScenarioIds])];
+              console.log(`[Admin] HAI sync: pools=[${effectivePoolIds}], scenarios=[${(serviceUpdate.scenarios as string[]).join(",")}] (${categoryScenarioIds.length} from categories, ${nonCategoryScenarios.length} preserved)`);
+            } else {
+              // No categories selected: strip all category scenarios, keep others
+              serviceUpdate.scenarios = nonCategoryScenarios;
+              console.log(`[Admin] HAI sync: pools=[${effectivePoolIds}], scenarios=[${nonCategoryScenarios.join(",")}] (all category scenarios removed)`);
+            }
+
+            clearCache(`/service/${effectiveServiceId}`);
+            await updateHAIService(effectiveServiceId, serviceUpdate);
+            console.log(`[Admin] HAI service ${effectiveServiceId} synced successfully`);
+          } catch (err) {
+            console.error("[Admin] HAI service sync failed:", err);
           }
         }
 
         return NextResponse.json({
           success: true,
-          data: { ...product, poolIds: JSON.parse(product.poolIds) },
+          data: {
+            ...product,
+            poolIds: JSON.parse(product.poolIds),
+            categoryIds: product.categories.map((c: { id: string }) => c.id),
+          },
         });
       }
 
@@ -300,13 +364,109 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: true });
       }
 
+      // ============================================
+      // Category CRUD
+      // ============================================
+
+      case "create-category": {
+        const { name: catName, slug: catSlug, description: catDesc, displayOrder: catOrder, active: catActive } =
+          body as { name?: string; slug?: string; description?: string; displayOrder?: number; active?: boolean };
+
+        if (!catName) {
+          return NextResponse.json({ error: "Category name is required" }, { status: 400 });
+        }
+
+        // Auto-generate slug from name if not provided
+        const slug = catSlug || catName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+
+        // Create HAI scenario for this category (required — fail if HAI is unreachable)
+        const { createCategoryScenario } = await import("@/lib/scenarios");
+        const scenarioId = await createCategoryScenario(catName, slug);
+        if (!scenarioId) {
+          return NextResponse.json({ error: "Failed to create HAI scenario for this category. Check HAI connectivity and try again." }, { status: 502 });
+        }
+
+        const category = await prisma.gpuCategory.create({
+          data: {
+            name: catName,
+            slug,
+            description: catDesc || null,
+            scenarioId,
+            displayOrder: catOrder || 0,
+            active: catActive ?? true,
+          },
+        });
+
+        console.log(`[Admin] Created GPU category: ${category.name} (scenario: ${scenarioId || "pending"})`);
+        return NextResponse.json({ success: true, data: category });
+      }
+
+      case "update-category": {
+        if (!id) {
+          return NextResponse.json({ error: "Category ID is required" }, { status: 400 });
+        }
+
+        const existing = await prisma.gpuCategory.findUnique({ where: { id } });
+        if (!existing) {
+          return NextResponse.json({ error: "Category not found" }, { status: 404 });
+        }
+
+        const catUpdateData: Record<string, unknown> = {};
+        if (body.name !== undefined) catUpdateData.name = body.name;
+        if (body.slug !== undefined) catUpdateData.slug = body.slug;
+        if (body.description !== undefined) catUpdateData.description = body.description || null;
+        if (body.displayOrder !== undefined) catUpdateData.displayOrder = body.displayOrder;
+        if (body.active !== undefined) catUpdateData.active = body.active;
+        if (body.icon !== undefined) catUpdateData.icon = body.icon || null;
+
+        // Retry scenario creation if previously failed
+        if (!existing.scenarioId) {
+          const { createCategoryScenario } = await import("@/lib/scenarios");
+          const scenarioId = await createCategoryScenario(
+            (body.name as string) || existing.name,
+            (body.slug as string) || existing.slug
+          );
+          if (scenarioId) {
+            catUpdateData.scenarioId = scenarioId;
+          }
+        }
+
+        const category = await prisma.gpuCategory.update({
+          where: { id },
+          data: catUpdateData,
+        });
+
+        return NextResponse.json({ success: true, data: category });
+      }
+
+      case "delete-category": {
+        if (!id) {
+          return NextResponse.json({ error: "Category ID is required" }, { status: 400 });
+        }
+
+        // Prisma onDelete: Restrict will throw if products exist
+        await prisma.gpuCategory.delete({ where: { id } });
+        return NextResponse.json({ success: true });
+      }
+
+      case "list-categories": {
+        const categories = await prisma.gpuCategory.findMany({
+          orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+          include: { _count: { select: { products: true } } },
+        });
+        return NextResponse.json({ success: true, data: categories });
+      }
+
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
   } catch (err) {
     console.error("GPU Products POST error:", err);
     if (err instanceof Error && err.message.includes("Unique constraint")) {
-      return NextResponse.json({ error: "A product with this name already exists" }, { status: 400 });
+      return NextResponse.json({ error: "A product or category with this name already exists" }, { status: 400 });
+    }
+    if (err instanceof Error && err.message.includes("Foreign key constraint")) {
+      return NextResponse.json({ error: "Cannot delete category that has products. Move or delete the products first." }, { status: 400 });
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }

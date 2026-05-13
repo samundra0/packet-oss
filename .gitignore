@@ -118,3 +118,7 @@ recipes/packet_recipes/creds
 ansible.log
 .temp/
 *.sql
+!prisma/migrations/**/*.sql
+.claude/skills/gstack/
+agentdb.rvf
+agentdb.rvf.lock

@@ -12,6 +12,7 @@ export interface HFCatalogItem {
   name: string;
   description: string;
   vramGb: number; // Required VRAM in GB (0 = any GPU works)
+  diskSizeGb?: number; // Estimated disk space required in GB (0 or undefined = unknown)
   deployScript: DeployScriptType;
   dockerImage?: string;
   tags: string[];
