@@ -1,17 +1,37 @@
 #!/usr/bin/env bash
 # =============================================================================
-# GPU Cloud Dashboard — Install Script
+# GPU Cloud Dashboard — Non-Interactive Install Script
 # =============================================================================
-# Installs the GPU Cloud Dashboard on a fresh Linux server.
+# All configuration is passed via command-line switches for automation.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/hosted-ai/packet-oss/main/install.sh | sudo bash
-#   HOSTEDAI_API_URL=http://localhost:5000 sudo bash install.sh   # Non-interactive
-#   sudo bash install.sh --skip-apache                             # Skip Apache setup
+#   sudo bash install-cli.sh \
+#     --domain dash.example.com \
+#     --hai-url http://localhost:8055 \
+#     --hai-key YOUR_API_KEY \
+#     --admin-url http://localhost:8999 \
+#     --admin-user admin@example.com \
+#     --admin-password secret \
+#     --admin-email admin@example.com
 #
-# Supports:
-#   - Same-node as HAI (recommended): HOSTEDAI_API_URL=http://localhost:<port>
-#   - Separate server: HOSTEDAI_API_URL=https://hai-server.example.com
+# Required switches:
+#   --hai-url URL          HostedAI User Panel API URL (port 8055)
+#   --admin-url URL        HostedAI Admin Panel API URL (port 8999)
+#   --admin-user USER      HostedAI Admin Panel login user
+#   --admin-password PASS  HostedAI Admin Panel login password
+#
+# Optional switches:
+#   --domain DOMAIN        Domain name (omit for localhost)
+#   --hai-key KEY          HostedAI User Panel API key
+#   --stripe-key KEY       Stripe secret key
+#   --admin-email EMAIL    Admin email (for SSL cert and first login)
+#   --branch BRANCH        Git branch to deploy (default: main)
+#   --app-port PORT        Application port (default: 3000)
+#   --ssh-ws-port PORT     SSH WebSocket port (default: 3002)
+#   --skip-apache          Skip Apache setup
+#   --skip-certbot         Skip SSL certificate setup
+#   --yes                  Auto-confirm all prompts (e.g. firewall warnings)
+#   --help                 Show this help message
 # =============================================================================
 
 set -euo pipefail
@@ -90,18 +110,60 @@ run_with_progress() {
   return $exit_code
 }
 
+show_help() {
+  sed -n '2,/^# ====.*$/p' "$0" | sed 's/^# \?//'
+  exit 0
+}
+
 # ── Parse args ───────────────────────────────────────────────────────────────
 
 SKIP_APACHE=false
+SKIP_CERTBOT=false
+AUTO_YES=false
+HOSTEDAI_API_URL="${HOSTEDAI_API_URL:-}"
+HOSTEDAI_API_KEY="${HOSTEDAI_API_KEY:-}"
+GPUAAS_ADMIN_URL="${GPUAAS_ADMIN_URL:-}"
+GPUAAS_ADMIN_USER="${GPUAAS_ADMIN_USER:-}"
+GPUAAS_ADMIN_PASSWORD="${GPUAAS_ADMIN_PASSWORD:-}"
+STRIPE_SECRET_KEY="${STRIPE_SECRET_KEY:-}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip-apache)  SKIP_APACHE=true; shift ;;
-    --branch)       BRANCH="$2"; shift 2 ;;
-    --domain)       DOMAIN="$2"; shift 2 ;;
-    *)              shift ;;
+    --help|-h)          show_help ;;
+    --skip-apache)      SKIP_APACHE=true; shift ;;
+    --skip-certbot)     SKIP_CERTBOT=true; shift ;;
+    --yes|-y)           AUTO_YES=true; shift ;;
+    --branch)           BRANCH="$2"; shift 2 ;;
+    --domain)           DOMAIN="$2"; shift 2 ;;
+    --app-port)         APP_PORT="$2"; shift 2 ;;
+    --ssh-ws-port)      SSH_WS_PORT="$2"; shift 2 ;;
+    --hai-url)          HOSTEDAI_API_URL="$2"; shift 2 ;;
+    --hai-key)          HOSTEDAI_API_KEY="$2"; shift 2 ;;
+    --admin-url)        GPUAAS_ADMIN_URL="$2"; shift 2 ;;
+    --admin-user)       GPUAAS_ADMIN_USER="$2"; shift 2 ;;
+    --admin-password)   GPUAAS_ADMIN_PASSWORD="$2"; shift 2 ;;
+    --stripe-key)       STRIPE_SECRET_KEY="$2"; shift 2 ;;
+    --admin-email)      ADMIN_EMAIL="$2"; shift 2 ;;
+    *)
+      fail "Unknown option: $1 (use --help for usage)"
+      ;;
   esac
 done
+
+# ── Validate required switches ─────────────────────────────────────────────
+
+MISSING=()
+[[ -z "$HOSTEDAI_API_URL" ]] && MISSING+=("--hai-url")
+[[ -z "$GPUAAS_ADMIN_URL" ]] && MISSING+=("--admin-url")
+[[ -z "$GPUAAS_ADMIN_USER" ]] && MISSING+=("--admin-user")
+[[ -z "$GPUAAS_ADMIN_PASSWORD" ]] && MISSING+=("--admin-password")
+
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  fail "Missing required switches: ${MISSING[*]}
+
+  Use --help for full usage information."
+fi
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 
@@ -158,73 +220,22 @@ fi
 
 success "All prerequisites met"
 
-# ── Gather configuration ────────────────────────────────────────────────────
+# ── Configuration summary ──────────────────────────────────────────────────
 
 echo ""
 log "Configuration"
 echo ""
-
-# Domain name
-if [[ -z "$DOMAIN" ]]; then
-  echo "  Enter the domain name for the dashboard."
-  echo "  Examples: dash.example.com, gpu.mycompany.io"
-  echo "  Leave blank for localhost (no SSL)."
-  echo ""
-  read -rp "  Domain: " DOMAIN < /dev/tty
-fi
-
-# HostedAI API
-if [[ -z "${HOSTEDAI_API_URL:-}" ]]; then
-  echo ""
-  echo "  Is the HostedAI User Panel + Admin Panel installed on this server?"
-  read -rp "  Same node? [Y/n] " SAME_NODE < /dev/tty
-  SAME_NODE="${SAME_NODE:-Y}"
-
-  if [[ "$SAME_NODE" =~ ^[Yy]$ ]]; then
-    HOSTEDAI_API_URL="http://localhost:8055"
-    GPUAAS_ADMIN_URL="http://localhost:8999"
-    success "Using local HostedAI APIs (user: :8055, admin: :8999)"
-  else
-    echo ""
-    echo "  HostedAI User Panel API URL (port 8055):"
-    echo "    Example: https://user-panel.example.com"
-    read -rp "  HOSTEDAI_API_URL: " HOSTEDAI_API_URL < /dev/tty
-
-    echo ""
-    echo "  HostedAI Admin Panel API URL (port 8999):"
-    echo "    Example: https://admin-panel.example.com"
-    read -rp "  GPUAAS_ADMIN_URL: " GPUAAS_ADMIN_URL < /dev/tty
-  fi
-fi
-
-# User Panel API key (generated in the HostedAI User Panel)
-if [[ -z "${HOSTEDAI_API_KEY:-}" ]]; then
-  echo ""
-  echo "  HostedAI User Panel API key."
-  echo "  Generate one in the HostedAI User Panel, or configure later in admin UI."
-  read -rp "  HOSTEDAI_API_KEY (Enter to skip): " HOSTEDAI_API_KEY < /dev/tty
-fi
-
-# Admin Panel credentials (login/password auth — no API key)
+echo "  Domain:           ${DOMAIN:-localhost}"
+echo "  HAI User Panel:   ${HOSTEDAI_API_URL}"
+echo "  HAI Admin Panel:  ${GPUAAS_ADMIN_URL}"
+echo "  HAI Admin User:   ${GPUAAS_ADMIN_USER}"
+echo "  App Port:         ${APP_PORT}"
+echo "  SSH WS Port:      ${SSH_WS_PORT}"
+echo "  Branch:           ${BRANCH}"
+[[ -n "$ADMIN_EMAIL" ]] && echo "  Admin Email:      ${ADMIN_EMAIL}"
+[[ -n "$STRIPE_SECRET_KEY" ]] && echo "  Stripe:           configured"
+[[ -n "$HOSTEDAI_API_KEY" ]] && echo "  HAI API Key:      configured"
 echo ""
-echo "  HostedAI Admin Panel login credentials (used for pod management)."
-if [[ -z "${GPUAAS_ADMIN_USER:-}" ]]; then
-  read -rp "  GPUAAS_ADMIN_USER: " GPUAAS_ADMIN_USER < /dev/tty
-fi
-if [[ -z "${GPUAAS_ADMIN_PASSWORD:-}" ]]; then
-  read -srp "  GPUAAS_ADMIN_PASSWORD: " GPUAAS_ADMIN_PASSWORD < /dev/tty
-  echo ""
-fi
-
-# Stripe (optional)
-if [[ -z "${STRIPE_SECRET_KEY:-}" ]]; then
-  read -rp "  STRIPE_SECRET_KEY (optional, press Enter to skip): " STRIPE_SECRET_KEY < /dev/tty
-fi
-
-# Admin email (optional — for certbot and first admin bootstrap)
-if [[ -z "${ADMIN_EMAIL:-}" ]]; then
-  read -rp "  Admin email (for SSL certificate and first login): " ADMIN_EMAIL < /dev/tty
-fi
 
 # Generate secrets (may be overridden by existing .env.local below)
 ADMIN_JWT_SECRET=$(openssl rand -hex 32)
@@ -327,25 +338,6 @@ if [[ -f "$ENV_FILE" ]]; then
   else
     DB_URL_FINAL="mysql://${DB_USER}:${DB_PASSWORD}@localhost:3306/${DB_NAME}"
   fi
-
-  # Preserve user-configured values
-  HOSTEDAI_API_URL=$(get_existing HOSTEDAI_API_URL)
-  HOSTEDAI_API_URL="${HOSTEDAI_API_URL:-${HOSTEDAI_API_URL}}"
-
-  HOSTEDAI_API_KEY=$(get_existing HOSTEDAI_API_KEY)
-  HOSTEDAI_API_KEY="${HOSTEDAI_API_KEY:-${HOSTEDAI_API_KEY}}"
-
-  GPUAAS_ADMIN_URL=$(get_existing GPUAAS_ADMIN_URL)
-  GPUAAS_ADMIN_URL="${GPUAAS_ADMIN_URL:-http://localhost:8999}"
-
-  GPUAAS_ADMIN_USER=$(get_existing GPUAAS_ADMIN_USER)
-  GPUAAS_ADMIN_USER="${GPUAAS_ADMIN_USER:-${GPUAAS_ADMIN_USER}}"
-
-  GPUAAS_ADMIN_PASSWORD=$(get_existing GPUAAS_ADMIN_PASSWORD)
-  GPUAAS_ADMIN_PASSWORD="${GPUAAS_ADMIN_PASSWORD:-${GPUAAS_ADMIN_PASSWORD}}"
-
-  STRIPE_SECRET_KEY=$(get_existing STRIPE_SECRET_KEY)
-  STRIPE_SECRET_KEY="${STRIPE_SECRET_KEY:-${STRIPE_SECRET_KEY}}"
 else
   log "Writing new configuration..."
   DB_URL_FINAL="mysql://${DB_USER}:${DB_PASSWORD}@localhost:3306/${DB_NAME}"
@@ -357,34 +349,34 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 cat > "$ENV_FILE" <<EOF
-# GPU Cloud Dashboard — Generated by install.sh on $(date -Iseconds)
+# GPU Cloud Dashboard — Generated by install-cli.sh on $(date -Iseconds)
 NEXT_PUBLIC_EDITION=oss
 EDITION=oss
-NEXT_PUBLIC_APP_URL="${APP_URL}"
+NEXT_PUBLIC_APP_URL=${APP_URL}
 
 # Database
 DATABASE_URL="${DB_URL_FINAL}"
 
 # Auth secrets (auto-generated — preserved across re-installs)
-ADMIN_JWT_SECRET="${ADMIN_JWT_SECRET}"
-CUSTOMER_JWT_SECRET="${CUSTOMER_JWT_SECRET}"
-CRON_SECRET="${CRON_SECRET}"
-ENCRYPTION_KEY="${ENCRYPTION_KEY}"
+ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET}
+CUSTOMER_JWT_SECRET=${CUSTOMER_JWT_SECRET}
+CRON_SECRET=${CRON_SECRET}
+ENCRYPTION_KEY=${ENCRYPTION_KEY}
 
 # HostedAI User Panel (port 8055)
-HOSTEDAI_API_URL="${HOSTEDAI_API_URL:-}"
-HOSTEDAI_API_KEY="${HOSTEDAI_API_KEY:-}"
+HOSTEDAI_API_URL=${HOSTEDAI_API_URL:-}
+HOSTEDAI_API_KEY=${HOSTEDAI_API_KEY:-}
 
 # HostedAI Admin Panel (port 8999) — cookie-based login auth
-GPUAAS_ADMIN_URL="${GPUAAS_ADMIN_URL:-http://localhost:8999}"
-GPUAAS_ADMIN_USER="${GPUAAS_ADMIN_USER:-}"
-GPUAAS_ADMIN_PASSWORD="${GPUAAS_ADMIN_PASSWORD:-}"
+GPUAAS_ADMIN_URL=${GPUAAS_ADMIN_URL:-http://localhost:8999}
+GPUAAS_ADMIN_USER=${GPUAAS_ADMIN_USER:-}
+GPUAAS_ADMIN_PASSWORD=${GPUAAS_ADMIN_PASSWORD:-}
 
 # Stripe (optional — configure in admin UI if not set here)
-STRIPE_SECRET_KEY="${STRIPE_SECRET_KEY:-}"
+STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
 
 # SSH WebSocket
-SSH_WS_PORT="${SSH_WS_PORT}"
+SSH_WS_PORT=${SSH_WS_PORT}
 EOF
 
 chown "${APP_USER}:${APP_USER}" "$ENV_FILE"
@@ -412,7 +404,7 @@ else
 fi
 rm -f /tmp/packet-oss-seed-$$.log
 
-run_with_progress "Building application" sudo -u "$APP_USER" bash -c "cd ${INSTALL_DIR} && set -a && source .env.local && set +a && pnpm build"
+run_with_progress "Building application" sudo -u "$APP_USER" bash -c "cd ${INSTALL_DIR} && env \$(grep -v '^#' .env.local | xargs) pnpm build"
 
 # ── Step 6: Create systemd service ──────────────────────────────────────────
 
@@ -508,7 +500,6 @@ APACHE
 
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
       FIREWALL_NAME="ufw"
-      # Check if 80 and 443 are allowed
       if ! ufw status | grep -qE "80(/tcp)?\s+ALLOW" || ! ufw status | grep -qE "443(/tcp)?\s+ALLOW"; then
         FIREWALL_BLOCKING=true
       fi
@@ -519,9 +510,7 @@ APACHE
         FIREWALL_BLOCKING=true
       fi
     elif command -v iptables &>/dev/null; then
-      # Only flag if iptables has a DROP/REJECT policy or explicit drop rules for 80/443
       if iptables -L INPUT -n 2>/dev/null | grep -qi "DROP\|REJECT"; then
-        # Check if 80/443 are explicitly allowed
         if ! iptables -L INPUT -n 2>/dev/null | grep -qE "dpt:(80|443)\s.*ACCEPT"; then
           FIREWALL_NAME="iptables"
           FIREWALL_BLOCKING=true
@@ -530,29 +519,34 @@ APACHE
     fi
 
     if $FIREWALL_BLOCKING; then
-      echo ""
       warn "Firewall detected (${FIREWALL_NAME}) — ports 80 and 443 may be blocked."
-      warn "Certbot needs both ports open to verify your domain."
-      echo ""
-      if [[ "$FIREWALL_NAME" == "ufw" ]]; then
-        echo "  Fix with:  ufw allow 80/tcp && ufw allow 443/tcp"
-      elif [[ "$FIREWALL_NAME" == "firewalld" ]]; then
-        echo "  Fix with:  firewall-cmd --permanent --add-service=http --add-service=https && firewall-cmd --reload"
-      elif [[ "$FIREWALL_NAME" == "iptables" ]]; then
-        echo "  Fix with:  iptables -I INPUT -p tcp --dport 80 -j ACCEPT && iptables -I INPUT -p tcp --dport 443 -j ACCEPT"
-      fi
-      echo ""
-      read -rp "  Continue anyway? [y/N] " FW_CONTINUE < /dev/tty
-      if [[ ! "$FW_CONTINUE" =~ ^[Yy]$ ]]; then
+      if ! $AUTO_YES; then
         warn "Skipping SSL setup. Open the firewall ports and re-run, or run manually:"
         warn "  certbot --apache -d ${DOMAIN}"
-        # Skip certbot but don't exit — the rest of the install is still valid
         SKIP_CERTBOT=true
+      else
+        log "Opening firewall ports 80 and 443 for SSL..."
+        case "$FIREWALL_NAME" in
+          ufw)
+            ufw allow 80/tcp >/dev/null 2>&1
+            ufw allow 443/tcp >/dev/null 2>&1
+            ;;
+          firewalld)
+            firewall-cmd --permanent --add-service=http >/dev/null 2>&1
+            firewall-cmd --permanent --add-service=https >/dev/null 2>&1
+            firewall-cmd --reload >/dev/null 2>&1
+            ;;
+          iptables)
+            iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null
+            iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null
+            ;;
+        esac
+        success "Firewall ports 80 and 443 opened"
       fi
     fi
 
     # Install certbot and obtain SSL certificate
-    if [[ "${SKIP_CERTBOT:-false}" != "true" ]]; then
+    if [[ "${SKIP_CERTBOT}" != "true" ]]; then
     log "Setting up SSL certificate with Let's Encrypt..."
 
     if ! command -v certbot &>/dev/null; then
@@ -631,23 +625,6 @@ APACHE
   fi
 fi
 
-# ── Step 7b: Install cron jobs ─────────────────────────────────────────────
-
-log "Setting up cron jobs..."
-if [ -f "${INSTALL_DIR}/cron.d/gpu-cloud-dashboard" ]; then
-  cp "${INSTALL_DIR}/cron.d/gpu-cloud-dashboard" /etc/cron.d/gpu-cloud-dashboard
-  chmod 644 /etc/cron.d/gpu-cloud-dashboard
-  success "Cron jobs installed"
-else
-  warn "Cron file not found — scheduled jobs (billing, metrics) will not run automatically"
-fi
-
-if [ -f "${INSTALL_DIR}/bin/packetai-cron" ]; then
-  cp "${INSTALL_DIR}/bin/packetai-cron" /usr/bin/packetai-cron
-  chmod 755 /usr/bin/packetai-cron
-  success "Cron wrapper installed"
-fi
-
 # ── Step 8: Start service ───────────────────────────────────────────────────
 
 log "Starting service..."
@@ -678,9 +655,6 @@ echo "  Next steps:"
 echo "    1. Visit ${APP_URL}/admin/login"
 echo "    2. Enter your email — first login auto-creates the admin account"
 echo "    3. Go to Platform Settings to configure integrations"
-echo ""
-echo "  To change domain, ports, or SSL later:"
-echo "    sudo bash reconfigure.sh"
 echo ""
 if [[ -n "$DOMAIN" ]]; then
   echo "  SSL certificate auto-renews via certbot."
