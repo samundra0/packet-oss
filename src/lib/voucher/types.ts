@@ -73,7 +73,7 @@ export interface CreateVoucherInput {
 
 export interface UpdateVoucherInput {
   name?: string;
-  description?: string;
+  description?: string | null;
   creditCents?: number;
   minTopupCents?: number | null;
   maxRedemptions?: number | null;

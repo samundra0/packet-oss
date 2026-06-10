@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { prisma } from "@/lib/prisma";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 // GET - List all snapshots for the authenticated customer
 export async function GET(request: NextRequest) {
@@ -19,9 +21,29 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // PA-175: scope to operating account so invited members see team snapshots.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
+    // PA-202 gate: Snapshots hidden from Read-only Member + Finance Manager.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "snapshots.manage",
+      request,
+    });
+    if (denial) return denial;
+
     // Get all snapshots for this customer, ordered by creation date (newest first)
     const snapshots = await prisma.podSnapshot.findMany({
-      where: { stripeCustomerId: payload.customerId },
+      where: { stripeCustomerId: ctx.accountId },
       orderBy: { createdAt: "desc" },
     });
 

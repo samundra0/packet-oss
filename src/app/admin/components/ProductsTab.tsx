@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Plus, Pencil, Trash2, Check, X, GripVertical, Loader2, HardDrive, RefreshCw, FolderOpen, AlertCircle } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Plus, Pencil, Trash2, Check, X, GripVertical, Loader2, HardDrive, RefreshCw, FolderOpen, AlertCircle, ClipboardCopy, Download, ChevronDown, Sheet, FileSpreadsheet } from "lucide-react";
 import type { GpuProduct, GpuCategory } from "../types";
 import { isPro } from "@/lib/edition";
 import { ServicePickerDialog } from "./ServicePickerDialog";
@@ -54,6 +54,7 @@ export function ProductsTab() {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [categoryForm, setCategoryForm] = useState({ name: "", slug: "", description: "", displayOrder: 0, active: true });
   const [savingCategory, setSavingCategory] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Stripe products for monthly billing
   const [stripeProducts, setStripeProducts] = useState<StripeProduct[]>([]);
@@ -140,6 +141,229 @@ export function ProductsTab() {
     } finally {
       setLoadingStripeProducts(false);
     }
+  };
+
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [exportMenuOpen]);
+
+  const buildExportRows = (variant: "full" | "marketing") => {
+    const categoryNameById = new Map(categories.map(c => [c.id, c.name]));
+    const fullHeaders = [
+      "id", "name", "gpuFamily", "billingType",
+      "pricePerHour", "pricePerMonth", "vramGb", "cudaCores",
+      "active", "featured", "badgeText", "displayOrder",
+      "stripeProductId", "stripePriceId", "serviceId", "poolIds",
+      "categories", "description", "updatedAt",
+    ];
+    const marketingHeaders = [
+      "name", "gpuFamily", "billingType",
+      "pricePerHour", "pricePerMonth",
+      "vramGb", "active", "featured", "badgeText", "description",
+    ];
+    const headers = variant === "full" ? fullHeaders : marketingHeaders;
+    const rows = products.map(p => {
+      const full: Record<string, string | number | boolean> = {
+        id: p.id,
+        name: p.name,
+        gpuFamily: p.gpuFamily ?? "",
+        billingType: p.billingType,
+        pricePerHour: (p.pricePerHourCents / 100).toFixed(2),
+        pricePerMonth: p.pricePerMonthCents != null ? (p.pricePerMonthCents / 100).toFixed(2) : "",
+        vramGb: p.vramGb ?? "",
+        cudaCores: p.cudaCores ?? "",
+        active: p.active,
+        featured: p.featured,
+        badgeText: p.badgeText ?? "",
+        displayOrder: p.displayOrder,
+        stripeProductId: p.stripeProductId ?? "",
+        stripePriceId: p.stripePriceId ?? "",
+        serviceId: p.serviceId ?? "",
+        poolIds: p.poolIds.join(","),
+        categories: p.categoryIds.map(id => categoryNameById.get(id) ?? id).join(","),
+        description: p.description ?? "",
+        updatedAt: p.updatedAt,
+      };
+      return headers.map(h => full[h]);
+    });
+    return { headers, rows };
+  };
+
+  const toDelimited = (headers: string[], rows: (string | number | boolean)[][], delim: "\t" | ",") => {
+    const escape = (v: unknown) => {
+      const s = v === null || v === undefined ? "" : String(v);
+      if (delim === ",") {
+        // CSV: quote if contains comma, quote, or newline; escape inner quotes
+        if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      }
+      // TSV: strip tabs/newlines
+      return s.replace(/\t/g, " ").replace(/\r?\n/g, " ");
+    };
+    return [headers.map(escape).join(delim), ...rows.map(r => r.map(escape).join(delim))].join("\n");
+  };
+
+  const handleCopyTsv = async (variant: "full" | "marketing") => {
+    const { headers, rows } = buildExportRows(variant);
+    const tsv = toDelimited(headers, rows, "\t");
+    try {
+      await navigator.clipboard.writeText(tsv);
+      setCopyState("copied");
+      setExportMenuOpen(false);
+      setTimeout(() => setCopyState("idle"), 2000);
+    } catch (err) {
+      console.error("Failed to copy TSV:", err);
+      alert("Copy failed — check console");
+    }
+  };
+
+  const familyColorHex = (family: string | null): { bg: string; fg: string } => {
+    const f = (family ?? "").toUpperCase();
+    if (f.includes("B200")) return { bg: "#fae8ff", fg: "#86198f" };
+    if (f.includes("H100") || f.includes("H200")) return { bg: "#ffe4e6", fg: "#9f1239" };
+    if (f.includes("A100")) return { bg: "#ffedd5", fg: "#9a3412" };
+    if (f.includes("L40")) return { bg: "#cffafe", fg: "#155e75" };
+    if (f.includes("RTX 6000") || f.includes("6000 PRO")) return { bg: "#d1fae5", fg: "#065f46" };
+    if (f.includes("RTX 5090") || f.includes("5090")) return { bg: "#ecfccb", fg: "#3f6212" };
+    if (f.includes("RTX")) return { bg: "#ccfbf1", fg: "#115e59" };
+    return { bg: "#f1f5f9", fg: "#334155" };
+  };
+
+  const handleCopyHtml = async (variant: "full" | "marketing") => {
+    const categoryNameById = new Map(categories.map(c => [c.id, c.name]));
+    const fullCols = [
+      "name", "gpuFamily", "billingType",
+      "pricePerHour", "pricePerMonth", "vramGb", "cudaCores",
+      "active", "featured", "badgeText", "displayOrder",
+      "stripeProductId", "stripePriceId", "serviceId", "poolIds",
+      "categories", "description",
+    ];
+    const marketingCols = [
+      "name", "gpuFamily", "billingType",
+      "pricePerHour", "pricePerMonth",
+      "vramGb", "active", "featured", "badgeText", "description",
+    ];
+    const cols = variant === "full" ? fullCols : marketingCols;
+    const esc = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+    const headerHtml = cols
+      .map(c => `<th style="background:#1a4fff;color:#fff;padding:8px 12px;font:600 12px/1.4 -apple-system,sans-serif;text-align:left;letter-spacing:0.04em;text-transform:uppercase;">${esc(c)}</th>`)
+      .join("");
+
+    const cellStyle = (extra = "") =>
+      `padding:8px 12px;font:13px/1.5 -apple-system,sans-serif;border-bottom:1px solid #e4e7ef;${extra}`;
+
+    const bodyHtml = products.map(p => {
+      const family = familyColorHex(p.gpuFamily);
+      const billingBg = p.billingType === "monthly" ? "#e0e7ff" : "#e0f2fe";
+      const billingFg = p.billingType === "monthly" ? "#3730a3" : "#0369a1";
+      const activeBg = p.active ? "#dcfce7" : "#f1f5f9";
+      const activeFg = p.active ? "#15803d" : "#64748b";
+      const featuredBg = p.featured ? "#fef3c7" : "transparent";
+      const featuredFg = p.featured ? "#92400e" : "#64748b";
+
+      const cellFor = (c: string): string => {
+        switch (c) {
+          case "name":
+            return `<td style="${cellStyle("font-weight:600;color:#0b0f1c;")}">${esc(p.name)}</td>`;
+          case "gpuFamily":
+            return `<td style="${cellStyle(`background:${family.bg};color:${family.fg};font-weight:600;`)}">${esc(p.gpuFamily ?? "")}</td>`;
+          case "billingType":
+            return `<td style="${cellStyle(`background:${billingBg};color:${billingFg};font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:0.05em;`)}">${esc(p.billingType)}</td>`;
+          case "pricePerHour":
+            return `<td style="${cellStyle("font-family:ui-monospace,Menlo,monospace;color:#0b0f1c;")}">$${(p.pricePerHourCents / 100).toFixed(2)}</td>`;
+          case "pricePerMonth":
+            return `<td style="${cellStyle("font-family:ui-monospace,Menlo,monospace;color:#0b0f1c;")}">${p.pricePerMonthCents != null ? `$${(p.pricePerMonthCents / 100).toFixed(2)}` : "—"}</td>`;
+          case "vramGb":
+            return `<td style="${cellStyle("font-family:ui-monospace,Menlo,monospace;")}">${p.vramGb ?? ""}</td>`;
+          case "cudaCores":
+            return `<td style="${cellStyle("font-family:ui-monospace,Menlo,monospace;")}">${p.cudaCores ?? ""}</td>`;
+          case "active":
+            return `<td style="${cellStyle(`background:${activeBg};color:${activeFg};font-weight:600;`)}">${p.active ? "Active" : "Inactive"}</td>`;
+          case "featured":
+            return `<td style="${cellStyle(`background:${featuredBg};color:${featuredFg};${p.featured ? "font-weight:600;" : ""}`)}">${p.featured ? "Featured" : ""}</td>`;
+          case "badgeText":
+            return `<td style="${cellStyle(p.badgeText ? "background:#ede9fe;color:#6d28d9;font-weight:600;" : "")}">${esc(p.badgeText ?? "")}</td>`;
+          case "displayOrder":
+            return `<td style="${cellStyle("color:#64748b;text-align:right;")}">${p.displayOrder}</td>`;
+          case "stripeProductId":
+            return `<td style="${cellStyle(p.stripeProductId ? "font-family:ui-monospace,Menlo,monospace;color:#0b0f1c;" : "color:#94a3b8;font-style:italic;")}">${esc(p.stripeProductId ?? "—")}</td>`;
+          case "stripePriceId":
+            return `<td style="${cellStyle(p.stripePriceId ? "font-family:ui-monospace,Menlo,monospace;color:#0b0f1c;" : "color:#94a3b8;font-style:italic;")}">${esc(p.stripePriceId ?? "—")}</td>`;
+          case "serviceId":
+            return `<td style="${cellStyle(p.serviceId ? "font-family:ui-monospace,Menlo,monospace;font-size:11px;" : "color:#94a3b8;font-style:italic;")}">${esc(p.serviceId ?? "—")}</td>`;
+          case "poolIds":
+            return `<td style="${cellStyle(p.poolIds.length ? "" : "color:#94a3b8;font-style:italic;")}">${esc(p.poolIds.length ? p.poolIds.join(", ") : "—")}</td>`;
+          case "categories": {
+            const cats = p.categoryIds.map(id => categoryNameById.get(id) ?? id).join(", ");
+            return `<td style="${cellStyle(cats ? "" : "color:#94a3b8;font-style:italic;")}">${esc(cats || "—")}</td>`;
+          }
+          case "description":
+            return `<td style="${cellStyle("color:#64748b;")}">${esc(p.description ?? "")}</td>`;
+          default:
+            return `<td style="${cellStyle()}"></td>`;
+        }
+      };
+      return `<tr>${cols.map(cellFor).join("")}</tr>`;
+    }).join("");
+
+    const html = `<meta charset="utf-8"><table style="border-collapse:collapse;">${
+      `<thead><tr>${headerHtml}</tr></thead>`
+    }<tbody>${bodyHtml}</tbody></table>`;
+
+    // Plain-text fallback so non-HTML targets still get usable TSV
+    const { headers: tsvHeaders, rows: tsvRows } = buildExportRows(variant);
+    const plain = toDelimited(tsvHeaders, tsvRows, "\t");
+
+    try {
+      const item = new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([plain], { type: "text/plain" }),
+      });
+      await navigator.clipboard.write([item]);
+      setCopyState("copied");
+      setExportMenuOpen(false);
+      setTimeout(() => setCopyState("idle"), 2000);
+    } catch (err) {
+      console.error("Failed to copy HTML, falling back to TSV:", err);
+      try {
+        await navigator.clipboard.writeText(plain);
+        setCopyState("copied");
+        setExportMenuOpen(false);
+        setTimeout(() => setCopyState("idle"), 2000);
+      } catch (err2) {
+        console.error("Plain copy also failed:", err2);
+        alert("Copy failed — check console");
+      }
+    }
+  };
+
+  const handleDownloadCsv = () => {
+    const { headers, rows } = buildExportRows("full");
+    const csv = toDelimited(headers, rows, ",");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `gpu-products-${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setExportMenuOpen(false);
   };
 
   const resetForm = () => {
@@ -385,9 +609,9 @@ export function ProductsTab() {
     }
   };
 
-  // Check if a pool is already assigned to another product
-  const isPoolAssigned = (poolId: number, excludeProductId?: string) => {
-    return products.some(
+  // Return other products that already include this pool (pools may be shared)
+  const getOtherProductsForPool = (poolId: number, excludeProductId?: string) => {
+    return products.filter(
       (p) => p.id !== excludeProductId && p.poolIds.includes(poolId)
     );
   };
@@ -410,17 +634,120 @@ export function ProductsTab() {
             Create pricing categories and assign pools to products
           </p>
         </div>
-        <button
-          onClick={() => {
-            resetForm();
-            setEditingId(null);
-            setShowCreateModal(true);
-          }}
-          className="flex items-center gap-2 px-4 py-2 bg-[#1a4fff] text-white rounded-lg hover:bg-[#1a4fff]/90 transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          Add Product
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              onClick={() => setExportMenuOpen(o => !o)}
+              disabled={products.length === 0}
+              title="Export GPU products"
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-all ${
+                copyState === "copied"
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                  : exportMenuOpen
+                  ? "bg-[#eef2ff] border-[#c7d2fe] text-[#1a4fff]"
+                  : "bg-white border-[#e4e7ef] text-[#0b0f1c] hover:bg-[#f7f8fb] hover:border-[#c7d2fe]"
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
+            >
+              {copyState === "copied" ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  <span className="text-sm font-medium">Copied</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  <span className="text-sm font-medium">Export</span>
+                  <ChevronDown className={`w-4 h-4 transition-transform ${exportMenuOpen ? "rotate-180" : ""}`} />
+                </>
+              )}
+            </button>
+            {exportMenuOpen && (
+              <div className="absolute right-0 top-full mt-2 w-[22rem] bg-white rounded-xl border border-[#e4e7ef] shadow-xl z-20 overflow-hidden">
+                <div className="px-4 py-2.5 bg-gradient-to-r from-[#eef2ff] to-[#f7f8fb] border-b border-[#e4e7ef]">
+                  <p className="text-xs font-semibold text-[#0b0f1c] uppercase tracking-wide">Export {products.length} products</p>
+                  <p className="text-[11px] text-[#5b6476] mt-0.5">Paste straight into Google Sheets</p>
+                </div>
+
+                <button
+                  onClick={() => handleCopyHtml("marketing")}
+                  className="w-full flex items-start gap-3 px-4 py-3 hover:bg-[#f7f8fb] text-left transition-colors border-b border-[#f1f3f8]"
+                >
+                  <div className="p-2 bg-gradient-to-br from-emerald-100 to-emerald-50 ring-1 ring-emerald-200 rounded-lg shrink-0">
+                    <Sheet className="w-4 h-4 text-emerald-700" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-semibold text-[#0b0f1c]">Copy for marketing</p>
+                      <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 rounded">colored</span>
+                    </div>
+                    <p className="text-xs text-[#5b6476] leading-snug mt-0.5">Pricing-focused, colored cells per GPU family</p>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => handleCopyHtml("full")}
+                  className="w-full flex items-start gap-3 px-4 py-3 hover:bg-[#f7f8fb] text-left transition-colors border-b border-[#f1f3f8]"
+                >
+                  <div className="p-2 bg-gradient-to-br from-blue-100 to-blue-50 ring-1 ring-blue-200 rounded-lg shrink-0">
+                    <ClipboardCopy className="w-4 h-4 text-[#1a4fff]" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-semibold text-[#0b0f1c]">Copy full (all fields)</p>
+                      <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700 rounded">colored</span>
+                    </div>
+                    <p className="text-xs text-[#5b6476] leading-snug mt-0.5">Includes Stripe IDs, HAI service, pools</p>
+                  </div>
+                </button>
+
+                <div className="px-4 pt-2.5 pb-1 bg-[#f7f8fb]/50 border-t border-[#f1f3f8]">
+                  <p className="text-[10px] font-semibold text-[#5b6476] uppercase tracking-wide">Plain formats</p>
+                </div>
+
+                <button
+                  onClick={() => handleCopyTsv("marketing")}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-[#f7f8fb] text-left transition-colors"
+                >
+                  <div className="p-1.5 bg-slate-100 rounded-md shrink-0">
+                    <ClipboardCopy className="w-3.5 h-3.5 text-slate-600" />
+                  </div>
+                  <p className="text-xs text-[#0b0f1c]">Copy as plain TSV (marketing)</p>
+                </button>
+
+                <button
+                  onClick={() => handleCopyTsv("full")}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-[#f7f8fb] text-left transition-colors border-t border-[#f1f3f8]"
+                >
+                  <div className="p-1.5 bg-slate-100 rounded-md shrink-0">
+                    <ClipboardCopy className="w-3.5 h-3.5 text-slate-600" />
+                  </div>
+                  <p className="text-xs text-[#0b0f1c]">Copy as plain TSV (full)</p>
+                </button>
+
+                <button
+                  onClick={handleDownloadCsv}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-[#f7f8fb] text-left transition-colors border-t border-[#f1f3f8]"
+                >
+                  <div className="p-1.5 bg-amber-100 rounded-md shrink-0">
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-amber-700" />
+                  </div>
+                  <p className="text-xs text-[#0b0f1c]">Download CSV file</p>
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => {
+              resetForm();
+              setEditingId(null);
+              setShowCreateModal(true);
+            }}
+            className="flex items-center gap-2 px-4 py-2 bg-[#1a4fff] text-white rounded-lg hover:bg-[#1a4fff]/90 transition-colors shadow-sm"
+          >
+            <Plus className="w-4 h-4" />
+            <span className="text-sm font-medium">Add Product</span>
+          </button>
+        </div>
       </div>
 
       {/* Storage Pricing Section */}
@@ -510,6 +837,41 @@ export function ProductsTab() {
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-sm text-[#0b0f1c]">{cat.name}</span>
                   <div className="flex items-center gap-1">
+                    {(() => {
+                      // One copy button per plan type the category actually offers
+                      // (hr / mo). Untagged categories default to hourly.
+                      const catProducts = products.filter(p => p.categoryIds?.includes(cat.id));
+                      const plans: ("hourly" | "monthly")[] = [];
+                      if (catProducts.some(p => p.billingType === "hourly")) plans.push("hourly");
+                      if (catProducts.some(p => p.billingType === "monthly")) plans.push("monthly");
+                      if (plans.length === 0) plans.push("hourly");
+                      return plans.map(plan => {
+                        const key = `${cat.id}:${plan}`;
+                        return (
+                          <button
+                            key={key}
+                            onClick={async () => {
+                              const base = process.env.NEXT_PUBLIC_APP_URL || window.location.origin;
+                              const url = `${base}/account?gpu=${encodeURIComponent(cat.slug)}&plan=${plan}`;
+                              try {
+                                await navigator.clipboard.writeText(url);
+                                setCopiedKey(key);
+                                setTimeout(() => setCopiedKey(null), 1500);
+                              } catch {
+                                window.prompt("Copy this deep link:", url);
+                              }
+                            }}
+                            className="flex items-center gap-0.5 p-1 text-[#5b6476] hover:text-[#1a4fff] rounded"
+                            title={`Copy ${plan} deeplink → /account?gpu=${cat.slug}&plan=${plan}`}
+                          >
+                            {copiedKey === key
+                              ? <Check className="w-3 h-3 text-green-600" />
+                              : <ClipboardCopy className="w-3 h-3" />}
+                            <span className="text-[10px] leading-none">{plan === "hourly" ? "hr" : "mo"}</span>
+                          </button>
+                        );
+                      });
+                    })()}
                     <button onClick={() => {
                       setCategoryForm({ name: cat.name, slug: cat.slug, description: cat.description || "", displayOrder: cat.displayOrder, active: cat.active });
                       setEditingCategoryId(cat.id);
@@ -1076,7 +1438,7 @@ export function ProductsTab() {
                   Assign Pools
                 </label>
                 <p className="text-xs text-[#5b6476] mb-3">
-                  Select pools to include in this product. Pools already assigned to other products are shown in gray.
+                  Select pools to include in this product. Pools can be shared across multiple products.
                 </p>
                 <div className="border border-[#e4e7ef] rounded-lg max-h-48 overflow-y-auto">
                   {pools.length === 0 ? (
@@ -1086,21 +1448,18 @@ export function ProductsTab() {
                   ) : (
                     <div className="divide-y divide-[#e4e7ef]">
                       {pools.map((pool) => {
-                        const isAssignedElsewhere = isPoolAssigned(pool.id, editingId || undefined);
+                        const otherProducts = getOtherProductsForPool(pool.id, editingId || undefined);
                         const isSelected = formData.poolIds.includes(pool.id);
 
                         return (
                           <label
                             key={pool.id}
-                            className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-[#f7f8fb] ${
-                              isAssignedElsewhere && !isSelected ? "opacity-50" : ""
-                            }`}
+                            className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-[#f7f8fb]"
                           >
                             <input
                               type="checkbox"
                               checked={isSelected}
                               onChange={() => togglePoolAssignment(pool.id)}
-                              disabled={isAssignedElsewhere && !isSelected}
                               className="w-4 h-4 rounded border-[#e4e7ef] text-[#1a4fff] focus:ring-[#1a4fff]"
                             />
                             <div className="flex-1">
@@ -1112,9 +1471,9 @@ export function ProductsTab() {
                                   ({pool.gpuModel})
                                 </span>
                               )}
-                              {isAssignedElsewhere && !isSelected && (
-                                <span className="text-xs text-amber-600 ml-2">
-                                  (assigned to another product)
+                              {otherProducts.length > 0 && (
+                                <span className="text-xs text-[#5b6476] ml-2">
+                                  · also in {otherProducts.map((p) => p.name).join(", ")}
                                 </span>
                               )}
                             </div>

@@ -540,7 +540,7 @@ change_domain() {
     RewriteEngine On
     RewriteCond %{HTTP:Upgrade} websocket [NC]
     RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/ws/ssh(.*) ws://127.0.0.1:${ws_port}/ws/ssh\$1 [P,L]
+    RewriteRule ^/ssh-ws(.*) ws://127.0.0.1:${ws_port}/ssh-ws\$1 [P,L]
 
     Header always set X-Content-Type-Options "nosniff"
     Header always set X-Frame-Options "SAMEORIGIN"
@@ -576,7 +576,7 @@ APACHE
     RewriteEngine On
     RewriteCond %{HTTP:Upgrade} websocket [NC]
     RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/ws/ssh(.*) ws://127.0.0.1:${ws_port}/ws/ssh\$1 [P,L]
+    RewriteRule ^/ssh-ws(.*) ws://127.0.0.1:${ws_port}/ssh-ws\$1 [P,L]
 
     ErrorLog \${APACHE_LOG_DIR}/${APP_NAME}_error.log
     CustomLog \${APACHE_LOG_DIR}/${APP_NAME}_access.log combined
@@ -746,7 +746,7 @@ setup_ssl() {
     RewriteEngine On\\
     RewriteCond %{HTTP:Upgrade} websocket [NC]\\
     RewriteCond %{HTTP:Connection} upgrade [NC]\\
-    RewriteRule ^/ws/ssh(.*) ws://127.0.0.1:${ws_port}/ws/ssh\$1 [P,L]" "$APACHE_SSL_CONF"
+    RewriteRule ^/ssh-ws(.*) ws://127.0.0.1:${ws_port}/ssh-ws\$1 [P,L]" "$APACHE_SSL_CONF"
         apache2ctl configtest && systemctl reload apache2
         success "WebSocket proxy added to SSL vhost"
       fi

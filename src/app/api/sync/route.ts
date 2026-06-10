@@ -4,6 +4,7 @@ import { getSharedVolumes, getPoolSubscriptions, deleteSharedVolume } from "@/li
 import { checkAndRefillWallet, WALLET_CONFIG } from "@/lib/wallet";
 import { getStoragePricePerGBHourCents, getStoppedInstanceRatePercent } from "@/lib/pricing";
 import { computeStorageCharge } from "@/lib/storage-billing";
+import { computeStoppedCharge, wasStoppedBilledRecently, type StoppedPodInput } from "@/lib/stopped-billing";
 import { getProductByPoolId } from "@/lib/products";
 import { prisma } from "@/lib/prisma";
 import { sendNegativeBalanceShutdownEmail } from "@/lib/email";
@@ -112,15 +113,70 @@ export async function POST(request: NextRequest) {
             });
             if (!customerCache) continue;
 
-            // If customer has active pods but billing_type is not "hourly", upgrade them.
-            // This catches voucher users who got credit without a credit card.
-            // Safe: only changes metadata, does NOT terminate any pods.
-            if (customerCache.billingType !== "hourly") {
+            // Pull the HAI subs FIRST so we know which sub IDs to look up locally.
+            // (Reordered from the previous flow so the global existence check below
+            // has the canonical list of HAI sub IDs to query against.)
+            let activeSubs: Awaited<ReturnType<typeof getPoolSubscriptions>>;
+            try {
+              activeSubs = await getCachedSubs(teamId);
+            } catch (subErr) {
+              console.error(`[Sync Reconcile] Error fetching subs for team ${teamId}:`, subErr);
+              continue;
+            }
+
+            const activeSubIds = activeSubs
+              .filter(s => s.status === "subscribed" || s.status === "active")
+              .map(s => String(s.id));
+
+            if (activeSubIds.length === 0) continue;
+
+            // Existence check is GLOBAL across all customers. instance_id and
+            // subscription_id are unique, so a HAI sub can only be claimed by one
+            // row — but the claiming row may be owned by a different Stripe
+            // customer (third-party payer for someone else's team). Scoping this
+            // query to customerCache.id (the team owner) hid those rows and made
+            // reconciliation create rogue hourly duplicates that silently flipped
+            // monthly pods to hourly billing. See PA-209 / sync-reconciliation-
+            // duplicate-rows memory.
+            const existingMeta = await prisma.podMetadata.findMany({
+              where: {
+                OR: [
+                  { subscriptionId: { in: activeSubIds } },
+                  { subscriptionId: { in: activeSubIds.map(id => `instance-${id}`) } },
+                  { instanceId: { in: activeSubIds } },
+                ],
+              },
+              select: {
+                subscriptionId: true,
+                instanceId: true,
+                stripeCustomerId: true,
+                hourlyRateCents: true,
+                billingType: true,
+              },
+            });
+
+            // Map every variant of a sub's storage shape back to the canonical
+            // bare HAI sub id, so we can answer "does any row claim this sub?".
+            const claimedSubIds = new Set<string>();
+            for (const m of existingMeta) {
+              if (m.instanceId) claimedSubIds.add(m.instanceId);
+              if (m.subscriptionId.startsWith("instance-")) {
+                claimedSubIds.add(m.subscriptionId.slice("instance-".length));
+              } else {
+                claimedSubIds.add(m.subscriptionId);
+              }
+            }
+
+            // Force-flip the team owner's billing_type to "hourly" only if no row
+            // for this team is explicitly monthly. Third-party-payer setups want
+            // the team owner to stay on whatever they were (free/monthly) while
+            // the actual billing happens via the payer's Stripe subscription.
+            const hasMonthlyMetaForTeam = existingMeta.some(m => m.billingType === "monthly");
+            if (customerCache.billingType !== "hourly" && !hasMonthlyMetaForTeam) {
               try {
                 await stripe.customers.update(customerCache.id, {
                   metadata: { billing_type: "hourly" },
                 });
-                // Also update local cache
                 await prisma.customerCache.update({
                   where: { id: customerCache.id },
                   data: { billingType: "hourly" },
@@ -131,59 +187,30 @@ export async function POST(request: NextRequest) {
               }
             }
 
-            // Check if all pods for this team have PodMetadata
-            const existingMeta = await prisma.podMetadata.findMany({
-              where: { stripeCustomerId: customerCache.id },
-              select: { subscriptionId: true, instanceId: true, hourlyRateCents: true },
-            });
-            const metaSubIds = new Set(existingMeta.map(m => m.subscriptionId));
-            const metaInstanceIds = new Set(existingMeta.filter(m => m.instanceId).map(m => m.instanceId!));
-            const hasGaps = existingMeta.some(m => !m.hourlyRateCents);
+            for (const sub of activeSubs) {
+              if (sub.status !== "subscribed" && sub.status !== "active") continue;
+              const subId = String(sub.id);
 
-            // If all pods have metadata with rates, skip this team
-            if (!hasGaps && existingMeta.length >= pods.length) continue;
-
-            // Only now call hosted.ai for this specific team
-            try {
-              const activeSubs = await getCachedSubs(teamId);
-              for (const sub of activeSubs) {
-                if (sub.status !== "subscribed" && sub.status !== "active") continue;
-
-                const subId = String(sub.id);
-                // Match by subscriptionId OR instanceId (HAI 2.2 returns i-uuid as sub.id)
-                const existing = existingMeta.find(m => m.subscriptionId === subId || m.instanceId === subId);
-
-                if (!existing || !existing.hourlyRateCents) {
+              if (claimedSubIds.has(subId)) {
+                // Some row already claims this HAI sub. Only backfill a missing
+                // rate if the row belongs to the team owner AND is explicitly
+                // hourly (or unset, which we treat as hourly). Never touch a
+                // monthly row or a row owned by a different customer.
+                const own = existingMeta.find(m =>
+                  (m.instanceId === subId
+                    || m.subscriptionId === subId
+                    || m.subscriptionId === `instance-${subId}`)
+                  && m.stripeCustomerId === customerCache.id
+                  && m.billingType !== "monthly"
+                  && !m.hourlyRateCents
+                );
+                if (own) {
                   const product = await getProductByPoolId(sub.pool_id);
                   const rateCents = product?.hourly_rate_cents || 0;
-                  if (rateCents === 0) continue;
-
-                  if (!existing) {
-                    await prisma.podMetadata.create({
-                      data: {
-                        subscriptionId: subId,
-                        stripeCustomerId: customerCache.id,
-                        displayName: sub.pool_name || null,
-                        hourlyRateCents: rateCents,
-                        poolId: String(sub.pool_id),
-                        productId: product?.id || null,
-                        prepaidUntil: now,
-                      },
-                    });
-                    console.log(`[Sync Reconcile] Created PodMetadata for orphaned sub ${subId} @ $${(rateCents / 100).toFixed(2)}/hr`);
-                    reconciliationResults.push({
-                      customerId: customerCache.id,
-                      subscriptionId: subId,
-                      poolId: String(sub.pool_id),
-                      hourlyRateCents: rateCents,
-                      action: "created",
-                    });
-                  } else {
-                    // existing has no hourlyRateCents — update it
-                    // We already queried existingMeta above, so check prepaidUntil from the full record
-                    const fullExisting = await prisma.podMetadata.findUnique({ where: { subscriptionId: subId } });
+                  if (rateCents > 0) {
+                    const fullExisting = await prisma.podMetadata.findUnique({ where: { subscriptionId: own.subscriptionId } });
                     await prisma.podMetadata.update({
-                      where: { subscriptionId: subId },
+                      where: { subscriptionId: own.subscriptionId },
                       data: {
                         hourlyRateCents: rateCents,
                         poolId: fullExisting?.poolId || String(sub.pool_id),
@@ -194,16 +221,41 @@ export async function POST(request: NextRequest) {
                     console.log(`[Sync Reconcile] Updated PodMetadata for sub ${subId} - set rate to $${(rateCents / 100).toFixed(2)}/hr`);
                     reconciliationResults.push({
                       customerId: customerCache.id,
-                      subscriptionId: subId,
+                      subscriptionId: own.subscriptionId,
                       poolId: String(sub.pool_id),
                       hourlyRateCents: rateCents,
                       action: "updated",
                     });
                   }
                 }
+                continue;
               }
-            } catch (subErr) {
-              console.error(`[Sync Reconcile] Error checking subs for team ${teamId}:`, subErr);
+
+              // Truly orphaned — no pod_metadata row exists anywhere for this HAI
+              // sub. Create one under the team owner with the hourly product rate.
+              const product = await getProductByPoolId(sub.pool_id);
+              const rateCents = product?.hourly_rate_cents || 0;
+              if (rateCents === 0) continue;
+
+              await prisma.podMetadata.create({
+                data: {
+                  subscriptionId: subId,
+                  stripeCustomerId: customerCache.id,
+                  displayName: sub.pool_name || null,
+                  hourlyRateCents: rateCents,
+                  poolId: String(sub.pool_id),
+                  productId: product?.id || null,
+                  prepaidUntil: now,
+                },
+              });
+              console.log(`[Sync Reconcile] Created PodMetadata for orphaned sub ${subId} @ $${(rateCents / 100).toFixed(2)}/hr`);
+              reconciliationResults.push({
+                customerId: customerCache.id,
+                subscriptionId: subId,
+                poolId: String(sub.pool_id),
+                hourlyRateCents: rateCents,
+                action: "created",
+              });
             }
           }
         }
@@ -561,18 +613,46 @@ export async function POST(request: NextRequest) {
         }
 
         // === Stopped instance billing ===
+        // Bill each stopped/paused/reserved pod at ITS OWN per-GPU rate × the
+        // configured stopped percentage — mirroring the running-charge path.
+        // (Previously this averaged hourlyRateCents across the whole fleet, so a
+        // single expensive or stale terminated pod overcharged cheap stopped
+        // ones — e.g. a stopped $100/hr GPU billed $751.90. See stopped-billing.ts.)
         let stoppedGpuCount = 0;
         try {
+          // Per-GPU rate lookup, keyed by every id shape a HAI sub takes in
+          // PodMetadata (bare id, "instance-<id>", and instanceId).
+          const podMetaRows = await prisma.podMetadata.findMany({
+            where: { stripeCustomerId: customerId, hourlyRateCents: { gt: 0 } },
+            select: { subscriptionId: true, instanceId: true, hourlyRateCents: true },
+          });
+          const rateBySubId = new Map<string, number>();
+          for (const m of podMetaRows) {
+            const rate = m.hourlyRateCents || 0;
+            if (rate <= 0) continue;
+            const bare = m.subscriptionId.startsWith("instance-")
+              ? m.subscriptionId.slice("instance-".length)
+              : m.subscriptionId;
+            rateBySubId.set(m.subscriptionId, rate);
+            rateBySubId.set(bare, rate);
+            if (m.instanceId) rateBySubId.set(String(m.instanceId), rate);
+          }
+
           const allSubscriptions = await getCachedSubs(teamId);
           const subMap = new Map<string | number, typeof allSubscriptions[0]>();
           for (const sub of allSubscriptions) {
             if (!subMap.has(sub.id)) subMap.set(sub.id, sub);
           }
           const processedPods = new Set<string>();
+          const stoppedPods: StoppedPodInput[] = [];
 
           for (const sub of subMap.values()) {
             if (sub.status !== "subscribed" && sub.status !== "active") continue;
             if (!sub.pods || sub.pods.length === 0) continue;
+
+            const subId = String(sub.id);
+            const perGpuRateCents =
+              rateBySubId.get(subId) ?? rateBySubId.get(`instance-${subId}`) ?? 0;
 
             for (const pod of sub.pods) {
               const podKey = pod.pod_name || `${sub.id}-${pod.pod_status}`;
@@ -581,53 +661,62 @@ export async function POST(request: NextRequest) {
 
               const podStatus = (pod.pod_status || "").toLowerCase();
               if (podStatus === "stopped" || podStatus === "paused" || podStatus === "reserved") {
-                stoppedGpuCount += Math.max(1, Math.ceil(pod.gpu_count || sub.per_pod_info?.vgpu_count || 1));
+                // Surface revenue gaps: a stopped pod with no PodMetadata rate is
+                // not billed (computeStoppedCharge skips it) — log so it's visible.
+                if (perGpuRateCents <= 0) {
+                  console.warn(`[Sync] Stopped pod ${podKey} (sub ${subId}) has no rate in PodMetadata — not billed`);
+                }
+                stoppedPods.push({
+                  gpuCount: pod.gpu_count || sub.per_pod_info?.vgpu_count || 1,
+                  perGpuRateCents,
+                });
               }
             }
           }
 
-          if (stoppedGpuCount > 0) {
-            // Get average hourly rate from this customer's pods
-            const customerPods = await prisma.podMetadata.findMany({
-              where: { stripeCustomerId: customerId, hourlyRateCents: { gt: 0 } },
-              select: { hourlyRateCents: true },
-            });
-            const avgRate = customerPods.length > 0
-              ? customerPods.reduce((sum, p) => sum + (p.hourlyRateCents || 0), 0) / customerPods.length
-              : 0;
+          const charge = computeStoppedCharge(
+            stoppedPods,
+            stoppedInstanceRatePercent,
+            BILLING_INTERVAL_MINUTES,
+          );
+          stoppedGpuCount = charge.stoppedGpuCount;
+          const stoppedCostCents = charge.stoppedCostCents;
 
-            if (avgRate > 0) {
-              const hoursInInterval = BILLING_INTERVAL_MINUTES / 60;
-              const reducedRate = Math.round(avgRate * (stoppedInstanceRatePercent / 100));
-              const stoppedCostCents = Math.round(stoppedGpuCount * reducedRate * hoursInInterval);
+          if (stoppedCostCents > 0) {
+            // Dedup guard: unlike the running path (idempotent per interval via
+            // prepaidUntil), the stopped path bills every run. If two cron runs
+            // race the 25-min storage-sync gate (or a brand-new customer has no
+            // timestamp yet), a stopped pod could be billed twice. Skip if we
+            // already posted a stopped-reservation charge in the last 5 minutes.
+            const recentTxns = await stripe.customers.listBalanceTransactions(customerId, { limit: 20 });
+            if (wasStoppedBilledRecently(recentTxns.data, nowSec, 5 * 60)) {
+              console.log(`[Sync] Skipping duplicate stopped-reservation charge for ${customerId} (already billed in last 5m)`);
+            } else {
+              const stoppedDesc = `Reserved: ${stoppedGpuCount} GPU(s) stopped @ ${stoppedInstanceRatePercent}%`;
+              await stripe.customers.createBalanceTransaction(customerId, {
+                amount: stoppedCostCents,
+                currency: "usd",
+                description: stoppedDesc,
+                metadata: {
+                  stopped_gpu_count: stoppedGpuCount.toString(),
+                  billing_type: "stopped_reservation",
+                },
+              });
 
-              if (stoppedCostCents > 0) {
-                const stoppedDesc = `Reserved: ${stoppedGpuCount} GPU(s) stopped @ ${stoppedInstanceRatePercent}%`;
-                await stripe.customers.createBalanceTransaction(customerId, {
-                  amount: stoppedCostCents,
-                  currency: "usd",
+              // Log stopped reservation charge locally
+              await prisma.walletTransaction.create({
+                data: {
+                  stripeCustomerId: customerId,
+                  teamId,
+                  type: "stopped_reservation",
+                  amountCents: stoppedCostCents,
                   description: stoppedDesc,
-                  metadata: {
-                    stopped_gpu_count: stoppedGpuCount.toString(),
-                    billing_type: "stopped_reservation",
-                  },
-                });
+                  gpuCount: stoppedGpuCount,
+                  billingMinutes: BILLING_INTERVAL_MINUTES,
+                },
+              }).catch((e) => console.error(`[Sync] Failed to log stopped WalletTransaction for ${customerId}:`, e));
 
-                // Log stopped reservation charge locally
-                await prisma.walletTransaction.create({
-                  data: {
-                    stripeCustomerId: customerId,
-                    teamId,
-                    type: "stopped_reservation",
-                    amountCents: stoppedCostCents,
-                    description: stoppedDesc,
-                    gpuCount: stoppedGpuCount,
-                    billingMinutes: BILLING_INTERVAL_MINUTES,
-                  },
-                }).catch((e) => console.error(`[Sync] Failed to log stopped WalletTransaction for ${customerId}:`, e));
-
-                stoppedResults.push({ customerId, stoppedGpuCount, stoppedCostCents });
-              }
+              stoppedResults.push({ customerId, stoppedGpuCount, stoppedCostCents });
             }
           }
         } catch (stoppedErr) {

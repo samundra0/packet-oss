@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { STARTUP_SCRIPT_PRESETS, type StartupScriptPreset } from "@/lib/startup-scripts";
+import { deriveMinStep, clampStep, backAction } from "./launch-stepper";
 
 // MAINTENANCE MODE — set to false when hosted.ai instance creation is fixed
 const DEPLOY_MAINTENANCE = false;
@@ -104,6 +105,10 @@ interface LaunchGPUModalProps {
   onTopup?: (amount: number, voucherCode?: string, launchProductId?: string) => void;
   topupLoading?: boolean;
   initialProductId?: string;
+  /** Pre-select a GPU category by slug (deep-link). Lands the user on the
+   *  product step with the family chosen; the first compatible product is
+   *  auto-selected. Ignored when initialProductId/lockedProductId is set. */
+  initialCategorySlug?: string;
   /** When set, the product picker is locked to this product — used when
    *  deploying against an existing monthly subscription. */
   lockedProductId?: string;
@@ -123,6 +128,7 @@ export function LaunchGPUModal({
   onTopup,
   topupLoading,
   initialProductId,
+  initialCategorySlug,
   lockedProductId,
   stripeSubscriptionId,
   deployContext,
@@ -239,6 +245,13 @@ export function LaunchGPUModal({
 
   // Use categories from API if available, fall back to gpuFamily derivation
   const hasCategories = (options?.categories?.length ?? 0) > 0;
+
+  // Lowest reachable step for this session. A locked subscription deploy (or a
+  // legacy no-category catalog) must never expose the GPU-type step. All step
+  // changes (footer Back + indicator pills) funnel through goToStep so the floor
+  // is enforced in exactly one place.
+  const minStep = deriveMinStep({ lockedProductId, hasCategories });
+  const goToStep = (n: number) => setStep(clampStep(n, minStep));
 
   const gpuFamilies: string[] = hasCategories
     ? (options?.categories ?? []).map(c => c.name)
@@ -385,6 +398,19 @@ export function LaunchGPUModal({
                   // Trigger category check
                   checkCategoryAvailability(cat.id);
                 }
+              }
+            } else if (initialCategorySlug) {
+              // Deep-link to a GPU category (?gpu=<slug>). Land on the product
+              // step with the family chosen; leave the product empty so
+              // checkCategoryAvailability auto-selects the first compatible one.
+              // Unknown slug falls through to the normal step-1 picker.
+              const cat = data.categories.find(c => c.slug === initialCategorySlug);
+              if (cat) {
+                setSelectedGpuFamily(cat.name);
+                setStep(2);
+                checkCategoryAvailability(cat.id);
+              } else {
+                console.warn("[LaunchGPU] unknown category slug:", initialCategorySlug);
               }
             }
           } else if (data.products?.length > 0) {
@@ -648,8 +674,6 @@ export function LaunchGPUModal({
                   <h3 className="font-semibold text-[var(--ink)] mb-2">Unlock GPU Access</h3>
                   <p className="text-sm text-[var(--muted)] mb-4">
                     Add funds to deploy GPU instances.
-                    <br />
-                    Your free account includes 10,000 tokens for Token Factory.
                   </p>
                   <div className="grid grid-cols-2 gap-2 mb-3">
                     {[50, 100, 250, 500].map((amount) => (
@@ -738,13 +762,15 @@ export function LaunchGPUModal({
                       {i > 0 && <div className={`w-8 h-px ${step >= n ? "bg-teal-400" : "bg-zinc-200"}`} />}
                       <button
                         type="button"
-                        onClick={() => { if (n < step) setStep(n as 1 | 2 | 3); }}
-                        disabled={n > step}
+                        onClick={() => { if (n >= minStep && n < step) goToStep(n); }}
+                        disabled={n > step || n < minStep}
                         className={`flex items-center gap-1.5 text-xs font-medium transition-colors ${
                           step === n
                             ? "text-teal-700"
                             : step > n
-                              ? "text-teal-500 cursor-pointer hover:text-teal-600"
+                              ? (n >= minStep
+                                  ? "text-teal-500 cursor-pointer hover:text-teal-600"
+                                  : "text-teal-500 cursor-default")
                               : "text-zinc-300 cursor-default"
                         }`}
                       >
@@ -1408,12 +1434,13 @@ export function LaunchGPUModal({
           <div className="border-t border-[var(--line)] p-6 flex gap-3">
             <button
               onClick={() => {
-                if (step > 1 && hasCategories) setStep((step - 1) as 1 | 2 | 3);
-                else onClose();
+                const next = backAction(step, minStep);
+                if (next === "close") onClose();
+                else goToStep(next);
               }}
               className="flex-1 py-3 px-4 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-medium rounded-xl transition-colors"
             >
-              {step > 1 && hasCategories ? "Back" : "Cancel"}
+              {step > minStep ? "Back" : "Cancel"}
             </button>
             {step === 3 && (
               <button

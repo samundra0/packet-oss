@@ -180,7 +180,9 @@ describe('Instance Management', () => {
 
       expect(mockRequest).toHaveBeenCalledWith(
         'GET',
-        '/gpuaas/compatible-instances/team-123'
+        '/gpuaas/compatible-instances/team-123',
+        undefined,
+        60000 // 60s timeout for large teams
       );
       expect(result).toEqual(mockInstances);
     });

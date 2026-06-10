@@ -7,8 +7,6 @@ export { Pro6000BlackwellDoc } from "./Pro6000BlackwellDoc";
 // OSS stub — original: export { OpenAIGatewayDoc } from "./OpenAIGatewayDoc";
 export const OpenAIGatewayDoc = (_props?: any) => null;
 export { InferencePlaygroundDoc } from "./InferencePlaygroundDoc";
-// OSS stub — original: export { TokenFactoryDoc } from "./TokenFactoryDoc";
-export const TokenFactoryDoc = (_props?: any) => null;
 
 // Monitoring & Analytics
 export { GPUMetricsDoc } from "./GPUMetricsDoc";

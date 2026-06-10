@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { prisma } from "@/lib/prisma";
 
 interface MetricsDataPoint {
@@ -53,6 +54,17 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
     }
 
+    // PA-175: scope to the operating team so an invited member sees the
+    // team's metric history, not their own (typically empty) one.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
     // Parse query params
     const { searchParams } = request.nextUrl;
     const subscriptionId = searchParams.get("subscriptionId");
@@ -64,7 +76,7 @@ export async function GET(request: NextRequest) {
 
     // Build query
     const whereClause = {
-      stripeCustomerId: payload.customerId,
+      stripeCustomerId: ctx.accountId,
       timestamp: { gte: startTime },
       ...(subscriptionId && { subscriptionId }),
     };

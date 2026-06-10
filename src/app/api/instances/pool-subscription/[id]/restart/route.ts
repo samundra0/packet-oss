@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import {
   restartInstance,
   getInstanceCredentials,
@@ -24,6 +25,10 @@ export async function POST(
     }
 
     const { id } = await params;
+
+    // PA-175 gate: restarting a shared instance is a lifecycle change.
+    const denial = requirePermission(auth, "gpu.terminate", request, { instanceId: id, action: "restart" });
+    if (denial) return denial;
     console.log("[HAI 2.2] Restarting instance:", id);
 
     // Verify ownership via unified instances

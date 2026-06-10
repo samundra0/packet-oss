@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import { getTeamBillingSummaryV2, formatBillingDatetime } from "@/lib/hostedai";
 import { getStoppedInstanceRatePercent } from "@/lib/pricing";
 
@@ -9,6 +10,11 @@ export async function GET(request: NextRequest) {
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
     const { customer, teamId } = auth;
+
+    // PA-202 gate: billing.view required (Team Admin + Finance Manager allowed,
+    // Team Member + Read-only Member denied).
+    const denial = requirePermission(auth, "billing.view", request);
+    if (denial) return denial;
 
     if (!teamId) {
       return NextResponse.json({

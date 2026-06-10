@@ -1,8 +1,13 @@
 import jwt from "jsonwebtoken";
 import { getSecret } from "./secrets";
+import { sanitizeNextPath } from "./safe-next";
 
 function getJwtSecret(): string {
   return getSecret("CUSTOMER_JWT_SECRET");
+}
+
+function getAppUrl(): string {
+  return process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 }
 
 export interface CustomerTokenPayload {
@@ -11,35 +16,67 @@ export interface CustomerTokenPayload {
   type: "customer-dashboard";
   skipTwoFactor?: boolean; // Set to true for admin bypass tokens
   twoFactorVerified?: boolean; // Set after user completes TOTP verification
+  // PA-175: optional new-format claims. Tokens issued before PR 2 rolls out
+  // won't have these; getAuthenticatedCustomer falls back to email lookup.
+  // 1-hour TTL guarantees full rollover within one release cycle.
+  userId?: string;          // User.id (cuid)
+  activeAccountId?: string; // stripe_customer_id of the account this token is acting on
+  // PA-266: post-login redirect (deep-link intent). Sanitized to a same-origin
+  // relative /dashboard|/account path at sign time, so it's safe to honour.
+  next?: string;
+  // PA-266: admin "Login as" impersonation marker. Presence (with skipTwoFactor)
+  // keeps the token ephemeral (never persisted to a cookie) and drives the
+  // dashboard's impersonation banner + audit attribution.
+  impersonator?: { adminEmail: string };
+}
+
+export interface GenerateCustomerTokenOptions {
+  userId?: string;
+  activeAccountId?: string;
+  expiresInHours?: number;
+  /** Deep-link intent to carry through login. Sanitized before signing. */
+  next?: string;
 }
 
 export function generateCustomerToken(
   email: string,
   customerId: string,
-  expiresInHours: number = 1
+  optionsOrExpires: GenerateCustomerTokenOptions | number = {},
 ): string {
-  return jwt.sign(
-    {
-      email: email.toLowerCase(),
-      customerId,
-      type: "customer-dashboard",
-    },
-    getJwtSecret(),
-    { expiresIn: `${expiresInHours}h` } // Dashboard links valid for user's preference (default 1 hour)
-  );
+  // Back-compat: a number argument used to mean expiresInHours. Keep that path.
+  const options: GenerateCustomerTokenOptions =
+    typeof optionsOrExpires === "number"
+      ? { expiresInHours: optionsOrExpires }
+      : optionsOrExpires;
+  const expiresInHours = options.expiresInHours ?? 1;
+
+  const payload: Record<string, unknown> = {
+    email: email.toLowerCase(),
+    customerId,
+    type: "customer-dashboard",
+  };
+  if (options.userId) payload.userId = options.userId;
+  if (options.activeAccountId) payload.activeAccountId = options.activeAccountId;
+  // Sanitize the deep-link target before it goes into the signed token, so a
+  // recipient can never rewrite it and the dashboard can honour it as-is.
+  const safeNext = sanitizeNextPath(options.next, getAppUrl());
+  if (safeNext) payload.next = safeNext;
+
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: `${expiresInHours}h` });
 }
 
 /**
  * Generate a customer token that bypasses 2FA.
  * Used by admins for the "Login As" feature.
  */
-export function generateAdminBypassToken(email: string, customerId: string): string {
+export function generateAdminBypassToken(email: string, customerId: string, adminEmail?: string): string {
   return jwt.sign(
     {
       email: email.toLowerCase(),
       customerId,
       type: "customer-dashboard",
       skipTwoFactor: true,
+      ...(adminEmail ? { impersonator: { adminEmail: adminEmail.toLowerCase() } } : {}),
     },
     getJwtSecret(),
     { expiresIn: "1h" }
@@ -64,6 +101,15 @@ export function generateTwoFactorVerifiedToken(originalToken: string): string | 
         customerId: decoded.customerId,
         type: "customer-dashboard",
         twoFactorVerified: true,
+        // Preserve every claim that affects identity/intent/isolation. Dropping
+        // these caused: (1) an admin "Login as" (skipTwoFactor) token to be
+        // laundered into a persistent session, (2) multi-team users to snap to
+        // their default account, (3) the deep-link `next` intent to be lost.
+        ...(decoded.skipTwoFactor ? { skipTwoFactor: true } : {}),
+        ...(decoded.impersonator ? { impersonator: decoded.impersonator } : {}),
+        ...(decoded.userId ? { userId: decoded.userId } : {}),
+        ...(decoded.activeAccountId ? { activeAccountId: decoded.activeAccountId } : {}),
+        ...(decoded.next ? { next: decoded.next } : {}),
       },
       getJwtSecret(),
       { expiresIn: remainingSeconds }

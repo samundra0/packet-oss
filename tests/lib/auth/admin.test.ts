@@ -42,6 +42,10 @@ describe('Admin Authentication Module', () => {
     process.env.ADMIN_JWT_SECRET = TEST_SECRET;
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(mockAdminsData));
     vi.mocked(fs.writeFileSync).mockImplementation(() => {});
+    // readAdmins() now self-heals via ensureAdminsFile(), which checks
+    // existsSync before writing a bootstrap file. Report the file/dir as
+    // present so it never performs that spurious write during these tests.
+    vi.mocked(fs.existsSync).mockReturnValue(true);
   });
 
   afterEach(() => {

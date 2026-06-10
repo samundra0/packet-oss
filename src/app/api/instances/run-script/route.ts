@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { getConnectionInfo } from "@/lib/hostedai";
 import { spawn } from "child_process";
 import Stripe from "stripe";
@@ -144,12 +145,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
-
+    // PA-175: resolve operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const customer = ctx.customer;
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json(
@@ -157,6 +162,18 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // PA-175 gate: running arbitrary scripts on a pod requires
+    // provisioning rights (executing code on shared infra).
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "gpu.provision",
+      request,
+      extra: { subscriptionId, action: "run-script" },
+    });
+    if (denial) return denial;
 
     // Get connection info from hosted.ai
     const connectionInfo = await getConnectionInfo(teamId, subscriptionId);

@@ -67,7 +67,7 @@ describe('Customer Authentication Module', () => {
       delete process.env.CUSTOMER_JWT_SECRET;
       delete process.env.ADMIN_JWT_SECRET;
       expect(() => generateCustomerToken(TEST_EMAIL, TEST_CUSTOMER_ID)).toThrow(
-        'CUSTOMER_JWT_SECRET (or ADMIN_JWT_SECRET) environment variable is required'
+        'CUSTOMER_JWT_SECRET environment variable is required'
       );
     });
 
@@ -127,7 +127,7 @@ describe('Customer Authentication Module', () => {
       delete process.env.CUSTOMER_JWT_SECRET;
       delete process.env.ADMIN_JWT_SECRET;
       expect(() => generateAdminBypassToken(TEST_EMAIL, TEST_CUSTOMER_ID)).toThrow(
-        'CUSTOMER_JWT_SECRET (or ADMIN_JWT_SECRET) environment variable is required'
+        'CUSTOMER_JWT_SECRET environment variable is required'
       );
     });
   });

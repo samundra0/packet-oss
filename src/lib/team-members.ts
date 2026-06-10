@@ -1,9 +1,12 @@
-import { TeamMember } from "@prisma/client";
+// PA-175: TeamMember model was renamed to TeamMemberLegacy. This lib still reads the
+// renamed table to keep the existing invite/remove flow working during the transition.
+// PR 3 will replace this lib with the new TeamMembership-based flow.
+import { TeamMemberLegacy as TeamMember } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 // Get all team members for a Stripe customer
 export async function getTeamMembers(stripeCustomerId: string): Promise<TeamMember[]> {
-  return prisma.teamMember.findMany({
+  return prisma.teamMemberLegacy.findMany({
     where: { stripeCustomerId },
     orderBy: { invitedAt: "asc" },
   });
@@ -11,7 +14,7 @@ export async function getTeamMembers(stripeCustomerId: string): Promise<TeamMemb
 
 // Get a team member by email (for login - may belong to multiple teams)
 export async function getTeamMemberByEmail(email: string): Promise<TeamMember | null> {
-  return prisma.teamMember.findFirst({
+  return prisma.teamMemberLegacy.findFirst({
     where: { email: email.toLowerCase() },
     orderBy: { invitedAt: "desc" }, // Return most recent if multiple
   });
@@ -19,7 +22,7 @@ export async function getTeamMemberByEmail(email: string): Promise<TeamMember | 
 
 // Get all teams a user belongs to (as a member)
 export async function getTeamMemberships(email: string): Promise<TeamMember[]> {
-  return prisma.teamMember.findMany({
+  return prisma.teamMemberLegacy.findMany({
     where: { email: email.toLowerCase() },
     orderBy: { invitedAt: "desc" },
   });
@@ -32,7 +35,7 @@ export async function addTeamMember(params: {
   stripeCustomerId: string;
   invitedBy?: string;
 }): Promise<TeamMember> {
-  return prisma.teamMember.create({
+  return prisma.teamMemberLegacy.create({
     data: {
       email: params.email.toLowerCase(),
       name: params.name,
@@ -45,7 +48,7 @@ export async function addTeamMember(params: {
 
 // Mark team member as having accepted (first login)
 export async function acceptTeamInvite(memberId: string): Promise<TeamMember> {
-  return prisma.teamMember.update({
+  return prisma.teamMemberLegacy.update({
     where: { id: memberId },
     data: { acceptedAt: new Date() },
   });
@@ -56,7 +59,7 @@ export async function removeTeamMember(
   memberId: string,
   stripeCustomerId: string
 ): Promise<void> {
-  await prisma.teamMember.delete({
+  await prisma.teamMemberLegacy.delete({
     where: {
       id: memberId,
       stripeCustomerId, // Ensure ownership
@@ -69,7 +72,7 @@ export async function isTeamMember(
   email: string,
   stripeCustomerId: string
 ): Promise<boolean> {
-  const member = await prisma.teamMember.findUnique({
+  const member = await prisma.teamMemberLegacy.findUnique({
     where: {
       email_stripeCustomerId: {
         email: email.toLowerCase(),
@@ -86,7 +89,7 @@ export async function ensureOwnerRecord(
   stripeCustomerId: string,
   name?: string
 ): Promise<TeamMember> {
-  const existing = await prisma.teamMember.findUnique({
+  const existing = await prisma.teamMemberLegacy.findUnique({
     where: {
       email_stripeCustomerId: {
         email: email.toLowerCase(),
@@ -100,7 +103,7 @@ export async function ensureOwnerRecord(
   }
 
   // Create owner record
-  return prisma.teamMember.create({
+  return prisma.teamMemberLegacy.create({
     data: {
       email: email.toLowerCase(),
       name,

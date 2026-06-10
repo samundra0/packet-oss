@@ -9,10 +9,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { verifyCustomerToken } from "@/lib/auth";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { getConnectionInfo } from "@/lib/hostedai";
-import { getStripe } from "@/lib/stripe";
 import { getOrCreateServerSSHKey, executeSSHWithKey } from "@/lib/ssh-keys";
-import Stripe from "stripe";
 
 // Check if a port is listening on the pod via SSH
 async function verifyAppRunning(
@@ -64,6 +64,27 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
 
+  // PA-175: scope to operating account.
+  const ctx = await resolveOperatingContext({
+    email: payload.email,
+    jwtCustomerId: payload.customerId,
+    activeAccountId: payload.activeAccountId,
+  });
+  if (!ctx) {
+    return NextResponse.json({ error: "Account not found" }, { status: 404 });
+  }
+  const accountId = ctx.accountId;
+
+  // PA-202 gate: Apps hidden from Read-only Member + Finance Manager.
+  const denial = await gatePermission({
+    payload,
+    accountId,
+    customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+    permission: "apps.use",
+    request,
+  });
+  if (denial) return denial;
+
   const subscriptionId = request.nextUrl.searchParams.get("subscriptionId");
   const appSlug = request.nextUrl.searchParams.get("appSlug");
   const shouldVerify = request.nextUrl.searchParams.get("verify") === "true";
@@ -75,7 +96,7 @@ export async function GET(request: NextRequest) {
   // Get installations for this subscription
   const where: { subscriptionId: string; stripeCustomerId: string; app?: { slug: string } } = {
     subscriptionId,
-    stripeCustomerId: payload.customerId,
+    stripeCustomerId: accountId,
   };
 
   if (appSlug) {
@@ -104,10 +125,7 @@ export async function GET(request: NextRequest) {
 
   if (shouldVerify && installations.some(i => i.status === "running")) {
     try {
-      // Get team ID from Stripe
-      const stripe = await getStripe();
-      const customer = await stripe.customers.retrieve(payload.customerId) as Stripe.Customer;
-      const teamId = customer.metadata?.hostedai_team_id;
+      const teamId = ctx.customer.metadata?.hostedai_team_id;
 
       if (teamId) {
         // Get connection info

@@ -31,7 +31,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { email } = await request.json();
+    const { email, inviteToken, next } = (await request.json()) as {
+      email?: string;
+      inviteToken?: string;
+      next?: string;
+    };
 
     if (!email) {
       return NextResponse.json(
@@ -112,14 +116,21 @@ export async function POST(request: NextRequest) {
     // ── Send login email via shared function ─────────────────────────────
     // Handles all account types: paid, free trial, team member.
     // Returns true if an email was sent, false if no account found.
-    const emailSent = await sendLoginEmailForCustomer(normalizedEmail);
+    // PA-175: when arriving here from an invitation link, carry the invite
+    // token through to the dashboard URL so the modal can prompt for
+    // acceptance after the user signs in.
+    const emailSent = await sendLoginEmailForCustomer(normalizedEmail, {
+      inviteToken: typeof inviteToken === "string" ? inviteToken : undefined,
+      next: typeof next === "string" ? next : undefined,
+    });
 
     if (!emailSent) {
       // No account found — log the attempt for admin visibility
       logLoginLinkSent(normalizedEmail, false).catch(() => {});
     }
 
-    // Always return identical response (anti-enumeration)
+    // Always return identical response (anti-enumeration: don't reveal
+    // whether an email is registered).
     return NextResponse.json({
       success: true,
       message: "If an account exists with this email, you will receive access links shortly.",

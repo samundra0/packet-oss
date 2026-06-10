@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getBrandName, getLogoUrl, getSupportEmail } from "@/lib/branding";
+import { getBrandName, getLogoUrl, getSupportEmail } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
 
 function SuccessContent() {
@@ -265,15 +265,15 @@ function SuccessContent() {
                       {isExistingUser
                         ? "Access your dashboard"
                         : isFreeTrial
-                        ? "Start using Token Factory"
+                        ? "Browse the GPU inventory"
                         : "Launch your first GPU"}
                     </p>
                     <p className="text-sm text-zinc-500">
                       {isExistingUser
                         ? "Your account and data are right where you left them"
                         : isFreeTrial
-                        ? "You have 10,000 free tokens to explore LLM inference"
-                        : "Start computing in minutes"}
+                        ? "See what's available and pick a pod when you're ready to deploy"
+                        : "Start deploying in minutes — browse the inventory and pick a pod"}
                     </p>
                   </div>
                 </div>

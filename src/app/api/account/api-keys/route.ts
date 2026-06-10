@@ -1,11 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import type Stripe from "stripe";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
 import { generateApiKey } from "@/lib/api";
 import { logApiKeyCreated } from "@/lib/activity";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
+import { resolveMembership } from "@/lib/auth/membership";
+import { computeEffectivePermissions } from "@/lib/auth/api-key-permissions";
+import { PACKET_ROLES, type PacketRole } from "@/lib/auth/role-permissions";
 import type { ApiKeyListItem, CreateApiKeyResponse } from "@/lib/api";
+
+function isPacketRole(role: string): role is PacketRole {
+  return (PACKET_ROLES as readonly string[]).includes(role);
+}
 
 // GET - List API keys for the authenticated user
 export async function GET(request: NextRequest) {
@@ -24,9 +31,19 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // PA-175: scope to operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
     const apiKeys = await prisma.apiKey.findMany({
       where: {
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: ctx.accountId,
         revokedAt: null,
       },
       orderBy: { createdAt: "desc" },
@@ -80,18 +97,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get team ID from Stripe customer metadata
-    const customer = (await (await getStripe()).customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
-
-    if (customer.deleted) {
-      return NextResponse.json(
-        { error: "Customer not found" },
-        { status: 404 }
-      );
+    // PA-175: scope to operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
     }
-
+    const customer = ctx.customer;
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json(
@@ -99,6 +114,16 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // PA-175 gate: only Owner / Admin can create API keys.
+    const denial = await gatePermission({
+      payload,
+      accountId: customer.id,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "api_keys.create",
+      request,
+    });
+    if (denial) return denial;
 
     const { name, expiresAt, scopes, rateLimitRpm } = await request.json();
 
@@ -120,7 +145,7 @@ export async function POST(request: NextRequest) {
     // Limit number of API keys per customer
     const existingKeys = await prisma.apiKey.count({
       where: {
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: ctx.accountId,
         revokedAt: null,
       },
     });
@@ -159,22 +184,40 @@ export async function POST(request: NextRequest) {
     // Validate rateLimitRpm if provided
     const rpmValue = typeof rateLimitRpm === "number" && rateLimitRpm > 0 ? rateLimitRpm : null;
 
+    // PA-175 PR 2.5: capture holder identity + precomputed permissions.
+    // Resolves to the issuer's User + their permission set on this account.
+    // Token Factory hot-path reads effective_permissions directly.
+    const membership = await resolveMembership({
+      userId: payload.userId,
+      email: payload.email,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+    });
+    const holderUserId = membership?.userId ?? null;
+    const holderRole = membership && isPacketRole(membership.role) ? membership.role : null;
+    const effectivePermissions = computeEffectivePermissions(
+      holderRole,
+      membership?.isOwner ?? false,
+    );
+
     // Store in database
     const apiKey = await prisma.apiKey.create({
       data: {
         name,
         keyPrefix,
         keyHash,
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: ctx.accountId,
         teamId,
         scopes: scopesString,
         expiresAt: expiresAtDate,
         rateLimitRpm: rpmValue,
+        holderUserId,
+        effectivePermissions,
       },
     });
 
     // Log activity
-    logApiKeyCreated(payload.customerId, name).catch(() => {});
+    logApiKeyCreated(ctx.accountId, name).catch(() => {});
 
     const result: CreateApiKeyResponse = {
       id: apiKey.id,
@@ -213,13 +256,33 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "API key id is required" }, { status: 400 });
     }
 
+    // PA-175: scope to operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
     // Verify ownership
     const existing = await prisma.apiKey.findFirst({
-      where: { id, stripeCustomerId: payload.customerId, revokedAt: null },
+      where: { id, stripeCustomerId: ctx.accountId, revokedAt: null },
     });
     if (!existing) {
       return NextResponse.json({ error: "API key not found" }, { status: 404 });
     }
+
+    // PA-175 gate: rate-limit changes are a key-management op — api_keys.create only.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "api_keys.create",
+      request,
+    });
+    if (denial) return denial;
 
     const rpmValue = typeof rateLimitRpm === "number" && rateLimitRpm > 0 ? rateLimitRpm : null;
 

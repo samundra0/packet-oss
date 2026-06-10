@@ -35,6 +35,9 @@ vi.mock('../../src/lib/prisma', () => ({
   prisma: {
     customerSettings: {
       findUnique: vi.fn().mockResolvedValue(null),
+      // findSuspension() (via customer-suspension) queries findFirst; default
+      // to "no suspension found".
+      findFirst: vi.fn().mockResolvedValue(null),
     },
   },
 }));

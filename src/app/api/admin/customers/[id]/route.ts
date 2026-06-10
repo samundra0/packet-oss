@@ -541,8 +541,10 @@ export async function POST(
           return NextResponse.json({ error: "Customer has no email" }, { status: 400 });
         }
 
-        // Generate a dashboard token for this customer that bypasses 2FA
-        const token = generateAdminBypassToken(customer.email.toLowerCase(), customerId);
+        // Generate a dashboard token for this customer that bypasses 2FA, tagged
+        // with the acting admin so the dashboard shows an impersonation banner
+        // and the login is attributed to the admin (not "system").
+        const token = generateAdminBypassToken(customer.email.toLowerCase(), customerId, session.email);
         const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
 
         console.log(`Admin ${session.email} generated login-as link for ${customer.email}`);

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   exposeService,
   updateExposedService,
@@ -9,12 +11,20 @@ import {
 } from "@/lib/hostedai";
 import { clearCache } from "@/lib/hostedai/client";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 
 // GET - View all exposed services for an instance
 export async function GET(request: NextRequest) {
   try {
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
+
+    // PA-227: gate on gpu.access. Finance Manager (billing-only) used to slip
+    // past auth and 500 inside the HAI call. Read-only Member keeps the read
+    // since they can SSH into the instance and need to know its exposed ports.
+    const denial = requirePermission(auth, "gpu.access", request);
+    if (denial) return denial;
+
     const { allTeamIds } = auth;
 
     const { searchParams } = new URL(request.url);
@@ -31,9 +41,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "No team associated" }, { status: 400 });
     }
 
-    // HAI 2.2: Unified instance — use dedicated exposed-services endpoint
+    // HAI 2.2: Unified instance — use dedicated exposed-services endpoint.
+    // PA-227: `?? []` mirrors the legacy branch below; defends against any
+    // future null from getExposedServices (HAI has historically null'd the
+    // body when an instance has no exposed services).
     if (instanceId.startsWith("i-")) {
-      const services = await getExposedServices(instanceId);
+      const services = (await getExposedServices(instanceId)) ?? [];
       const formattedServices = services.map((s) => ({
         id: s.id,
         service_name: s.service_name,
@@ -100,6 +113,30 @@ export async function POST(request: NextRequest) {
     if (!payload) {
       return NextResponse.json({ error: "Invalid token" }, { status: 401 });
     }
+
+    // PA-230 fix: resolve operating context so the gate receives a real
+    // customerEmail (the implicit-Owner fallback in resolveMembership keys
+    // off it). Hardcoding customerEmail:null 403'd the ~1140 prod accounts
+    // that have no team_membership row — they never used team features
+    // pre-cutover so the v0.5.0 backfill skipped them; the dashboard path
+    // synthesizes an implicit-Owner via /verify but this route couldn't.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const postDenial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "gpu.provision",
+      request,
+      extra: { action: "expose-service" },
+    });
+    if (postDenial) return postDenial;
 
     const body = await request.json();
     const { pod_name, pool_subscription_id, port, service_name, protocol, service_type } = body;
@@ -199,6 +236,28 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Invalid token" }, { status: 401 });
     }
 
+    // PA-227 follow-up: same gate omission as the GET path. Resolves
+    // operating context first so implicit-Owner accounts (no team_membership
+    // row — 82% of the prod base pre-cutover) aren't 403'd by accident;
+    // mirrors the PA-230 fix already applied to POST/DELETE in this file.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const putDenial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "gpu.provision",
+      request,
+      extra: { action: "update-service" },
+    });
+    if (putDenial) return putDenial;
+
     const body = await request.json();
     const { id, service_name, port, protocol, service_type } = body;
 
@@ -237,6 +296,25 @@ export async function DELETE(request: NextRequest) {
     if (!payload) {
       return NextResponse.json({ error: "Invalid token" }, { status: 401 });
     }
+
+    // PA-230 fix: see POST handler comment.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const delDenial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "gpu.provision",
+      request,
+      extra: { action: "delete-service" },
+    });
+    if (delDenial) return delDenial;
 
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");

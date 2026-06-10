@@ -9,9 +9,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { GPU_APPS, getAppBySlug } from "@/lib/gpu-apps";
 import { prisma } from "@/lib/prisma";
 import { verifyCustomerToken } from "@/lib/auth";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { getConnectionInfo } from "@/lib/hostedai";
-import { getStripe } from "@/lib/stripe";
-import Stripe from "stripe";
 import { spawn } from "child_process";
 import { getOrCreateServerSSHKey, executeSSHWithKey } from "@/lib/ssh-keys";
 import { validateSSHParams } from "@/lib/ssh-validation";
@@ -163,6 +163,28 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
 
+  // PA-175: scope to operating account (team owner's customer when invited).
+  const ctx = await resolveOperatingContext({
+    email: payload.email,
+    jwtCustomerId: payload.customerId,
+    activeAccountId: payload.activeAccountId,
+  });
+  if (!ctx) {
+    return NextResponse.json({ error: "Account not found" }, { status: 404 });
+  }
+  const accountId = ctx.accountId;
+  const customer = ctx.customer;
+
+  // PA-202 gate: Apps hidden from Read-only Member + Finance Manager.
+  const denial = await gatePermission({
+    payload,
+    accountId,
+    customerEmail: typeof customer.email === "string" ? customer.email : null,
+    permission: "apps.use",
+    request,
+  });
+  if (denial) return denial;
+
   const body = await request.json();
   const { subscriptionId, appSlug } = body;
 
@@ -179,13 +201,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "App not found" }, { status: 404 });
   }
 
-  // Get teamId from Stripe customer metadata first
-  const stripe = await getStripe();
-  const customerResult = await stripe.customers.retrieve(payload.customerId);
-  if ("deleted" in customerResult && customerResult.deleted) {
-    return NextResponse.json({ error: "Customer not found" }, { status: 404 });
-  }
-  const customer = customerResult as Stripe.Customer;
   const teamId = customer.metadata?.hostedai_team_id;
 
   if (!teamId) {
@@ -261,7 +276,7 @@ export async function POST(request: NextRequest) {
   const installation = await prisma.installedApp.create({
     data: {
       subscriptionId,
-      stripeCustomerId: payload.customerId,
+      stripeCustomerId: accountId,
       appId: dbApp.id,
       status: "installing",
       installProgress: 0,

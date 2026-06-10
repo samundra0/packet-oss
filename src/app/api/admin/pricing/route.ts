@@ -32,7 +32,7 @@ export async function PUT(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { hourlyRateCents, storagePricePerGBHourCents, autoRefillThresholdCents, autoRefillAmountCents } = body;
+  const { hourlyRateCents, storagePricePerGBHourCents, autoRefillThresholdCents, autoRefillAmountCents, stoppedInstanceRatePercent } = body;
 
   // Validate inputs
   if (hourlyRateCents !== undefined && (typeof hourlyRateCents !== "number" || hourlyRateCents < 0)) {
@@ -47,12 +47,24 @@ export async function PUT(request: NextRequest) {
   if (autoRefillAmountCents !== undefined && (typeof autoRefillAmountCents !== "number" || autoRefillAmountCents < 0)) {
     return NextResponse.json({ error: "Invalid refill amount" }, { status: 400 });
   }
+  // PA-270: this field was previously never read here, so the admin "Stopped
+  // Instance Rate" control silently did nothing. It's a percentage (0..100) of
+  // the running rate, applied to stopped/paused/reserved GPUs by the sync cron.
+  if (
+    stoppedInstanceRatePercent !== undefined &&
+    (typeof stoppedInstanceRatePercent !== "number" ||
+      stoppedInstanceRatePercent < 0 ||
+      stoppedInstanceRatePercent > 100)
+  ) {
+    return NextResponse.json({ error: "Invalid stopped instance rate (must be 0-100)" }, { status: 400 });
+  }
 
   const updates: Partial<PricingConfig> = {};
   if (hourlyRateCents !== undefined) updates.hourlyRateCents = hourlyRateCents;
   if (storagePricePerGBHourCents !== undefined) updates.storagePricePerGBHourCents = storagePricePerGBHourCents;
   if (autoRefillThresholdCents !== undefined) updates.autoRefillThresholdCents = autoRefillThresholdCents;
   if (autoRefillAmountCents !== undefined) updates.autoRefillAmountCents = autoRefillAmountCents;
+  if (stoppedInstanceRatePercent !== undefined) updates.stoppedInstanceRatePercent = stoppedInstanceRatePercent;
 
   const updated = updatePricing(updates, session.email);
 

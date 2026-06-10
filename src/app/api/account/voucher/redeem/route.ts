@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { processVoucherRedemption } from "@/lib/voucher";
+import { gatePermission } from "@/lib/auth/gate";
+import { getStripe } from "@/lib/stripe";
 
 const redeemSchema = z.object({
   code: z.string().trim().min(1, "Voucher code is required").max(50),
@@ -36,6 +38,24 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // PA-175 gate: voucher redemption adds credit to the wallet — billing.manage only.
+    const stripe = await getStripe();
+    const stripeCustomer = await stripe.customers.retrieve(payload.customerId);
+    const customerEmail =
+      "deleted" in stripeCustomer && stripeCustomer.deleted
+        ? null
+        : typeof stripeCustomer.email === "string"
+          ? stripeCustomer.email
+          : null;
+    const denial = await gatePermission({
+      payload,
+      accountId: payload.customerId,
+      customerEmail,
+      permission: "billing.manage",
+      request,
+    });
+    if (denial) return denial;
 
     const result = await processVoucherRedemption(
       parsed.data.code,

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   getOrCreateReferralCode,
   getReferralStats,
@@ -27,6 +28,28 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // PA-230 fix: resolve operating context so the gate receives a real
+    // customerEmail (implicit-Owner fallback) AND so the referral code is
+    // scoped to the team a member is operating in, not their own customer.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
+    // PA-201/PA-202 gate: Referral is Team Admin only.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "referral.view",
+      request,
+    });
+    if (denial) return denial;
+
     const settings = getReferralSettings();
 
     if (!settings.enabled) {
@@ -37,15 +60,15 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Get or create referral code for this customer
-    const code = await getOrCreateReferralCode(payload.customerId);
+    // Get or create referral code for this customer (operating account).
+    const code = await getOrCreateReferralCode(ctx.accountId);
 
     // Get stats and referral claims
-    const stats = await getReferralStats(payload.customerId);
+    const stats = await getReferralStats(ctx.accountId);
 
     // Get detailed referral claims for this user's code
     const referralCode = await prisma.referralCode.findUnique({
-      where: { stripeCustomerId: payload.customerId },
+      where: { stripeCustomerId: ctx.accountId },
       include: {
         claims: {
           orderBy: { createdAt: "desc" },
@@ -63,7 +86,7 @@ export async function GET(request: NextRequest) {
 
     // Check if this customer has already used a referral code
     const existingClaim = await prisma.referralClaim.findUnique({
-      where: { refereeCustomerId: payload.customerId },
+      where: { refereeCustomerId: ctx.accountId },
       include: { referralCode: true },
     });
 
@@ -112,6 +135,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // PA-230 fix: see GET handler comment. Scope referral apply/validate
+    // to the operating account so invited members redeem codes onto the
+    // team they're switched into.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
+    // PA-201/PA-202 gate: Referral is Team Admin only.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "referral.view",
+      request,
+    });
+    if (denial) return denial;
+
     const body = await request.json();
     const { code, action } = body;
 
@@ -130,19 +175,12 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Get customer email from Stripe
-      const stripe = await getStripe();
-      const customer = await stripe.customers.retrieve(payload.customerId);
-      if (!customer || customer.deleted) {
-        return NextResponse.json(
-          { success: false, error: "Customer not found" },
-          { status: 404 }
-        );
-      }
-
+      // Use the resolved operating customer (already fetched by ctx). No
+      // second Stripe round-trip needed.
+      const customer = ctx.customer;
       const email = "email" in customer ? customer.email || "" : "";
 
-      const result = await applyReferralCode(code, payload.customerId, email);
+      const result = await applyReferralCode(code, ctx.accountId, email);
 
       if (!result.success) {
         return NextResponse.json(

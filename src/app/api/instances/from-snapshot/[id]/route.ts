@@ -16,6 +16,7 @@ import { sendGpuLaunchedEmail } from "@/lib/email";
 import { installMetricsCollector } from "@/lib/metrics-collector";
 import { runStartupScript } from "@/lib/startup-script-runner";
 import { WORKSPACE_SETUP_SCRIPT } from "@/lib/startup-scripts";
+import { gatePermission } from "@/lib/auth/gate";
 import { randomBytes } from "crypto";
 import Stripe from "stripe";
 import { z } from "zod";
@@ -94,6 +95,17 @@ export async function POST(
         { status: 400 }
       );
     }
+
+    // PA-175 gate: restoring from a snapshot creates a new instance → gpu.provision.
+    const denial = await gatePermission({
+      payload,
+      accountId: customer.id,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "gpu.provision",
+      request,
+      extra: { snapshotId },
+    });
+    if (denial) return denial;
 
     // Determine final configuration (options override snapshot)
     const poolId = options.pool_id || snapshot.poolId;

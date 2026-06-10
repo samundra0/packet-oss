@@ -9,8 +9,8 @@
  *     3. (120h) Credit reminder — your $25 is still waiting
  *
  *   API vertical  (direct signup, no GPU context)
- *     1. (6h)   Your API key is live + $25 credit applied
- *     2. (48h)  Ship faster with batch, embeddings & structured outputs
+ *     1. (6h)   Your account is ready — browse GPU inventory
+ *     2. (48h)  Three things you can do from the dashboard today
  *     3. (120h) Credit reminder — try a dedicated GPU
  *
  * All emails follow DigitalOcean/Vercel style: short, developer-focused,
@@ -108,7 +108,6 @@ export async function sendDripGpu1(params: {
     `)}
     ${emailText("On-demand, not spot. No bidding, no interruptions. SSH in and start working.")}
     ${emailButton("Deploy Now", dashboardUrl, branding)}
-    ${emailMuted("Your account also includes 10,000 free API tokens for LLM inference. No payment required to try the API.")}
     ${emailSignoff(branding)}
   `;
 
@@ -125,8 +124,6 @@ Availability: In stock
 On-demand, not spot. No bidding, no interruptions. SSH in and start working.
 
 Deploy Now: ${dashboardUrl}
-
-Your account also includes 10,000 free API tokens for LLM inference. No payment required to try the API.
 
 The ${brand} Team
 ${plainTextFooter({ unsubscribeUrl, branding })}`;
@@ -305,11 +302,10 @@ export async function sendDripApi1(params: {
 }) {
   const { to, customerName, dashboardUrl, creditApplied, unsubscribeUrl, branding } = params;
   const brand = branding?.brandName || DEFAULT_BRAND_NAME;
-  const apiBase = branding?.apiBaseUrl || DEFAULT_API_BASE_URL;
 
   const subject = creditApplied
-    ? "$25 credit + 10K free tokens — your account is ready"
-    : "Your API key is live — first call in 30 seconds";
+    ? `$25 credit applied — your ${brand} account is ready`
+    : `Your ${brand} account is ready — browse GPU inventory`;
 
   const creditBlock = creditApplied ? `
     ${emailSuccessBox(`
@@ -321,36 +317,32 @@ export async function sendDripApi1(params: {
   const body = `
     ${emailGreeting(customerName)}
     ${creditBlock}
-    ${emailText(`Your ${brand} account is set up with <strong>10,000 free tokens</strong>. Here's the fastest way to use them:`)}
+    ${emailText(`Your ${brand} account is set up. Head to the dashboard to browse live GPU inventory, check real-time pricing, and deploy a pod when you're ready.`)}
     ${emailInfoBox(`
-      <p style="margin: 0 0 12px 0; font-size: 14px; font-family: 'SF Mono', Menlo, monospace; color: #0b0f1c; font-weight: 600;">curl</p>
-      <p style="margin: 0 0 4px 0; font-size: 13px; font-family: 'SF Mono', Menlo, monospace; color: #5b6476;">&nbsp;&nbsp;${apiBase}/v1/chat/completions \\</p>
-      <p style="margin: 0 0 4px 0; font-size: 13px; font-family: 'SF Mono', Menlo, monospace; color: #5b6476;">&nbsp;&nbsp;-H "Authorization: Bearer YOUR_KEY" \\</p>
-      <p style="margin: 0 0 4px 0; font-size: 13px; font-family: 'SF Mono', Menlo, monospace; color: #5b6476;">&nbsp;&nbsp;-H "Content-Type: application/json" \\</p>
-      <p style="margin: 0; font-size: 13px; font-family: 'SF Mono', Menlo, monospace; color: #5b6476;">&nbsp;&nbsp;-d '{"model":"meta-llama/Llama-3.3-70B-Instruct",<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"messages":[{"role":"user","content":"Hello"}]}'</p>
+      <p style="margin: 0 0 8px 0; font-size: 15px; font-weight: 600; color: #0b0f1c;">What you can do today</p>
+      <p style="margin: 0 0 4px 0; font-size: 14px; color: #5b6476;">&middot; Browse the full GPU inventory with live pricing</p>
+      <p style="margin: 0 0 4px 0; font-size: 14px; color: #5b6476;">&middot; Save deployment configurations for later</p>
+      <p style="margin: 0; font-size: 14px; color: #5b6476;">&middot; Deploy a dedicated pod from $0.66/hr</p>
     `)}
-    ${emailText("It's <strong>OpenAI-compatible</strong>. Change the base URL in your existing code and it works — OpenAI SDK, LangChain, LlamaIndex, anything.")}
     ${emailButton("Open Dashboard", dashboardUrl, branding)}
-    ${emailMuted("Your API key is in the Token Factory tab. Or just use the built-in playground to test without code.")}
+    ${emailMuted("Reply if you want help picking the right GPU for your workload — happy to chat.")}
     ${emailSignoff(branding)}
   `;
 
   const creditPlainText = creditApplied ? "\n$25.00 WELCOME CREDIT APPLIED\nAlready in your wallet — use it on GPUs anytime, no card required.\n" : "";
-  const fallbackHtml = emailLayout({ preheader: creditApplied ? "$25 credit + 10K free tokens — get started" : "10,000 free tokens — make your first API call", body, unsubscribeUrl, branding });
+  const fallbackHtml = emailLayout({ preheader: creditApplied ? "$25 credit waiting — browse GPU inventory" : "Your account is ready — browse GPU inventory", body, unsubscribeUrl, branding });
   const fallbackText = `Hi ${customerName},
 ${creditPlainText}
-Your ${brand} account is set up with 10,000 free tokens. Here's the fastest way to use them:
+Your ${brand} account is set up. Head to the dashboard to browse live GPU inventory, check real-time pricing, and deploy a pod when you're ready.
 
-curl ${apiBase}/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model":"meta-llama/Llama-3.3-70B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
-
-It's OpenAI-compatible. Change the base URL in your existing code and it works — OpenAI SDK, LangChain, LlamaIndex, anything.
+What you can do today:
+- Browse the full GPU inventory with live pricing
+- Save deployment configurations for later
+- Deploy a dedicated pod from $0.66/hr
 
 Open Dashboard: ${dashboardUrl}
 
-Your API key is in the Token Factory tab. Or just use the built-in playground to test without code.
+Reply if you want help picking the right GPU for your workload — happy to chat.
 
 The ${brand} Team
 ${plainTextFooter({ unsubscribeUrl, branding })}`;
@@ -376,49 +368,46 @@ export async function sendDripApi2(params: {
   const { to, customerName, dashboardUrl, unsubscribeUrl, branding } = params;
   const brand = branding?.brandName || DEFAULT_BRAND_NAME;
 
-  const subject = "Ship faster: batch, embeddings, and structured outputs";
+  const subject = "Three things you can do from the dashboard today";
   const body = `
     ${emailGreeting(customerName)}
-    ${emailText("Beyond chat completions, three features that help teams ship faster:")}
+    ${emailText(`A quick tour of what's waiting for you in ${brand}:`)}
     <div style="margin: 20px 0;">
       <div style="padding: 14px 0; border-bottom: 1px solid #e4e7ef;">
-        <p style="margin: 0 0 4px 0; font-size: 15px; font-weight: 600; color: #0b0f1c;">Batch Processing</p>
-        <p style="margin: 0; font-size: 14px; color: #5b6476;">Send thousands of prompts in one request. 50% cheaper than real-time. Results delivered async — ideal for data pipelines, evals, and content generation at scale.</p>
+        <p style="margin: 0 0 4px 0; font-size: 15px; font-weight: 600; color: #0b0f1c;">Live GPU inventory</p>
+        <p style="margin: 0; font-size: 14px; color: #5b6476;">RTX PRO 6000, H100, H200, B200 — see what's available and what it costs, updated in real time.</p>
       </div>
       <div style="padding: 14px 0; border-bottom: 1px solid #e4e7ef;">
-        <p style="margin: 0 0 4px 0; font-size: 15px; font-weight: 600; color: #0b0f1c;">Embeddings</p>
-        <p style="margin: 0; font-size: 14px; color: #5b6476;">Generate vectors with nomic-embed or BGE models. Build RAG, semantic search, or recommendations with a single API call.</p>
+        <p style="margin: 0 0 4px 0; font-size: 15px; font-weight: 600; color: #0b0f1c;">One-click Hugging Face deploys</p>
+        <p style="margin: 0; font-size: 14px; color: #5b6476;">Pick a model, pick a pod, hit deploy. We wire up vLLM, SSH, and an exposed endpoint for you.</p>
       </div>
       <div style="padding: 14px 0;">
-        <p style="margin: 0 0 4px 0; font-size: 15px; font-weight: 600; color: #0b0f1c;">Structured Outputs</p>
-        <p style="margin: 0; font-size: 14px; color: #5b6476;">JSON mode + JSON schema validation. Get reliable structured data from any model — no regex parsing, no retries.</p>
+        <p style="margin: 0 0 4px 0; font-size: 15px; font-weight: 600; color: #0b0f1c;">Per-second billing from your wallet</p>
+        <p style="margin: 0; font-size: 14px; color: #5b6476;">No subscriptions, no commitments. Top up the wallet, run a pod, stop when you're done.</p>
       </div>
     </div>
-    ${emailText("All of this works with your free tokens. No payment required.")}
-    ${emailButton("Try It Now", dashboardUrl, branding)}
-    ${emailMuted("Reply to this email if you want help integrating — we've helped teams migrate from OpenAI, Together, and Replicate.")}
+    ${emailButton("Open Dashboard", dashboardUrl, branding)}
+    ${emailMuted("Reply if you want help picking a GPU for your workload — happy to chat.")}
     ${emailSignoff(branding)}
   `;
 
-  const fallbackHtml = emailLayout({ preheader: "Batch 50% cheaper, embeddings, JSON schema — all free to try", body, unsubscribeUrl, branding });
+  const fallbackHtml = emailLayout({ preheader: "Live inventory, one-click deploys, per-second billing", body, unsubscribeUrl, branding });
   const fallbackText = `Hi ${customerName},
 
-Beyond chat completions, three features that help teams ship faster:
+A quick tour of what's waiting for you in ${brand}:
 
-1. Batch Processing
-Send thousands of prompts in one request. 50% cheaper than real-time. Ideal for data pipelines, evals, and content generation.
+1. Live GPU inventory
+RTX PRO 6000, H100, H200, B200 — see what's available and what it costs, updated in real time.
 
-2. Embeddings
-Generate vectors with nomic-embed or BGE. Build RAG, semantic search, or recommendations.
+2. One-click Hugging Face deploys
+Pick a model, pick a pod, hit deploy. We wire up vLLM, SSH, and an exposed endpoint for you.
 
-3. Structured Outputs
-JSON mode + JSON schema validation. Reliable structured data, no regex parsing.
+3. Per-second billing from your wallet
+No subscriptions, no commitments. Top up the wallet, run a pod, stop when you're done.
 
-All of this works with your free tokens. No payment required.
+Open Dashboard: ${dashboardUrl}
 
-Try It Now: ${dashboardUrl}
-
-Reply if you want help integrating — we've helped teams migrate from OpenAI, Together, and Replicate.
+Reply if you want help picking a GPU for your workload — happy to chat.
 
 The ${brand} Team
 ${plainTextFooter({ unsubscribeUrl, branding })}`;
@@ -450,7 +439,7 @@ export async function sendDripApi3(params: {
   const body = `
     ${emailGreeting(customerName)}
     ${emailText(`Just a reminder — you have <strong>$25.00</strong> in your ${brand} wallet. It's ready to use, no card required.`)}
-    ${emailText("When you need more than API calls — fine-tuning, custom model serving, or running your own stack — a dedicated GPU is the next step.")}
+    ${emailText("Whether you're fine-tuning, serving your own model, or running a full training stack, a dedicated GPU is the next step.")}
     ${emailInfoBox(`
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr>
@@ -465,7 +454,7 @@ export async function sendDripApi3(params: {
     `)}
     ${emailText("$25 gets you <strong>37+ hours</strong> on an RTX PRO 6000 or <strong>8+ hours</strong> on a B200. Enough to run a real workload.")}
     ${emailButtonTeal("Launch a GPU", dashboardUrl, branding)}
-    ${emailMuted("This credit expires in 30 days. No payment method needed. Your free API tokens are still there too.")}
+    ${emailMuted("This credit expires in 30 days. No payment method needed.")}
     ${emailSignoff(branding)}
   `;
 
@@ -474,7 +463,7 @@ export async function sendDripApi3(params: {
 
 Just a reminder — you have $25.00 in your ${brand} wallet. It's ready to use, no card required.
 
-When you need more than API calls — fine-tuning, custom model serving, or your own stack — a dedicated GPU is the next step.
+Whether you're fine-tuning, serving your own model, or running a full training stack, a dedicated GPU is the next step.
 
 RTX PRO 6000: $0.66/hr, 96 GB
 NVIDIA B200: $3.75/hr, 180 GB

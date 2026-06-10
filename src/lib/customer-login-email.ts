@@ -254,9 +254,18 @@ ${plainTextFooter()}`;
  *
  * Returns true if an email was sent (or attempted), false if no account was found.
  */
-export async function sendLoginEmailForCustomer(email: string): Promise<boolean> {
+export async function sendLoginEmailForCustomer(
+  email: string,
+  options: { inviteToken?: string; next?: string } = {},
+): Promise<boolean> {
   const normalizedEmail = email.toLowerCase().trim();
   const stripe = await getStripe();
+  // PA-175: when an invitation token is supplied, every dashboard URL we
+  // emit gets `&invite=<token>` appended so the dashboard shows the Accept
+  // modal as soon as the user lands.
+  const inviteSuffix = options.inviteToken
+    ? `&invite=${encodeURIComponent(options.inviteToken)}`
+    : "";
 
   // Find all Stripe customers matching this email
   const customers = await stripe.customers.list({
@@ -286,8 +295,8 @@ export async function sendLoginEmailForCustomer(email: string): Promise<boolean>
     if (teamId) {
       // Paid/provisioned customer — send full access email with billing portal
       const sessionTimeout = await getSessionTimeout(customer.id);
-      const token = generateCustomerToken(normalizedEmail, customer.id, sessionTimeout);
-      const accountUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
+      const token = generateCustomerToken(normalizedEmail, customer.id, { expiresInHours: sessionTimeout, next: options.next });
+      const accountUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}${inviteSuffix}`;
 
       const portalSession = await stripe.billingPortal.sessions.create({
         customer: customer.id,
@@ -310,8 +319,8 @@ export async function sendLoginEmailForCustomer(email: string): Promise<boolean>
     } else if (billingType === "free" || billingType === "free_trial") {
       // Free trial customer — send free trial email (no billing portal)
       const sessionTimeout = await getSessionTimeout(customer.id);
-      const token = generateCustomerToken(normalizedEmail, customer.id, sessionTimeout);
-      const accountUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
+      const token = generateCustomerToken(normalizedEmail, customer.id, { expiresInHours: sessionTimeout, next: options.next });
+      const accountUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}${inviteSuffix}`;
 
       try {
         await sendFreeTrialAccessEmail({
@@ -354,7 +363,7 @@ export async function sendLoginEmailForCustomer(email: string): Promise<boolean>
     }
 
     const sessionTimeout = await getSessionTimeout(membership.stripeCustomerId);
-    const token = generateCustomerToken(normalizedEmail, membership.stripeCustomerId, sessionTimeout);
+    const token = generateCustomerToken(normalizedEmail, membership.stripeCustomerId, { expiresInHours: sessionTimeout, next: options.next });
     const accountUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
 
     if (!membership.acceptedAt) {

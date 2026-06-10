@@ -12,6 +12,37 @@ export interface Team {
   description?: string;
 }
 
+// Single row in GET /team/{teamId}/members. We only use the fields we
+// need to find a member by email and act on their HAI user_id.
+export interface TeamMemberRow {
+  KeycloakId: string;
+  user_id: string; // HAI user UUID — used in /team/{teamId}/member/{user_id}/* URLs
+  team_id: string;
+  role_id: string;
+  status: string;
+  invited_at: string;
+  joined_at: string;
+  expires_at: string;
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    onboarded: boolean;
+    two_factor_enabled: boolean;
+    timezone: string;
+  };
+  role: {
+    id: string;
+    name: string;
+    label: string;
+  };
+}
+
+export interface TeamMembersResponse {
+  members: TeamMemberRow[];
+  count: number;
+}
+
 export interface OTLResponse {
   url: string;
   expires_at: string;

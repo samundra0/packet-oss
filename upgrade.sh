@@ -117,6 +117,7 @@ if $DO_ROLLBACK; then
   # Step R1: Stop service
   log "Stopping service..."
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl stop "${SERVICE_NAME}-ssh-ws" 2>/dev/null || true
   success "Service stopped"
 
   # Step R2: Restore code
@@ -179,6 +180,7 @@ if $DO_ROLLBACK; then
   log "Starting service..."
   systemctl daemon-reload
   systemctl start "$SERVICE_NAME"
+  systemctl restart "${SERVICE_NAME}-ssh-ws" 2>/dev/null || true
 
   sleep 3
   if systemctl is-active --quiet "$SERVICE_NAME"; then
@@ -270,9 +272,10 @@ chmod 600 "$STATE_FILE"
 
 # ── Step 2: Stop service ────────────────────────────────────────────────────
 
-log "Stopping service..."
+log "Stopping services..."
 systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-success "Service stopped"
+systemctl stop "${SERVICE_NAME}-ssh-ws" 2>/dev/null || true
+success "Services stopped"
 
 # ── Step 3: Pull latest code ────────────────────────────────────────────────
 
@@ -356,15 +359,53 @@ fi
 
 # ── Step 7: Start service ───────────────────────────────────────────────────
 
-log "Starting service..."
+log "Starting services..."
+# Ensure the SSH WebSocket service exists. Installs before this fix never created
+# it, so the web terminal was dead (nothing listening on the ws port the Apache
+# proxy points at). Create-or-refresh it here so upgrading self-heals those boxes.
+cat > "/etc/systemd/system/${SERVICE_NAME}-ssh-ws.service" <<EOF
+[Unit]
+Description=GPU Cloud Dashboard SSH WebSocket Server
+After=network.target ${SERVICE_NAME}.service
+Wants=${SERVICE_NAME}.service
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=$(which npx) tsx src/server/ssh-websocket.ts
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=10
+Environment=NODE_ENV=production
+EnvironmentFile=${INSTALL_DIR}/.env.local
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=${INSTALL_DIR}
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
+systemctl enable "${SERVICE_NAME}-ssh-ws" 2>/dev/null || true
 systemctl start "$SERVICE_NAME"
+systemctl start "${SERVICE_NAME}-ssh-ws"
 
 sleep 3
 if systemctl is-active --quiet "$SERVICE_NAME"; then
   success "Service is running"
 else
   warn "Service may not have started. Check: journalctl -u ${SERVICE_NAME} -f"
+fi
+if systemctl is-active --quiet "${SERVICE_NAME}-ssh-ws"; then
+  success "SSH terminal service is running"
+else
+  warn "SSH terminal service may not have started. Check: journalctl -u ${SERVICE_NAME}-ssh-ws -f"
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────

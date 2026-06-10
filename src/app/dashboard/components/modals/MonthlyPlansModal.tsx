@@ -1,6 +1,12 @@
 "use client";
 
 import React from "react";
+import {
+  groupMonthlyByCategory,
+  shouldShowCategoryStep,
+  findBucketBySlug,
+  type PlanCategory,
+} from "../monthly-plans";
 
 interface MonthlyProduct {
   id: string;
@@ -14,12 +20,15 @@ interface MonthlyProduct {
   badgeText: string | null;
   vramGb: number | null;
   cudaCores: number | null;
+  categories?: PlanCategory[];
 }
 
 interface MonthlyPlansModalProps {
   isOpen: boolean;
   onClose: () => void;
   customerEmail?: string;
+  /** Pre-select a GPU category by slug (deep-link ?gpu=<slug>&plan=monthly). */
+  initialCategorySlug?: string;
 }
 
 const HOURS_PER_MONTH = 730;
@@ -28,11 +37,20 @@ export function MonthlyPlansModal({
   isOpen,
   onClose,
   customerEmail,
+  initialCategorySlug,
 }: MonthlyPlansModalProps) {
   const [products, setProducts] = React.useState<MonthlyProduct[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [subscribingId, setSubscribingId] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [selectedBucketKey, setSelectedBucketKey] = React.useState<string | null>(null);
+
+  // Group plans by GPU type. Two+ buckets shows a GPU-Type step (mirrors the
+  // on-demand stepper); a single bucket (nothing tagged yet) stays a flat list.
+  const buckets = React.useMemo(() => groupMonthlyByCategory(products), [products]);
+  const showCategoryStep = shouldShowCategoryStep(buckets);
+  const selectedBucket = buckets.find((b) => b.key === selectedBucketKey) ?? null;
+  const visibleProducts = selectedBucket ? selectedBucket.products : showCategoryStep ? [] : products;
 
   React.useEffect(() => {
     if (!isOpen) return;
@@ -68,8 +86,26 @@ export function MonthlyPlansModal({
     if (!isOpen) {
       setError(null);
       setSubscribingId(null);
+      setSelectedBucketKey(null);
     }
   }, [isOpen]);
+
+  // Resolve which bucket to show once plans load: a deep-linked category wins;
+  // otherwise show the GPU-Type step (2+ buckets) or the single flat bucket.
+  React.useEffect(() => {
+    if (!buckets.length) {
+      setSelectedBucketKey(null);
+      return;
+    }
+    if (initialCategorySlug) {
+      const match = findBucketBySlug(buckets, initialCategorySlug);
+      if (match) {
+        setSelectedBucketKey(match.key);
+        return;
+      }
+    }
+    setSelectedBucketKey(shouldShowCategoryStep(buckets) ? null : buckets[0].key);
+  }, [buckets, initialCategorySlug]);
 
   const handleSubscribe = async (product: MonthlyProduct) => {
     if (!customerEmail) {
@@ -154,12 +190,42 @@ export function MonthlyPlansModal({
             <div className="text-center py-12">
               <p className="text-sm text-[var(--muted)]">No monthly plans are available right now.</p>
             </div>
+          ) : showCategoryStep && !selectedBucket ? (
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-[var(--muted)] mb-1 uppercase tracking-wide">
+                Select GPU Type
+              </label>
+              {buckets.map((bucket) => (
+                <button
+                  key={bucket.key}
+                  type="button"
+                  onClick={() => setSelectedBucketKey(bucket.key)}
+                  className="w-full text-left px-4 py-3 rounded-lg border-2 border-[var(--line)] hover:border-teal-400 hover:bg-teal-50/50 transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-[var(--ink)]">{bucket.name}</span>
+                    <span className="text-xs text-[var(--muted)]">
+                      {bucket.products.length} plan{bucket.products.length !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
           ) : (
             <div className="space-y-3">
+              {showCategoryStep && selectedBucket && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedBucketKey(null)}
+                  className="flex items-center gap-1 text-sm font-medium text-teal-600 hover:text-teal-700"
+                >
+                  <span aria-hidden>←</span> All GPU types
+                </button>
+              )}
               <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 leading-relaxed">
                 <span className="font-semibold">Dedicated GPU</span> is the whole card, yours alone. <span className="font-semibold">Dynamic GPU</span> is shared infrastructure that delivers the same peak performance and VRAM capacity.
               </div>
-              {products.map((product) => {
+              {visibleProducts.map((product) => {
                 const monthlyCents = product.pricePerMonthCents ?? 0;
                 const monthlyPrice = (monthlyCents / 100).toFixed(0);
                 const hasListHourly = product.pricePerHourCents > 0;

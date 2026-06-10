@@ -8,19 +8,20 @@ import {
   updateVoucher,
   deleteVoucher,
 } from "@/lib/voucher";
+import {
+  createVoucherSchema,
+  updateVoucherSchema,
+  firstZodError,
+} from "@/lib/voucher/validation";
 
-// Voucher credit/min-topup are MySQL INT columns
-const MAX_CENTS = 2_147_483_647;
-
-function validateCentsField(value: unknown, label: string): string | null {
-  if (value == null) return null;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    return `${label} must be a non-negative number`;
-  }
-  if (value > MAX_CENTS) {
-    return `${label} too large (max $${(MAX_CENTS / 100).toLocaleString()})`;
-  }
-  return null;
+function safeErrorMessage(error: unknown, fallback: string): string {
+  // Never leak raw Prisma error messages — they expose internal column/constraint names.
+  const prismaCode = (error as { code?: string } | null)?.code;
+  if (prismaCode === "P2002") return "A voucher with that code already exists";
+  if (prismaCode === "P2000") return "One of the fields is too long for the database";
+  if (prismaCode && /^P\d+$/.test(prismaCode)) return fallback;
+  if (error instanceof Error) return error.message;
+  return fallback;
 }
 
 // GET - Get all vouchers and stats
@@ -81,42 +82,21 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const {
-      code,
-      name,
-      description,
-      creditCents,
-      minTopupCents,
-      maxRedemptions,
-      maxPerCustomer,
-      startsAt,
-      expiresAt,
-      active,
-    } = body;
-
-    if (!code || !name || typeof creditCents !== "number") {
+    const parsed = createVoucherSchema.safeParse(body);
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Code, name, and creditCents are required" },
+        { error: firstZodError(parsed.error) },
         { status: 400 }
       );
     }
 
-    const creditErr = validateCentsField(creditCents, "Credit amount");
-    if (creditErr) return NextResponse.json({ error: creditErr }, { status: 400 });
-    const minTopupErr = validateCentsField(minTopupCents, "Min top-up");
-    if (minTopupErr) return NextResponse.json({ error: minTopupErr }, { status: 400 });
-
     const voucher = await createVoucher({
-      code,
-      name,
-      description,
-      creditCents,
-      minTopupCents,
-      maxRedemptions,
-      maxPerCustomer,
-      startsAt,
-      expiresAt,
-      active,
+      ...parsed.data,
+      description: parsed.data.description ?? undefined,
+      minTopupCents: parsed.data.minTopupCents ?? undefined,
+      maxRedemptions: parsed.data.maxRedemptions ?? undefined,
+      startsAt: parsed.data.startsAt ?? undefined,
+      expiresAt: parsed.data.expiresAt ?? undefined,
       createdBy: session.email,
     });
 
@@ -129,7 +109,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Failed to create voucher:", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to create voucher" },
+      { error: safeErrorMessage(error, "Failed to create voucher") },
       { status: 500 }
     );
   }
@@ -149,25 +129,24 @@ export async function PATCH(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { id, ...updates } = body;
+    const { id, ...rest } = body ?? {};
 
-    if (!id) {
+    if (!id || typeof id !== "string") {
       return NextResponse.json(
         { error: "Voucher ID is required" },
         { status: 400 }
       );
     }
 
-    if ("creditCents" in updates) {
-      const err = validateCentsField(updates.creditCents, "Credit amount");
-      if (err) return NextResponse.json({ error: err }, { status: 400 });
-    }
-    if ("minTopupCents" in updates) {
-      const err = validateCentsField(updates.minTopupCents, "Min top-up");
-      if (err) return NextResponse.json({ error: err }, { status: 400 });
+    const parsed = updateVoucherSchema.safeParse(rest);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: firstZodError(parsed.error) },
+        { status: 400 }
+      );
     }
 
-    const voucher = await updateVoucher(id, updates);
+    const voucher = await updateVoucher(id, parsed.data);
 
     console.log(`Admin ${session.email} updated voucher ${voucher.code}`);
 
@@ -178,7 +157,7 @@ export async function PATCH(request: NextRequest) {
   } catch (error) {
     console.error("Failed to update voucher:", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to update voucher" },
+      { error: safeErrorMessage(error, "Failed to update voucher") },
       { status: 500 }
     );
   }
@@ -215,7 +194,7 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     console.error("Failed to delete voucher:", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to delete voucher" },
+      { error: safeErrorMessage(error, "Failed to delete voucher") },
       { status: 500 }
     );
   }

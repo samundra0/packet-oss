@@ -7,10 +7,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
 import { getSharedVolumes, deleteSharedVolume, createSharedVolume } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
-import Stripe from "stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 // GET - List all shared volumes for the customer
 export async function GET(request: NextRequest) {
@@ -29,13 +29,22 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
+    // PA-175: resolve the OPERATING account so invited members (e.g. a
+    // Read-only Member viewing the owner's team) read the owner team's
+    // volumes, not their own non-existent ones. Membership in the operating
+    // team is verified here — that's also the only check needed for the
+    // GET, since every active role can read the Storage list per PA-202
+    // (Delete affordance is hidden client-side via storage.manage).
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
 
-    const teamId = customer.metadata?.hostedai_team_id;
+    const teamId = ctx.customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json(
         { error: "No team associated with this account" },
@@ -94,12 +103,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
     }
 
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(payload.customerId)) as Stripe.Customer;
-    const teamId = customer.metadata?.hostedai_team_id;
+    // PA-175: operate against the active team.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const teamId = ctx.customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });
     }
+
+    // PA-202 gate: storage.manage required to create volumes (RoM + FM denied).
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "storage.manage",
+      request,
+    });
+    if (denial) return denial;
 
     const body = await request.json();
     const { name, region_id, storage_block_id } = body;
@@ -156,13 +182,28 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
+    // PA-175: operate against the active team.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
 
-    const teamId = customer.metadata?.hostedai_team_id;
+    // PA-202 gate: storage.manage required to delete volumes (RoM + FM denied).
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "storage.manage",
+      request,
+      extra: { volume_id },
+    });
+    if (denial) return denial;
+
+    const teamId = ctx.customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json(
         { error: "No team associated with this account" },
@@ -194,10 +235,12 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Check for snapshots that reference this volume
+    // Check for snapshots that reference this volume (scoped to the
+    // operating account so a Team Admin deleting from someone else's team
+    // sees that team's snapshots, not their own).
     const affectedSnapshots = await prisma.podSnapshot.findMany({
       where: {
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: ctx.accountId,
         persistentVolumeId: volume_id,
       },
       select: {

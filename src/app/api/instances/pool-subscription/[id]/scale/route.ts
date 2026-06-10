@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { scalePoolSubscription, getPoolSubscriptions } from "@/lib/hostedai";
 import { logGPUScaled } from "@/lib/activity";
 import Stripe from "stripe";
@@ -29,12 +30,16 @@ export async function POST(
       );
     }
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
-
+    // PA-175: resolve operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const customer = ctx.customer;
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json(
@@ -44,6 +49,18 @@ export async function POST(
     }
 
     const { id: subscriptionId } = await params;
+
+    // PA-175 gate: scaling adds compute (provisioning).
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "gpu.provision",
+      request,
+      extra: { subscriptionId, action: "scale" },
+    });
+    if (denial) return denial;
+
     const body = await request.json();
     const { vgpus, pool_id } = body;
 
@@ -97,7 +114,7 @@ export async function POST(
     });
 
     // Log the activity
-    await logGPUScaled(payload.customerId, poolName, currentVgpus, vgpus);
+    await logGPUScaled(ctx.accountId, poolName, currentVgpus, vgpus);
 
     return NextResponse.json({
       success: true,

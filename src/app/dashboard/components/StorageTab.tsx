@@ -17,9 +17,13 @@ interface StorageVolume {
 
 interface StorageTabProps {
   token: string;
+  // PA-202: when false (Read-only Member / Finance Manager), the list is
+  // still rendered but action affordances (Delete) are hidden. Server-side
+  // gate on /api/instances/shared-volumes enforces the same denial.
+  canManage?: boolean;
 }
 
-export function StorageTab({ token }: StorageTabProps) {
+export function StorageTab({ token, canManage = true }: StorageTabProps) {
   const [volumes, setVolumes] = useState<StorageVolume[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -237,22 +241,24 @@ export function StorageTab({ token }: StorageTabProps) {
                   </div>
                 </div>
 
-                {/* Actions */}
-                <div className="flex items-center gap-2">
-                  {volume.status === "attached" ? (
-                    <span className="text-xs text-zinc-400">
-                      Detach from GPU to delete
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => openDeleteModal(volume)}
-                      disabled={deleting === volume.id || checkingSnapshots === volume.id}
-                      className="px-3 py-1.5 text-sm text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      {deleting === volume.id ? "Deleting..." : checkingSnapshots === volume.id ? "Checking..." : "Delete"}
-                    </button>
-                  )}
-                </div>
+                {/* Actions (hidden for read-only roles per PA-202) */}
+                {canManage && (
+                  <div className="flex items-center gap-2">
+                    {volume.status === "attached" ? (
+                      <span className="text-xs text-zinc-400">
+                        Detach from GPU to delete
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => openDeleteModal(volume)}
+                        disabled={deleting === volume.id || checkingSnapshots === volume.id}
+                        className="px-3 py-1.5 text-sm text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {deleting === volume.id ? "Deleting..." : checkingSnapshots === volume.id ? "Checking..." : "Delete"}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Warning for attached volumes */}
@@ -274,14 +280,16 @@ export function StorageTab({ token }: StorageTabProps) {
             <strong>Attached</strong> volumes are currently connected to a running GPU.
           </li>
           <li>
-            <strong>Available</strong> volumes can be attached to a new GPU or deleted.
+            <strong>Available</strong> volumes can be attached to a new GPU{canManage ? " or deleted" : ""}.
           </li>
           <li>
             Storage is billed hourly while the volume exists, even if not attached.
           </li>
-          <li>
-            Delete unused volumes to stop billing.
-          </li>
+          {canManage && (
+            <li>
+              Delete unused volumes to stop billing.
+            </li>
+          )}
         </ul>
       </div>
 

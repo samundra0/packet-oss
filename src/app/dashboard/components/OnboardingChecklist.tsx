@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { getBrandName } from "@/lib/branding";
+import { getBrandName } from "@/lib/branding-client";
 
 interface OnboardingStep {
   id: string;

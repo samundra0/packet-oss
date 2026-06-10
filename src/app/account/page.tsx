@@ -2,11 +2,10 @@
 
 import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import { BrandLogo } from "@/components/BrandLogo";
 import { captureUtm, getUtmData, clearUtmData } from "@/lib/utm";
 import { getSessionId } from "@/lib/tracker";
-import { getBrandName, getLogoUrl } from "@/lib/branding";
+import { getBrandName, getLogoUrl, getAppUrl } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
 
 // MAINTENANCE MODE — set to false when hosted.ai team creation is fixed
@@ -34,8 +33,22 @@ function AccountContent() {
   const urlEmail = searchParams.get("email") || "";
   const urlGpu = searchParams.get("gpu") || "";
   const urlPlan = searchParams.get("plan") || "";
+  // PA-175: when arriving from /invite/<token>, the invitation token rides
+  // along here so we can carry it through signup/signin → /dashboard. The
+  // dashboard surfaces an Accept modal when ?invite= is present.
+  const urlInviteToken = searchParams.get("invite") || "";
+  const urlNext = searchParams.get("next") || "";
   const hasGpuContext = !!urlGpu;
   const gpuName = GPU_NAMES[urlGpu] || (urlGpu ? urlGpu.replace(/-/g, " ").toUpperCase() : "");
+
+  // PA-266: where to land after login. An explicit ?next= wins; otherwise derive
+  // it from the GPU deep-link params so a "Deploy <GPU>" CTA survives the login
+  // round-trip. The server re-sanitizes this before signing it into the token.
+  const nextDest =
+    urlNext ||
+    (urlGpu
+      ? `/dashboard?gpu=${encodeURIComponent(urlGpu)}${urlPlan ? `&plan=${encodeURIComponent(urlPlan)}` : ""}`
+      : "");
 
   // Capture UTM if visitor lands directly on /account with utm params
   useEffect(() => { captureUtm(); }, []);
@@ -43,6 +56,24 @@ function AccountContent() {
   // Session-expired bounce: SessionGuard sends users here with ?reason=session_expired
   // when an authenticated dashboard fetch returns 401. Flip to signin and show a banner.
   const sessionExpired = searchParams.get("reason") === "session_expired";
+
+  // PA-266/267: logged-in fast path for deep-link CTAs. If the visitor already
+  // has a live session cookie and the URL carries deploy intent, skip the signup
+  // form and send them straight to the in-product stepper. Logged-out visitors
+  // (no cookie → /session 401s) stay on the form; bare /account is untouched.
+  useEffect(() => {
+    if (!nextDest || sessionExpired) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/account/session", { method: "POST" });
+        if (!cancelled && r.ok) router.replace(nextDest);
+      } catch {
+        /* not logged in / offline — stay on the form */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [nextDest, sessionExpired, router]);
 
   // Default to signup — this is a conversion page, not a login page.
   // If the user is returning after their session expired, start in signin mode.
@@ -74,6 +105,8 @@ function AccountContent() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email,
+          ...(urlInviteToken ? { inviteToken: urlInviteToken } : {}),
+          ...(nextDest ? { next: nextDest } : {}),
           ...(mode === "signup" && {
             termsAccepted,
             gpu: urlGpu || undefined,
@@ -124,7 +157,7 @@ function AccountContent() {
       {/* Minimal header — logo + one link, nothing more */}
       <header className="account-header">
         <div className="account-header-inner">
-          <Link href="/">
+          <a href={getAppUrl()}>
             <BrandLogo
               src={LOGO_URL}
               alt={getBrandName()}
@@ -132,12 +165,12 @@ function AccountContent() {
               height={40}
               style={{ height: "32px", width: "auto" }}
             />
-          </Link>
+          </a>
           <div className="account-header-nav">
             {process.env.NEXT_PUBLIC_EDITION !== "oss" && (
-              <Link href="/#pricing" className="account-header-link">
+              <a href={`${getAppUrl()}/#pricing`} className="account-header-link">
                 Pricing
-              </Link>
+              </a>
             )}
             {mode === "signup" && (
               <button
@@ -175,7 +208,7 @@ function AccountContent() {
                 ? "Create your free account to browse live inventory, compare pricing, and deploy when you\u2019re ready."
                 : IS_OSS
                   ? "Your GPU cloud platform. Deploy, manage, and scale."
-                  : "Browse GPU inventory, run AI inference with 10K free tokens, and deploy in under 5 minutes."}
+                  : "Browse GPU inventory, compare live pricing, and deploy a pod in under 5 minutes."}
             </p>
 
             {/* What you get — immediate value, no payment */}
@@ -186,7 +219,6 @@ function AccountContent() {
                 "SSH access in minutes",
               ] : [
                 "Full GPU inventory with live pricing",
-                "10,000 free Token Factory tokens",
                 hasGpuContext ? "Fund your wallet and deploy when ready" : "SSH access in under 5 minutes",
                 "No credit card required",
               ]).map((text) => (
@@ -374,8 +406,8 @@ function AccountContent() {
 
                 <h2 className="account-sent-title">Check your email</h2>
                 <p className="account-sent-text">
-                  We&apos;ve sent a sign-in link to{" "}
-                  <strong>{email}</strong>
+                  If an account exists for <strong>{email}</strong>, we&apos;ve
+                  sent a sign-in link to it.
                 </p>
 
                 <div className="account-sent-note">

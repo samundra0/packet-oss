@@ -4,7 +4,13 @@
 
 import crypto from "crypto";
 import { hostedaiRequest, getApiUrl } from "./client";
-import type { Team, CreateTeamParams, OTLResponse } from "./types";
+import type {
+  Team,
+  CreateTeamParams,
+  OTLResponse,
+  TeamMembersResponse,
+  TeamMemberRow,
+} from "./types";
 
 /**
  * Sanitize a name for hosted.ai API
@@ -55,6 +61,7 @@ export async function createTeam(params: CreateTeamParams): Promise<Team> {
   const postData = {
     color: params.color || "#6366F1", // Must be UPPERCASE hex
     description: params.description || "",
+    // Titan: flat top-level policy keys
     image_policy_id: params.image_policy_id,
     instance_type_policy_id: params.instance_type_policy_id,
     members: params.members.map((m) => ({
@@ -70,6 +77,19 @@ export async function createTeam(params: CreateTeamParams): Promise<Team> {
     pricing_policy_id: params.pricing_policy_id,
     resource_policy_id: params.resource_policy_id,
     service_policy_id: params.service_policy_id,
+    // Ariel: the same policy IDs nested under `general`, gated by
+    // has_general_policies. Ariel removed the flat top-level keys above and
+    // hard-rejects team creation unless one of has_general/baremetal_policies
+    // is set. Titan ignores these unknown fields (plain json.Decode), so this
+    // body is compatible with both backends — see HAI Ariel compat sweep.
+    has_general_policies: true,
+    general: {
+      resource_policy_id: params.resource_policy_id,
+      service_policy_id: params.service_policy_id,
+      pricing_policy_id: params.pricing_policy_id,
+      image_policy_id: params.image_policy_id,
+      instance_type_policy_id: params.instance_type_policy_id,
+    },
   };
 
   return hostedaiRequest<Team>("POST", "/team", postData);
@@ -186,6 +206,135 @@ export async function getTeam(teamId: string): Promise<Team> {
   return hostedaiRequest<Team>("GET", `/team/${teamId}`);
 }
 
+// List HAI team members. `search` narrows server-side (HAI matches against
+// email + name). Page size defaults to 200 to comfortably cover almost
+// all unsearched lists in a single request.
+export async function listTeamMembers(
+  teamId: string,
+  opts: { page?: number; itemsPerPage?: number; search?: string } = {},
+): Promise<TeamMembersResponse> {
+  const page = opts.page ?? 0;
+  const itemsPerPage = opts.itemsPerPage ?? 200;
+  const qs = new URLSearchParams({
+    page: String(page),
+    itemsPerPage: String(itemsPerPage),
+  });
+  if (opts.search) qs.set("search", opts.search);
+  return hostedaiRequest<TeamMembersResponse>(
+    "GET",
+    `/team/${teamId}/members?${qs.toString()}`,
+  );
+}
+
+// Find a team member by email (case-insensitive). Resolves the HAI
+// user_id we need for the role-change / status endpoints. Uses HAI's
+// server-side ?search= for cheap targeted lookup; we still filter results
+// client-side for an exact email match in case search is fuzzy.
+export async function findTeamMemberByEmail(
+  teamId: string,
+  email: string,
+): Promise<TeamMemberRow | null> {
+  const target = email.toLowerCase();
+  const res = await listTeamMembers(teamId, {
+    itemsPerPage: 50,
+    search: email,
+  });
+  // HAI returns null (or omits) `members` when the team has zero rows;
+  // normalize to [] so callers can iterate without a guard.
+  const members = Array.isArray(res?.members) ? res.members : [];
+  for (const m of members) {
+    if (m.user?.email?.toLowerCase() === target) return m;
+  }
+  return null;
+}
+
+// PA-175 — change a member's HAI role. Resolves the HAI user_id from
+// PA-175 — invite a user to a HAI team with a specific role. This is the
+// primitive HAI's own panel uses; it lands the user with the correct role
+// directly (unlike /create-otl, which always assigns team_admin regardless
+// of role_id). Resulting member status is "invited"; activation happens
+// either via a follow-up /create-otl or first user action on HAI.
+export async function inviteToTeam(params: {
+  teamId: string;
+  email: string;
+  roleId: string;
+}): Promise<void> {
+  // HAI expects an array of invites; cast via unknown because hostedaiRequest
+  // is typed for object bodies but the underlying fetch handles arrays.
+  const body = [{ email: params.email, role: params.roleId }] as unknown as Record<string, unknown>;
+  await hostedaiRequest("POST", `/team/${params.teamId}/invite`, body);
+}
+
+// email, then POSTs to /team/{teamId}/member/{user_id}/role. Throws if
+// the member can't be found (caller should treat that as out-of-sync state
+// between Packet and HAI and decide whether to roll back).
+export async function changeUserRole(params: {
+  teamId: string;
+  email: string;
+  roleId: string;
+}): Promise<{ success: boolean }> {
+  const member = await findTeamMemberByEmail(params.teamId, params.email);
+  if (!member) {
+    throw new Error(
+      `HAI member not found: email=${params.email} team=${params.teamId}`,
+    );
+  }
+  await hostedaiRequest(
+    "POST",
+    `/team/${params.teamId}/member/${member.user_id}/role`,
+    { role_id: params.roleId },
+  );
+  return { success: true };
+}
+
+// PA-175 — flip a member's status on a HAI team. The /status endpoint is
+// what HAI's own panel calls; "removed" deletes them, "active" promotes an
+// "invited" member to active. Resolves the HAI user_id via email search,
+// then POSTs /team/{teamId}/member/{user_id}/status.
+export async function setMemberStatus(params: {
+  teamId: string;
+  email: string;
+  status: "active" | "removed";
+}): Promise<{ success: boolean }> {
+  const member = await findTeamMemberByEmail(params.teamId, params.email);
+  if (!member) {
+    // Idempotent for removed; for active, treat as failure since we need
+    // to flip an existing row.
+    if (params.status === "removed") return { success: true };
+    throw new Error(
+      `HAI member not found for status change: email=${params.email} team=${params.teamId}`,
+    );
+  }
+  await hostedaiRequest(
+    "POST",
+    `/team/${params.teamId}/member/${member.user_id}/status`,
+    { status: params.status },
+  );
+  return { success: true };
+}
+
+// PA-175 — remove (status='removed') a member from a HAI team. Idempotent:
+// if the user isn't on the team in HAI, we treat as success rather than
+// erroring (Packet-side revoke is also idempotent).
+export async function removeUserFromTeam(params: {
+  teamId: string;
+  email: string;
+}): Promise<{ success: boolean }> {
+  const member = await findTeamMemberByEmail(params.teamId, params.email);
+  if (!member) {
+    console.warn(
+      `[HAI.removeUserFromTeam] ${params.email} not on team ${params.teamId} — treating as already removed.`,
+    );
+    return { success: true };
+  }
+  await hostedaiRequest(
+    "POST",
+    `/team/${params.teamId}/member/${member.user_id}/status`,
+    { status: "removed" },
+  );
+  return { success: true };
+}
+
 // Change team package (upgrade/downgrade)
 export async function changeTeamPackage(
   teamId: string,
@@ -197,5 +346,36 @@ export async function changeTeamPackage(
     image_policy_id: string;
   }
 ): Promise<void> {
-  await hostedaiRequest("PUT", `/team/${teamId}`, policies);
+  // Ariel's PUT /team/{id} (a) hard-requires a non-empty, regex-valid `name`
+  // and (b) reads policy IDs from a nested `general` object — it removed the
+  // flat top-level policy keys that Titan uses. Round-trip the current team
+  // name (read-modify-write) so the package change doesn't blank/rename the
+  // team, and send BOTH shapes: Titan reads the flat keys and ignores the
+  // nested ones, Ariel reads the nested ones and ignores the flat keys (both
+  // use plain json.Decode). Compatible with Titan today and Ariel post-upgrade.
+  let currentName: string | undefined;
+  try {
+    currentName = (await getTeam(teamId))?.name;
+  } catch (err) {
+    console.warn(
+      `[HAI.changeTeamPackage] could not read current name for team ${teamId} (Ariel requires it):`,
+      err,
+    );
+  }
+
+  const body = {
+    ...policies, // Titan: flat top-level policy keys
+    ...(currentName ? { name: currentName } : {}), // Ariel: required, round-tripped to avoid rename
+    has_general_policies: true, // Ariel: gate flag enabling the nested policy set
+    general: {
+      // Ariel: same policy IDs nested under `general`
+      pricing_policy_id: policies.pricing_policy_id,
+      resource_policy_id: policies.resource_policy_id,
+      service_policy_id: policies.service_policy_id,
+      instance_type_policy_id: policies.instance_type_policy_id,
+      image_policy_id: policies.image_policy_id,
+    },
+  };
+
+  await hostedaiRequest("PUT", `/team/${teamId}`, body);
 }

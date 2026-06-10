@@ -55,7 +55,10 @@ function marketingRedirects() {
 }
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["nodemailer"],
+  // @prisma/client is externalized (Prisma's recommendation) so it's required
+  // fresh from node_modules at runtime rather than bundled into .next — a bundled
+  // copy goes stale after `prisma generate`, breaking new models until a clean rebuild.
+  serverExternalPackages: ["nodemailer", "@prisma/client"],
   env: {
     NEXT_PUBLIC_APP_VERSION: getPackageVersion(),
   },

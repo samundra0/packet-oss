@@ -17,7 +17,6 @@ export function BillingDoc() {
           <li><a href="#monthly-subscription" className="text-blue-600 dark:text-blue-400 hover:underline">Monthly Subscription</a></li>
           <li><a href="#gpu-pricing" className="text-blue-600 dark:text-blue-400 hover:underline">GPU Pricing</a></li>
           <li><a href="#how-wallet-works" className="text-blue-600 dark:text-blue-400 hover:underline">How the Wallet Works</a></li>
-          <li><a href="#token-factory-pricing" className="text-blue-600 dark:text-blue-400 hover:underline">Token Factory Pricing</a></li>
           <li><a href="#storage-pricing" className="text-blue-600 dark:text-blue-400 hover:underline">Storage Pricing</a></li>
           <li><a href="#cost-management" className="text-blue-600 dark:text-blue-400 hover:underline">Cost Management Tips</a></li>
           <li><a href="#faq" className="text-blue-600 dark:text-blue-400 hover:underline">FAQ</a></li>
@@ -146,7 +145,7 @@ export function BillingDoc() {
       <h2 id="how-wallet-works">How the Wallet Works</h2>
       <p>
         Your wallet is a prepaid balance managed through Stripe. It powers all
-        hourly GPU usage, Token Factory API calls, and persistent storage charges.
+        hourly GPU usage and persistent storage charges.
       </p>
 
       <h3>Adding Funds</h3>
@@ -202,82 +201,6 @@ export function BillingDoc() {
         <li><strong>$5 remaining</strong> &mdash; add funds to avoid interruption</li>
         <li><strong>$0 balance</strong> &mdash; running instances may be paused</li>
       </ul>
-
-      {/* ── Token Factory Pricing ──────────────────────────────── */}
-
-      <h2 id="token-factory-pricing">Token Factory Pricing</h2>
-      <p>Token Factory offers pay-per-token pricing with discounts for batch processing:</p>
-
-      <h3>Real-Time Inference</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>Token Type</th>
-            <th>Price per 1M Tokens</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>Input Tokens</td>
-            <td>$0.03</td>
-          </tr>
-          <tr>
-            <td>Output Tokens</td>
-            <td>$0.06</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>Batch Processing (50% Discount)</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>Batch Type</th>
-            <th>Input per 1M</th>
-            <th>Output per 1M</th>
-            <th>Turnaround</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><strong>1-Hour Batch</strong></td>
-            <td>$0.02</td>
-            <td>$0.04</td>
-            <td>Results within 1 hour</td>
-          </tr>
-          <tr>
-            <td><strong>24-Hour Batch</strong></td>
-            <td>$0.015</td>
-            <td>$0.03</td>
-            <td>Results within 24 hours</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>Other Token Factory Services</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>Service</th>
-            <th>Price</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><strong>Embeddings</strong></td>
-            <td>$0.02 per 1M tokens</td>
-          </tr>
-          <tr>
-            <td><strong>LoRA Training</strong></td>
-            <td>$3.00 per 1K training tokens</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <p>
-        All Token Factory usage is deducted from your wallet. New accounts include
-        10,000 free tokens to get started.
-      </p>
 
       {/* ── Storage Pricing ────────────────────────────────────── */}
 
@@ -350,12 +273,6 @@ export function BillingDoc() {
       <p>
         If you&apos;ll run an RTX PRO 6000 for more than ~19 days in a month, the
         $299/mo subscription is cheaper than hourly.
-      </p>
-
-      <h3>4. Use Batch Processing for Token Factory</h3>
-      <p>
-        Batch API calls are <strong>50% cheaper</strong> than real-time. Use them
-        for data processing, evaluations, and bulk generation.
       </p>
 
       <div className="not-prose bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 my-6">

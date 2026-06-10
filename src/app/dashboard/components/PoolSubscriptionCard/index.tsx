@@ -24,11 +24,14 @@ export interface PoolSubscriptionCardProps {
   onSnapshotCreated?: () => void;
   gpuDashboardUrl?: string | null;
   compact?: boolean;
-  metadata?: { displayName: string | null; notes: string | null; startupScriptStatus?: string | null };
+  metadata?: { displayName: string | null; notes: string | null; startupScriptStatus?: string | null; deployStatus?: string | null; deployStatusReason?: string | null };
   hfDeployment?: HfDeploymentInfo;
   isMonthly?: boolean;
   monthlyPriceDisplay?: string;
   billingPortalUrl?: string;
+  // PA-202: per-action gates. Defaults to all-allowed when undefined so
+  // existing callers (admin tools, OSS) keep working unchanged.
+  can?: Record<string, boolean>;
 }
 
 export function PoolSubscriptionCard({
@@ -43,7 +46,16 @@ export function PoolSubscriptionCard({
   isMonthly = false,
   monthlyPriceDisplay,
   billingPortalUrl,
+  can,
 }: PoolSubscriptionCardProps) {
+  // Default allow-all when no can-map is provided so existing/non-RBAC
+  // callers (admin, OSS, tests) keep working without extra wiring.
+  const allow = (perm: string) => (can ? can[perm] === true : true);
+  const canSsh = allow("gpu.access");
+  const canTerminate = allow("gpu.terminate");
+  const canProvision = allow("gpu.provision");
+  const canStorage = allow("storage.manage");
+  const canSnapshot = allow("snapshots.manage");
   // Core state
   const [loading, setLoading] = useState<string | null>(null);
   const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
@@ -140,8 +152,16 @@ export function PoolSubscriptionCard({
     }
   }, [hfDeployment, subscription.id, token, pollingHfStatus, shouldPoll]);
 
-  // Fetch connection info (all instances are unified in HAI 2.2)
+  // Fetch connection info (all instances are unified in HAI 2.2). Skip
+  // entirely for roles without gpu.access (Finance Manager): the endpoint
+  // would 403, and worse, the missing connectionInfo would pin the card
+  // at "Connecting…" forever. Without SSH info the card falls back to
+  // the pod's own status from HAI, which is what FM should see anyway.
   useEffect(() => {
+    if (!canSsh) {
+      setLoadingConnection(false);
+      return;
+    }
     async function fetchConnectionInfo() {
       const s = subscription.status;
       if (s !== "subscribed" && s !== "active" && s !== "running") return;
@@ -161,7 +181,7 @@ export function PoolSubscriptionCard({
       }
     }
     fetchConnectionInfo();
-  }, [subscription.id, subscription.status, token]);
+  }, [subscription.id, subscription.status, token, canSsh]);
 
   // Fetch exposed services when card is expanded
   useEffect(() => {
@@ -402,6 +422,11 @@ export function PoolSubscriptionCard({
     if (loading === "restart") return { status: "restarting", label: "Fresh start..." };
     if (loading === "stop") return { status: "stopping", label: "Stopping..." };
     if (loading === "start") return { status: "starting", label: "Starting up..." };
+    // PA-158: our deploy reconciliation is the authoritative signal during
+    // launch. Show "Deploy failed — refunded" if the monitor or cron has
+    // already determined HAI never started the pod.
+    if (metadata?.deployStatus === "failed_refunded") return { status: "failed", label: "Deploy failed — refunded" };
+    if (metadata?.deployStatus === "provisioning") return { status: "starting", label: "Provisioning..." };
     if (isPending) return { status: "pending", label: getGpuStatusText(subscription.status, false) };
     if (isFailed) return { status: "failed", label: "Failed" };
     if (isStopped) return { status: "stopped", label: "Stopped" };
@@ -418,9 +443,11 @@ export function PoolSubscriptionCard({
     // even if the startup script had warnings or non-zero exit
     if (isActive && scriptStatus === "failed" && !hasSshAvailable) return { status: "setup-failed", label: "Setup failed" };
 
-    // Don't show green/running until connection info (SSH) is actually available
+    // Don't show green/running until connection info (SSH) is actually available.
+    // For viewers without gpu.access (Finance Manager) we never fetch SSH info,
+    // so trust the pod's own status from HAI directly.
     const hasSshInfo = connectionInfo?.pods?.some((p: any) => p.ssh_info);
-    if (isActive && (loadingConnection || (!hasSshInfo && !connectionInfo))) {
+    if (canSsh && isActive && (loadingConnection || (!hasSshInfo && !connectionInfo))) {
       return { status: "starting", label: "Connecting..." };
     }
 
@@ -581,37 +608,43 @@ export function PoolSubscriptionCard({
       {/* Quick Actions Bar - Always Visible */}
       {isActive && !isStopped && (
         <div className="px-4 py-2 border-t border-[var(--line)] bg-zinc-50/50 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={() => setShowTerminal(true)}
-            disabled={!!loading || !connectionInfo?.pods?.some((p: any) => p.ssh_info)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            Terminal
-          </button>
-          <button
-            onClick={handleStop}
-            disabled={!!loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-700 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Pause
-          </button>
-          <button
-            onClick={() => setShowRunScript(true)}
-            disabled={!!loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-zinc-100 text-zinc-700 text-xs font-medium rounded-lg border border-zinc-200 transition-colors disabled:opacity-50"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Script
-          </button>
+          {canSsh && (
+            <button
+              onClick={() => setShowTerminal(true)}
+              disabled={!!loading || !connectionInfo?.pods?.some((p: any) => p.ssh_info)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              Terminal
+            </button>
+          )}
+          {canTerminate && (
+            <button
+              onClick={handleStop}
+              disabled={!!loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-700 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Pause
+            </button>
+          )}
+          {canProvision && (
+            <button
+              onClick={() => setShowRunScript(true)}
+              disabled={!!loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-zinc-100 text-zinc-700 text-xs font-medium rounded-lg border border-zinc-200 transition-colors disabled:opacity-50"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Script
+            </button>
+          )}
           <div className="flex-1" />
           <button
             onClick={() => setExpanded(!expanded)}
@@ -645,16 +678,18 @@ export function PoolSubscriptionCard({
       {/* Failed State - Quick Restart Button */}
       {isFailed && !isStopped && (
         <div className="px-4 py-2 border-t border-[var(--line)] bg-rose-50/50 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={handleRestart}
-            disabled={!!loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            Restart Instance
-          </button>
+          {canTerminate && (
+            <button
+              onClick={handleRestart}
+              disabled={!!loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Restart Instance
+            </button>
+          )}
           <span className="text-xs text-rose-600">
             This instance has failed and needs a restart
           </span>
@@ -674,17 +709,19 @@ export function PoolSubscriptionCard({
       {/* Stopped State - Quick Start Button */}
       {isStopped && (
         <div className="px-4 py-2 border-t border-[var(--line)] bg-zinc-50/50 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={handleStart}
-            disabled={!!loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Start Instance
-          </button>
+          {canProvision && (
+            <button
+              onClick={handleStart}
+              disabled={!!loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Start Instance
+            </button>
+          )}
           <span className="text-xs text-zinc-500">
             Paused • ${((subscription.hourlyRate || 0) * stoppedInstanceRate / 100).toFixed(2)}/hr to reserve
           </span>
@@ -768,8 +805,11 @@ export function PoolSubscriptionCard({
             </div>
           )}
 
-          {/* Pod Info with SSH Credentials */}
-          {podsForSSH.length > 0 && (
+          {/* Pod Info with SSH Credentials — hidden for viewers without
+              gpu.access (Finance Manager). Read-only Member keeps it
+              because they can SSH; the connection-info fetch is skipped
+              for FM anyway so this would be an empty box otherwise. */}
+          {canSsh && podsForSSH.length > 0 && (
             <GPUCardSSHInfo
               pods={podsForSSH}
               subscriptionPods={subscription.pods}
@@ -778,8 +818,10 @@ export function PoolSubscriptionCard({
             />
           )}
 
-          {/* Exposed Services Section */}
-          {isActive && (
+          {/* Exposed Services Section — hidden for viewers without gpu.access.
+              Services are infra context tied to the running pod; FM has no
+              pod relationship. RoM keeps it (they SSH and may inspect). */}
+          {canSsh && isActive && (
             <GPUCardServices
               exposedServices={exposedServices}
               loadingServices={loadingServices}
@@ -787,6 +829,7 @@ export function PoolSubscriptionCard({
               subscriptionId={String(subscription.id)}
               podName={subscription.pods?.[0]?.pod_name}
               onServicesUpdated={setExposedServices}
+              canProvision={canProvision}
             />
           )}
 
@@ -806,47 +849,51 @@ export function PoolSubscriptionCard({
           )}
 
 
-          {/* Notes Section */}
-          <div className="px-4 py-3 border-t border-[var(--line)]">
-            <div className="flex items-start gap-2">
-              <span className="text-xs text-zinc-400 w-12 shrink-0 pt-1">Notes</span>
-              {editingNotes ? (
-                <div className="flex-1 space-y-2">
-                  <textarea
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    placeholder="Add notes about this GPU..."
-                    className="w-full text-sm text-zinc-700 bg-zinc-100 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-none"
-                    rows={3}
-                    autoFocus
-                  />
-                  <div className="flex gap-2">
-                    <button onClick={() => saveMetadata("notes", notes)} disabled={savingMetadata} className="px-3 py-1.5 text-xs font-medium bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white rounded-lg transition-colors disabled:opacity-50">
-                      {savingMetadata ? "Saving..." : "Save"}
-                    </button>
-                    <button onClick={() => { setEditingNotes(false); setNotes(metadata?.notes || ""); }} className="px-3 py-1.5 text-xs text-[var(--muted)] hover:text-zinc-700">
-                      Cancel
-                    </button>
+          {/* Notes Section — editable by anyone who can operate the pod.
+              Hidden for Read-only Member + Finance Manager (no
+              gpu.provision); notes are a management affordance. */}
+          {canProvision && (
+            <div className="px-4 py-3 border-t border-[var(--line)]">
+              <div className="flex items-start gap-2">
+                <span className="text-xs text-zinc-400 w-12 shrink-0 pt-1">Notes</span>
+                {editingNotes ? (
+                  <div className="flex-1 space-y-2">
+                    <textarea
+                      value={notes}
+                      onChange={(e) => setNotes(e.target.value)}
+                      placeholder="Add notes about this GPU..."
+                      className="w-full text-sm text-zinc-700 bg-zinc-100 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-none"
+                      rows={3}
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={() => saveMetadata("notes", notes)} disabled={savingMetadata} className="px-3 py-1.5 text-xs font-medium bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white rounded-lg transition-colors disabled:opacity-50">
+                        {savingMetadata ? "Saving..." : "Save"}
+                      </button>
+                      <button onClick={() => { setEditingNotes(false); setNotes(metadata?.notes || ""); }} className="px-3 py-1.5 text-xs text-[var(--muted)] hover:text-zinc-700">
+                        Cancel
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ) : (
-                <div onClick={() => setEditingNotes(true)} className="flex-1 text-sm text-[var(--muted)] hover:text-zinc-700 cursor-pointer py-1 px-2 -ml-2 rounded hover:bg-zinc-50 transition-colors">
-                  {notes || <span className="text-zinc-400 italic">Click to add notes...</span>}
-                </div>
-              )}
+                ) : (
+                  <div onClick={() => setEditingNotes(true)} className="flex-1 text-sm text-[var(--muted)] hover:text-zinc-700 cursor-pointer py-1 px-2 -ml-2 rounded hover:bg-zinc-50 transition-colors">
+                    {notes || <span className="text-zinc-400 italic">Click to add notes...</span>}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Action Links */}
           <div className="px-4 py-3 border-t border-[var(--line)] flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
             {/* Show Restart link when failed */}
-            {isFailed && !isStopped && (
+            {isFailed && !isStopped && canTerminate && (
               <button onClick={handleRestart} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
                 Restart
               </button>
             )}
             {/* Show Start link when stopped */}
-            {isStopped && (
+            {isStopped && canProvision && (
               <button onClick={handleStart} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
                 Start
               </button>
@@ -854,26 +901,38 @@ export function PoolSubscriptionCard({
             {/* Show these links when running */}
             {isActive && !isStopped && !isFailed && (
               <>
-                <button onClick={() => setShowAddStorageModal(true)} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
-                  Storage
-                </button>
-                <button onClick={handleStop} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
-                  Stop
-                </button>
-                <button onClick={handleRestart} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
-                  Restart
-                </button>
-                <button onClick={() => setShowRunScript(true)} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
-                  Script
-                </button>
-                <button onClick={() => setShowSaveSnapshotModal(true)} disabled={!!loading} className="text-teal-600 hover:text-teal-700 hover:underline disabled:opacity-50">
-                  Save
-                </button>
+                {canStorage && (
+                  <button onClick={() => setShowAddStorageModal(true)} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
+                    Storage
+                  </button>
+                )}
+                {canTerminate && (
+                  <button onClick={handleStop} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
+                    Stop
+                  </button>
+                )}
+                {canTerminate && (
+                  <button onClick={handleRestart} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
+                    Restart
+                  </button>
+                )}
+                {canProvision && (
+                  <button onClick={() => setShowRunScript(true)} disabled={!!loading} className="text-zinc-600 hover:text-zinc-900 hover:underline disabled:opacity-50">
+                    Script
+                  </button>
+                )}
+                {canSnapshot && (
+                  <button onClick={() => setShowSaveSnapshotModal(true)} disabled={!!loading} className="text-teal-600 hover:text-teal-700 hover:underline disabled:opacity-50">
+                    Save
+                  </button>
+                )}
               </>
             )}
-            <button onClick={handleUnsubscribe} disabled={!!loading} className="text-rose-500 hover:text-rose-600 hover:underline disabled:opacity-50">
-              Terminate
-            </button>
+            {canTerminate && (
+              <button onClick={handleUnsubscribe} disabled={!!loading} className="text-rose-500 hover:text-rose-600 hover:underline disabled:opacity-50">
+                Terminate
+              </button>
+            )}
           </div>
         </div>
       )}

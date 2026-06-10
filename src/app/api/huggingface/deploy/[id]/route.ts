@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import {
   getUnifiedInstances,
   deleteInstance,
@@ -63,6 +64,10 @@ export async function GET(
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
     const { payload, teamId } = auth;
+
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = requirePermission(auth, "huggingface.use", request);
+    if (denial) return denial;
 
     const { id } = await params;
 
@@ -368,6 +373,10 @@ export async function DELETE(
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
     const { payload, teamId } = auth;
+
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = requirePermission(auth, "huggingface.use", request);
+    if (denial) return denial;
 
     const { id } = await params;
 

@@ -40,6 +40,19 @@ const jobs: CronJob[] = [
     method: "POST",
     enabled: true,
   },
+  {
+    // PA-158: reconciliation safety net for orphaned "provisioning" PodMetadata
+    // rows. The POST /api/instances handler spawns a fire-and-forget monitor
+    // that handles the happy path; this catches deploys orphaned by a server
+    // restart and ensures the wallet pre-charge is refunded if HAI never
+    // started the pod. Belt-and-suspenders alongside the system crontab —
+    // ensures coverage in OSS and dev where the .deb cron isn't installed.
+    name: "check-pending-deploys",
+    path: "/api/cron/check-pending-deploys",
+    schedule: { type: "interval", ms: 150_000 }, // 2.5 min
+    method: "POST",
+    enabled: true,
+  },
 ];
 
 let started = false;

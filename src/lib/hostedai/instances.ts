@@ -159,6 +159,74 @@ export async function getUnifiedInstanceDetail(
   );
 }
 
+// Status classification for HAI 2.2 unified instances.
+// Matches existing usage in huggingface/deploy/[id] and huggingface/deploy-status routes.
+const RUNNING_STATUSES = new Set(["running", "active"]);
+const TERMINAL_FAIL_STATUSES = new Set([
+  "succeeded", "failed", "terminated", "error", "crashloopbackoff", "stopped",
+]);
+
+export type WaitResult =
+  | { ready: true; finalStatus: string }
+  | { ready: false; reason: string; finalStatus: string };
+
+export interface WaitForInstanceOptions {
+  maxMs?: number;
+  intervalMs?: number;
+  // Injectable for testing — defaults to getUnifiedInstanceDetail.
+  getDetail?: (id: string) => Promise<{ status?: string }>;
+  // Injectable for testing — defaults to setTimeout-based sleep.
+  sleep?: (ms: number) => Promise<void>;
+}
+
+// Poll HAI for an instance's status until it reaches running, terminal failure,
+// or the deadline. Used by deploy code to detect "createInstance returned an id
+// but the pod silently died" and trigger a wallet refund.
+//
+// 404 handling: HAI auto-deprovisions instances that fail to schedule or stay
+// pending for >10min. A single 404 *could* be a transient API blip (e.g. a
+// brief reschedule race), so we require two consecutive 404s ~30s apart
+// before declaring the instance deleted. Any non-404 response between two
+// 404s resets the counter.
+export async function waitForInstanceRunning(
+  instanceId: string,
+  opts: WaitForInstanceOptions = {}
+): Promise<WaitResult> {
+  const maxMs = opts.maxMs ?? 13 * 60 * 1000;
+  const intervalMs = opts.intervalMs ?? 30 * 1000;
+  const getDetail = opts.getDetail ?? getUnifiedInstanceDetail;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const deadline = Date.now() + maxMs;
+  let consecutive404s = 0;
+
+  while (Date.now() < deadline) {
+    try {
+      const detail = await getDetail(instanceId);
+      const status = (detail.status || "").toLowerCase();
+      consecutive404s = 0; // a successful response invalidates any prior 404 streak
+      if (RUNNING_STATUSES.has(status)) {
+        return { ready: true, finalStatus: status };
+      }
+      if (TERMINAL_FAIL_STATUSES.has(status)) {
+        return { ready: false, reason: `terminal status: ${status}`, finalStatus: status };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("(404)")) {
+        consecutive404s += 1;
+        if (consecutive404s >= 2) {
+          return { ready: false, reason: "instance deleted by HAI", finalStatus: "deleted" };
+        }
+        // first 404 — wait and re-check; might be a transient blip
+      }
+      // Transient errors (5xx, timeouts) — keep polling, leave 404 streak as-is
+      // so two non-consecutive 404s separated by a 5xx don't trigger deletion.
+    }
+    await sleep(intervalMs);
+  }
+  return { ready: false, reason: `poll timeout after ${Math.round(maxMs / 60000)}min`, finalStatus: "timeout" };
+}
+
 // Attach or detach shared volumes on a running pod
 export async function podVolumeAction(
   podName: string,

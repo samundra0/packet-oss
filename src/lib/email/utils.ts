@@ -5,7 +5,7 @@
 
 import type { EmailBranding } from './tenant-branding';
 import {
-  getBrandName, getAppUrl, getPrimaryColor, getAccentColor,
+  getBrandName, getDashboardUrl, getPrimaryColor, getAccentColor,
   getCompanyName, getCompanyAddress, getEmailFooterText,
 } from '../branding';
 
@@ -16,7 +16,7 @@ import {
 function getDefaultBrandName() { return getBrandName(); }
 function getDefaultPrimaryColor() { return getPrimaryColor(); }
 function getDefaultAccentColor() { return getAccentColor(); }
-function getDefaultDashboardUrl() { return getAppUrl(); }
+function getDefaultDashboardUrl() { return getDashboardUrl(); }
 
 /**
  * Escape HTML special characters to prevent injection

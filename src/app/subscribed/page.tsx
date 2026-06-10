@@ -4,7 +4,7 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getBrandName, getLogoUrl, getSupportEmail } from "@/lib/branding";
+import { getBrandName, getLogoUrl, getSupportEmail } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
 
 function SubscribedContent() {

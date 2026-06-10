@@ -30,7 +30,7 @@ export interface DashboardDataState {
   // Instances & Subscriptions
   instances: Instance[];
   poolSubscriptions: PoolSubscription[];
-  podMetadata: Record<string, { displayName: string | null; notes: string | null; hourlyRate?: number; startupScriptStatus?: string | null; stripeSubscriptionId?: string; billingType?: string }>;
+  podMetadata: Record<string, { displayName: string | null; notes: string | null; hourlyRate?: number; startupScriptStatus?: string | null; stripeSubscriptionId?: string; billingType?: string; deployStatus?: string | null; deployStatusReason?: string | null }>;
   hfDeployments: Record<string, HfDeploymentInfo>;
   instancesLoading: boolean;
 
@@ -76,8 +76,15 @@ export interface DashboardDataActions {
 
 export function useDashboardData(): DashboardDataState & DashboardDataActions & { ticketId: string | null } {
   const searchParams = useSearchParams();
-  const token = searchParams.get("token");
+  const urlToken = searchParams.get("token");
   const ticketId = searchParams.get("ticket"); // Deep link to specific support ticket
+
+  // PA-267: a returning user has no one-time URL token; we bootstrap a short-lived
+  // access token from the persistent session cookie via /api/account/session.
+  // urlTokenDead lets a stale ?token= fall back to the cookie instead of erroring.
+  const [cookieToken, setCookieToken] = useState<string | null>(null);
+  const [urlTokenDead, setUrlTokenDead] = useState(false);
+  const token = (urlTokenDead ? null : urlToken) || cookieToken;
 
   // UI personalization state
   const [greeting, setGreeting] = useState("Welcome back");
@@ -93,7 +100,7 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
   // Instances & subscriptions
   const [instances, setInstances] = useState<Instance[]>([]);
   const [poolSubscriptions, setPoolSubscriptions] = useState<PoolSubscription[]>([]);
-  const [podMetadata, setPodMetadata] = useState<Record<string, { displayName: string | null; notes: string | null; hourlyRate?: number; startupScriptStatus?: string | null; stripeSubscriptionId?: string; billingType?: string }>>({});
+  const [podMetadata, setPodMetadata] = useState<Record<string, { displayName: string | null; notes: string | null; hourlyRate?: number; startupScriptStatus?: string | null; stripeSubscriptionId?: string; billingType?: string; deployStatus?: string | null; deployStatusReason?: string | null }>>({});
   const [hfDeployments, setHfDeployments] = useState<Record<string, HfDeploymentInfo>>({});
   const [instancesLoading, setInstancesLoading] = useState(false);
 
@@ -192,13 +199,53 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
 
   // Initial data fetch
   useEffect(() => {
-    if (!token) {
-      setError("No access token provided");
-      setLoading(false);
-      return;
+    let cancelled = false;
+
+    // { token } = refreshed; { dead:true } = genuinely no/expired session (sign in);
+    // { dead:false } = transient 5xx/network — do NOT log the user out over a blip.
+    async function refreshFromCookie(): Promise<{ token: string } | { dead: boolean }> {
+      try {
+        const r = await fetch("/api/account/session", { method: "POST" });
+        if (r.ok) {
+          const j = await r.json();
+          if (typeof j?.token === "string") return { token: j.token };
+          return { dead: true };
+        }
+        return { dead: r.status === 401 };
+      } catch {
+        return { dead: false }; // network blip — transient
+      }
     }
 
-    async function fetchAccountData() {
+    function signInRedirect() {
+      if (typeof window !== "undefined") {
+        window.location.href = "/account?reason=session_expired";
+        return true;
+      }
+      return false;
+    }
+
+    async function bootstrap() {
+      // No usable token (return visit / stripped URL) → try the session cookie.
+      if (!token) {
+        const res = await refreshFromCookie();
+        if (cancelled) return;
+        if ("token" in res) {
+          setCookieToken(res.token); // re-runs this effect with a token; keep loading
+          return;
+        }
+        if (res.dead) {
+          // No URL token and no live session cookie → send them to sign in.
+          if (signInRedirect()) return;
+          setError("No access token provided");
+        } else {
+          // Transient backend issue — keep the (still-valid) session, let them retry.
+          setError("Couldn't reach the server. Please refresh to try again.");
+        }
+        setLoading(false);
+        return;
+      }
+
       try {
         const response = await fetch("/api/account/verify", {
           method: "POST",
@@ -206,8 +253,31 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
           body: JSON.stringify({ token }),
         });
         const result = await response.json();
+        if (cancelled) return;
+
         if (!response.ok) {
+          // A stale one-time URL token can still fall back to the cookie session.
+          if (response.status === 401 && !urlTokenDead && urlToken && token === urlToken) {
+            const res = await refreshFromCookie();
+            if (cancelled) return;
+            if ("token" in res) {
+              setCookieToken(res.token);
+              setUrlTokenDead(true); // stop the dead URL token from winning; keep loading
+              return;
+            }
+            // Cookie genuinely dead → sign in; transient → keep them, let them retry.
+            if (res.dead) {
+              if (signInRedirect()) return;
+            } else {
+              setError("Couldn't reach the server. Please refresh to try again.");
+              setLoading(false);
+              return;
+            }
+          }
+          // Token rejected and no live session cookie to fall back to → sign in.
+          if (response.status === 401 && signInRedirect()) return;
           setError(result.error || "Failed to load account");
+          setLoading(false);
           return;
         }
 
@@ -226,24 +296,45 @@ export function useDashboardData(): DashboardDataState & DashboardDataActions & 
           setTosConsentRequired(true);
         }
 
+        // PA-267: strip any one-time ?token= from the URL after a successful load
+        // (magic-link, billing-portal return, or stale-token fallback) so the JWT
+        // never lingers in history/referrer — not only when a new session was just
+        // persisted. Promote the live token into state FIRST so removing the param
+        // (which useSearchParams reacts to) can't momentarily null out `token` and
+        // fire a burst of spurious 401s. A token already marked dead isn't promoted.
+        if (typeof window !== "undefined" && urlToken) {
+          if (!urlTokenDead && token) setCookieToken(token);
+          const u = new URL(window.location.href);
+          if (u.searchParams.has("token")) {
+            u.searchParams.delete("token");
+            window.history.replaceState({}, "", u.pathname + (u.search || ""));
+          }
+        }
+
         setData(result);
-      } catch {
-        setError("Failed to load account data");
-      } finally {
         setLoading(false);
+      } catch {
+        if (!cancelled) {
+          setError("Failed to load account data");
+          setLoading(false);
+        }
       }
     }
 
-    fetchAccountData();
+    bootstrap();
 
-    // Only fetch additional data if 2FA is not required or already verified
-    if (!twoFactorRequired || twoFactorVerified) {
+    // Only fetch additional data if we have a token and 2FA is satisfied.
+    if (token && (!twoFactorRequired || twoFactorVerified)) {
       fetchInstances();
       fetchActivityEvents();
       fetchBillingStats();
       fetchSnapshots();
     }
-  }, [token, fetchInstances, fetchActivityEvents, fetchBillingStats, fetchSnapshots, twoFactorRequired, twoFactorVerified]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, urlToken, urlTokenDead, fetchInstances, fetchActivityEvents, fetchBillingStats, fetchSnapshots, twoFactorRequired, twoFactorVerified]);
 
   // Polling interval for live updates
   useEffect(() => {

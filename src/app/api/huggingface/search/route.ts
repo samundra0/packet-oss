@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   searchModels,
   searchSpaces,
@@ -47,6 +49,26 @@ export async function GET(request: NextRequest) {
         { status: 401 }
       );
     }
+
+    // PA-175: gate against operating account so invited Team Members
+    // (no membership row on their OWN customer) pass through correctly.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "huggingface.use",
+      request,
+    });
+    if (denial) return denial;
 
     const { searchParams } = new URL(request.url);
     const query = searchParams.get("q");

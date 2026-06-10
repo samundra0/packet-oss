@@ -3,10 +3,11 @@
 import React from "react";
 import Link from "next/link";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getLogoUrl } from "@/lib/branding";
+import { getLogoUrl } from "@/lib/branding-client";
 
 interface MobileHeaderProps {
-  balance: string;
+  /** Wallet balance pill. Omitted (undefined) for users without billing.view (PA-271). */
+  balance?: string;
   userName: string;
   onMenuOpen: () => void;
   onTopUp: () => void;
@@ -37,15 +38,19 @@ export function MobileHeader({ balance, onMenuOpen, onTopUp, logoUrl }: MobileHe
           />
         </Link>
 
-        <button
-          onClick={onTopUp}
-          className="flex items-center gap-1.5 px-3 py-2 bg-zinc-900 text-white rounded-xl text-sm font-semibold"
-        >
-          <span>{balance}</span>
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-        </button>
+        {balance !== undefined ? (
+          <button
+            onClick={onTopUp}
+            className="flex items-center gap-1.5 px-3 py-2 bg-zinc-900 text-white rounded-xl text-sm font-semibold"
+          >
+            <span>{balance}</span>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+          </button>
+        ) : (
+          <div className="w-10" />
+        )}
       </div>
     </header>
   );
@@ -62,11 +67,6 @@ export function MobileNav({ activeTab, onTabChange, hasUnreadSupport }: MobileNa
     { id: "dashboard", label: "Home", icon: (
       <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-      </svg>
-    )},
-    { id: "tokenfactory", label: "Tokens", icon: (
-      <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
       </svg>
     )},
     { id: "billing", label: "Billing", icon: (
@@ -121,6 +121,8 @@ interface MobileMenuSheetProps {
   userName: string;
   userEmail: string;
   isOwner: boolean;
+  /** PA-175 PR 3: permission map for per-role nav hiding. Falls back to isOwner=true gating when missing (back-compat). */
+  can?: Partial<Record<string, boolean>>;
   bareMetalEnabled?: boolean;
   onTabChange: (tab: string) => void;
   onLogout: () => void;
@@ -134,12 +136,17 @@ export function MobileMenuSheet({
   userName,
   userEmail,
   isOwner,
+  can,
   bareMetalEnabled,
   onTabChange,
   onLogout,
   onBillingPortal,
   billingPortalLoading,
 }: MobileMenuSheetProps) {
+  // Helper: if `can` map is present, use it; otherwise treat any "Owner" (legacy
+  // email-match) as having every permission. This back-compat path goes away
+  // once all clients upgrade past PR 3 UI rollout.
+  const check = (perm: string): boolean => (can ? !!can[perm] : isOwner);
   if (!isOpen) return null;
 
   const handleTabClick = (tab: string) => {
@@ -181,26 +188,32 @@ export function MobileMenuSheet({
           <div className="space-y-1">
             <p className="text-xs font-medium text-zinc-400 uppercase tracking-wider px-3 mb-2">Compute</p>
 
-            <button onClick={() => handleTabClick("huggingface")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
-              <span className="text-xl">🤗</span>
-              <span className="font-medium text-[var(--ink)]">Hugging Face</span>
-            </button>
+            {check("huggingface.use") && (
+              <button onClick={() => handleTabClick("huggingface")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
+                <span className="text-xl">🤗</span>
+                <span className="font-medium text-[var(--ink)]">Hugging Face</span>
+              </button>
+            )}
 
-            <button onClick={() => handleTabClick("apps")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
-              <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-              </svg>
-              <span className="font-medium text-[var(--ink)]">Apps</span>
-            </button>
+            {check("apps.use") && (
+              <button onClick={() => handleTabClick("apps")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
+                <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                </svg>
+                <span className="font-medium text-[var(--ink)]">Apps</span>
+              </button>
+            )}
 
-            <button onClick={() => handleTabClick("storage")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
-              <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-              </svg>
-              <span className="font-medium text-[var(--ink)]">Storage</span>
-            </button>
+            {check("gpu.access") && (
+              <button onClick={() => handleTabClick("storage")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
+                <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                </svg>
+                <span className="font-medium text-[var(--ink)]">Storage</span>
+              </button>
+            )}
 
-            {bareMetalEnabled && (
+            {bareMetalEnabled && check("gpu.provision") && (
               <button onClick={() => handleTabClick("baremetal")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
                 <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
@@ -209,24 +222,25 @@ export function MobileMenuSheet({
               </button>
             )}
 
-            <button onClick={() => handleTabClick("metrics")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
-              <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-              </svg>
-              <span className="font-medium text-[var(--ink)]">Metrics</span>
-            </button>
+            {check("gpu.access") && (
+              <button onClick={() => handleTabClick("metrics")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
+                <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                <span className="font-medium text-[var(--ink)]">Metrics</span>
+              </button>
+            )}
 
             <div className="my-4 border-t border-[var(--line)]" />
             <p className="text-xs font-medium text-zinc-400 uppercase tracking-wider px-3 mb-2">Account</p>
 
-            {isOwner && (
-              <button onClick={() => handleTabClick("team")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
-                <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                </svg>
-                <span className="font-medium text-[var(--ink)]">Team</span>
-              </button>
-            )}
+            {/* Team tab visible to all members per PA-202 (members list is default-read). */}
+            <button onClick={() => handleTabClick("team")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-zinc-50 transition-colors">
+              <svg className="w-5 h-5 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+              <span className="font-medium text-[var(--ink)]">Team</span>
+            </button>
 
             <div className="my-4 border-t border-[var(--line)]" />
             <p className="text-xs font-medium text-zinc-400 uppercase tracking-wider px-3 mb-2">Help</p>
@@ -257,6 +271,8 @@ export function MobileMenuSheet({
 
             <div className="my-4 border-t border-[var(--line)]" />
 
+            {/* PA-271: Stripe Portal is billing-only — mirror the desktop gate */}
+            {check("billing.view") && (
             <button
               onClick={onBillingPortal}
               disabled={billingPortalLoading}
@@ -271,6 +287,7 @@ export function MobileMenuSheet({
               )}
               <span className="font-medium text-[var(--ink)]">Stripe Portal</span>
             </button>
+            )}
 
             <button onClick={onLogout} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-rose-50 transition-colors text-rose-600">
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

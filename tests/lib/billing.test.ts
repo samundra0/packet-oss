@@ -388,18 +388,19 @@ describe('Billing Module', () => {
   describe('getTeamUsageSinceLast', () => {
     it('should calculate usage from active subscriptions', async () => {
       const { getPoolSubscriptions } = await import('@/lib/hostedai/pools');
+      // Only pods with pod_status "running" are billed now.
       const mockSubscriptions = [
         {
           id: 'sub-1',
           status: 'subscribed',
           per_pod_info: { vgpu_count: 2 },
-          pods: [{ id: 'pod-1' }],
+          pods: [{ id: 'pod-1', pod_status: 'running' }],
         },
         {
           id: 'sub-2',
           status: 'active',
           per_pod_info: { vgpu_count: 1 },
-          pods: [{ id: 'pod-2' }],
+          pods: [{ id: 'pod-2', pod_status: 'running' }],
         },
       ];
 
@@ -409,8 +410,8 @@ describe('Billing Module', () => {
 
       // 3 total GPUs (2 + 1) * 0.5 hours (30 min) = 1.5 GPU-hours
       expect(result.hoursUsed).toBe(1.5);
-      // 1.5 GPU-hours * $2/hour = $3.00
-      expect(result.totalCost).toBe(3.0);
+      // Cost is now computed downstream (sync endpoint) using per-product rates.
+      expect(result.totalCost).toBe(0);
     });
 
     it('should ignore non-active subscriptions', async () => {
@@ -420,13 +421,13 @@ describe('Billing Module', () => {
           id: 'sub-1',
           status: 'subscribed',
           per_pod_info: { vgpu_count: 2 },
-          pods: [{ id: 'pod-1' }],
+          pods: [{ id: 'pod-1', pod_status: 'running' }],
         },
         {
           id: 'sub-2',
           status: 'terminated',
           per_pod_info: { vgpu_count: 1 },
-          pods: [{ id: 'pod-2' }],
+          pods: [{ id: 'pod-2', pod_status: 'running' }],
         },
       ];
 
@@ -436,10 +437,10 @@ describe('Billing Module', () => {
 
       // Only 2 GPUs (first subscription) * 1 hour = 2 GPU-hours
       expect(result.hoursUsed).toBe(2);
-      expect(result.totalCost).toBe(4.0); // 2 * $2
+      expect(result.totalCost).toBe(0); // Cost computed downstream
     });
 
-    it('should handle default vgpu_count and pod count', async () => {
+    it('should not bill a subscription with no pods array', async () => {
       const { getPoolSubscriptions } = await import('@/lib/hostedai/pools');
       const mockSubscriptions = [
         {
@@ -452,9 +453,9 @@ describe('Billing Module', () => {
 
       const result = await getTeamUsageSinceLast('team-123', 60);
 
-      // 1 GPU (default) * 1 hour = 1 GPU-hour
-      expect(result.hoursUsed).toBe(1);
-      expect(result.totalCost).toBe(2.0);
+      // A subscription with no pods array (still initializing) is not billed.
+      expect(result.hoursUsed).toBe(0);
+      expect(result.totalCost).toBe(0);
     });
 
     it('should calculate different time intervals correctly', async () => {
@@ -464,7 +465,7 @@ describe('Billing Module', () => {
           id: 'sub-1',
           status: 'subscribed',
           per_pod_info: { vgpu_count: 4 },
-          pods: [{ id: 'pod-1' }],
+          pods: [{ id: 'pod-1', pod_status: 'running' }],
         },
       ];
 
@@ -473,12 +474,12 @@ describe('Billing Module', () => {
       // 15 minutes = 0.25 hours
       let result = await getTeamUsageSinceLast('team-123', 15);
       expect(result.hoursUsed).toBe(1.0); // 4 GPUs * 0.25 hours
-      expect(result.totalCost).toBe(2.0); // 1 GPU-hour * $2
+      expect(result.totalCost).toBe(0); // Cost computed downstream
 
       // 120 minutes = 2 hours
       result = await getTeamUsageSinceLast('team-123', 120);
       expect(result.hoursUsed).toBe(8.0); // 4 GPUs * 2 hours
-      expect(result.totalCost).toBe(16.0); // 8 GPU-hours * $2
+      expect(result.totalCost).toBe(0); // Cost computed downstream
     });
 
     it('should handle multiple pods per subscription', async () => {
@@ -488,7 +489,11 @@ describe('Billing Module', () => {
           id: 'sub-1',
           status: 'subscribed',
           per_pod_info: { vgpu_count: 2 },
-          pods: [{ id: 'pod-1' }, { id: 'pod-2' }, { id: 'pod-3' }],
+          pods: [
+            { id: 'pod-1', pod_status: 'running' },
+            { id: 'pod-2', pod_status: 'running' },
+            { id: 'pod-3', pod_status: 'running' },
+          ],
         },
       ];
 
@@ -498,7 +503,7 @@ describe('Billing Module', () => {
 
       // 2 vGPUs per pod * 3 pods = 6 GPUs * 1 hour = 6 GPU-hours
       expect(result.hoursUsed).toBe(6);
-      expect(result.totalCost).toBe(12.0);
+      expect(result.totalCost).toBe(0); // Cost computed downstream
     });
 
     it('should handle empty subscriptions', async () => {
@@ -518,7 +523,7 @@ describe('Billing Module', () => {
           id: 'sub-1',
           status: 'subscribed',
           per_pod_info: { vgpu_count: 2 },
-          pods: [{ id: 'pod-1' }],
+          pods: [{ id: 'pod-1', pod_status: 'running' }],
         },
       ];
 
@@ -528,7 +533,7 @@ describe('Billing Module', () => {
 
       // 2 GPUs * 0.5 hours (30 min default) = 1 GPU-hour
       expect(result.hoursUsed).toBe(1);
-      expect(result.totalCost).toBe(2.0);
+      expect(result.totalCost).toBe(0); // Cost computed downstream
     });
   });
 

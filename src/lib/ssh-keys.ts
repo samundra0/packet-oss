@@ -71,8 +71,10 @@ export async function addSSHKey(params: {
   stripeCustomerId: string;
   name: string;
   publicKey: string;
+  /** PA-175 PR 2.5: attribute the key to a User so it can be removed when that member is removed from the team. Null = legacy / account-shared. */
+  userId?: string | null;
 }): Promise<SSHKey> {
-  const { stripeCustomerId, name, publicKey } = params;
+  const { stripeCustomerId, name, publicKey, userId } = params;
 
   // Validate the key
   const validation = validatePublicKey(publicKey);
@@ -94,6 +96,7 @@ export async function addSSHKey(params: {
   return prisma.sSHKey.create({
     data: {
       stripeCustomerId,
+      userId: userId ?? null,
       name: name.trim(),
       publicKey: publicKey.trim(),
       fingerprint,

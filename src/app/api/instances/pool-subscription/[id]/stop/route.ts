@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import { prisma } from "@/lib/prisma";
 import {
   stopInstance,
@@ -22,6 +23,10 @@ export async function POST(
     }
 
     const { id } = await params;
+
+    // PA-175 gate: stopping a shared instance is an authoritative state change.
+    const denial = requirePermission(auth, "gpu.terminate", request, { instanceId: id, action: "stop" });
+    if (denial) return denial;
     console.log("[HAI 2.2] Stopping instance:", id);
 
     // Verify ownership via unified instances

@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getLogoUrl } from "@/lib/branding";
+import { getLogoUrl } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
 
 type LoginMode = "loading" | "magic-link" | "password" | "setup";

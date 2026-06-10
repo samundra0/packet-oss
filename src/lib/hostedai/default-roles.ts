@@ -7,10 +7,14 @@
 
 import { hostedaiRequest } from "./client";
 
-// Hardcoded fallback values (from staging instance)
+// Hardcoded fallback values (from staging — synced 2026-05-19 with PA-175
+// expanded role set). The cache is preferred; these only fire if the
+// /roles fetch genuinely fails.
 export const FALLBACK_ROLES = {
-  teamAdmin: "1cd64174-ff8c-4054-97ad-a799fe1740ab",
-  teamMember: "43c25fe2-e9c1-47fb-b2d5-8b23ca1facbd",
+  teamAdmin: "fef31d8e-4fff-43a0-9d71-2a079b014fe6",
+  teamMember: "2b27789a-4248-4ec9-9648-c0f74b36d1cf",
+  readOnlyMember: "b3492eab-a80a-4336-8e78-b46aa5720247",
+  financeManager: "bc1e8961-9cd9-43a0-9d22-0bca8846652b",
 };
 
 interface RoleEntry {
@@ -19,9 +23,11 @@ interface RoleEntry {
   label: string;
 }
 
-interface Roles {
+export interface Roles {
   teamAdmin: string;
   teamMember: string;
+  readOnlyMember: string;
+  financeManager: string;
 }
 
 // In-memory cache
@@ -39,6 +45,8 @@ function mapRoleName(name: string): keyof Roles | null {
   const nameMap: Record<string, keyof Roles> = {
     "team_admin": "teamAdmin",
     "team_member": "teamMember",
+    "read_only_member": "readOnlyMember",
+    "finance_manager": "financeManager",
   };
   return nameMap[name] || null;
 }
@@ -73,7 +81,12 @@ async function fetchRolesFromAPI(): Promise<Roles | null> {
     }
 
     // Validate we got all required roles
-    const requiredKeys: (keyof Roles)[] = ["teamAdmin", "teamMember"];
+    const requiredKeys: (keyof Roles)[] = [
+      "teamAdmin",
+      "teamMember",
+      "readOnlyMember",
+      "financeManager",
+    ];
     const missingKeys = requiredKeys.filter(key => !roles[key]);
 
     if (missingKeys.length > 0) {

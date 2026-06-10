@@ -60,12 +60,15 @@ export async function deleteExposedService(
   );
 }
 
-// View all exposed services for an instance
+// View all exposed services for an instance.
+// PA-227: HAI can respond with a null body for instances with no exposed
+// services. Coerce to [] here so callers can safely .map over the result.
 export async function getExposedServices(
   instanceId: string
 ): Promise<ExposedServiceInfo[]> {
-  return hostedaiRequest<ExposedServiceInfo[]>(
+  const result = await hostedaiRequest<ExposedServiceInfo[] | null>(
     "GET",
     `/instances/unified/${instanceId}/exposed-services`
   );
+  return result ?? [];
 }

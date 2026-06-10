@@ -11,9 +11,14 @@ interface NavItemProps {
   onClick?: () => void;
   showBadge?: boolean;
   badge?: string;
+  badgeVariant?: "alpha" | "soon";
 }
 
-export function NavItem({ icon, label, active, onClick, showBadge, badge }: NavItemProps) {
+export function NavItem({ icon, label, active, onClick, showBadge, badge, badgeVariant = "alpha" }: NavItemProps) {
+  const badgeClasses =
+    badgeVariant === "soon"
+      ? "bg-slate-100 text-slate-600"
+      : "bg-amber-100 text-amber-700";
   return (
     <button
       onClick={onClick}
@@ -26,7 +31,7 @@ export function NavItem({ icon, label, active, onClick, showBadge, badge }: NavI
       {icon}
       <span className="text-sm">{label}</span>
       {badge && (
-        <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-700 rounded">
+        <span className={`ml-1 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded ${badgeClasses}`}>
           {badge}
         </span>
       )}

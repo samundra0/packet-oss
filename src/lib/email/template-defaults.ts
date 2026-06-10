@@ -89,11 +89,11 @@ ${plainTextFooter()}`,
       ${emailButton("Open Dashboard", "{{accountUrl}}")}
       ${emailText("From your dashboard you can:")}
       <ul style="font-size: 15px; line-height: 1.8; color: #0b0f1c; padding-left: 20px; margin: 0 0 16px 0;">
-        <li>Use Token Factory for LLM inference</li>
-        <li>Create and manage your API keys</li>
-        <li>Run batch processing jobs</li>
+        <li>Browse live GPU inventory and pricing</li>
+        <li>Deploy a dedicated pod when you're ready</li>
+        <li>Manage your wallet and billing</li>
       </ul>
-      ${emailMuted("Need dedicated GPU instances? Add funds from the Billing tab in your dashboard.")}
+      ${emailMuted("Need to top up your wallet? Add funds from the Billing tab in your dashboard.")}
       ${emailMuted('This link expires in 1 hour. Request a new one at <a href="{{dashboardUrl}}/account" style="color: #1a4fff;">{{dashboardUrl}}/account</a>')}
       ${emailMuted("Did not request this? You can safely ignore this email.")}
       ${emailSignoff()}
@@ -106,11 +106,11 @@ Here is your login link for {{brandName}}:
 Open Dashboard: {{accountUrl}}
 
 From your dashboard you can:
-- Use Token Factory for LLM inference
-- Create and manage your API keys
-- Run batch processing jobs
+- Browse live GPU inventory and pricing
+- Deploy a dedicated pod when you're ready
+- Manage your wallet and billing
 
-Need dedicated GPU instances? Add funds from the Billing tab in your dashboard.
+Need to top up your wallet? Add funds from the Billing tab in your dashboard.
 
 This link expires in 1 hour. Request a new one at {{dashboardUrl}}/account
 ${plainTextFooter()}`,

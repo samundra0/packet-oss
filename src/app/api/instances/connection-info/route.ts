@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import {
   getConnectionInfo,
   getInstanceCredentials,
@@ -104,6 +105,11 @@ export async function GET(request: NextRequest) {
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
     const { payload, allTeamIds } = auth;
+
+    // PA-202 gate: SSH credentials require gpu.access.
+    // Read-only Member: allowed (gpu.access ✓). Finance Manager: denied (no gpu.access).
+    const denial = requirePermission(auth, "gpu.access", request);
+    if (denial) return denial;
 
     if (!allTeamIds.length) {
       return NextResponse.json(

@@ -344,9 +344,11 @@ describe('Wallet Module', () => {
 
   describe('deductUsage', () => {
     it('should deduct usage from customer balance', async () => {
+      // Negative balance = customer has credit. Need >= 500c credit to pass the
+      // BALANCE GUARD for a 2.5h * 200c = 500c debit.
       const mockCustomer = {
         id: 'cus_test123',
-        balance: 1000, // Customer owes $10 after deduction
+        balance: -1000, // Customer has $10 credit
       } as Stripe.Customer;
 
       const mockTransactions = {
@@ -357,10 +359,11 @@ describe('Wallet Module', () => {
       vi.mocked(mockStripe.customers.createBalanceTransaction).mockResolvedValue({} as Stripe.CustomerBalanceTransaction);
       vi.mocked(mockStripe.customers.retrieve).mockResolvedValue(mockCustomer);
 
-      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours');
+      // hourlyRateCents (200 = $2/hr) is now a required argument.
+      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours', 200);
 
       expect(result.success).toBe(true);
-      expect(result.newBalance).toBe(1000);
+      expect(result.newBalance).toBe(-1000);
       expect(mockStripe.customers.createBalanceTransaction).toHaveBeenCalledWith('cus_test123', {
         amount: 500, // 2.5 hours * $2/hour = $5
         currency: 'usd',
@@ -373,7 +376,7 @@ describe('Wallet Module', () => {
     });
 
     it('should handle zero hours gracefully', async () => {
-      const result = await deductUsage('cus_test123', 0, 'No usage');
+      const result = await deductUsage('cus_test123', 0, 'No usage', 200);
 
       expect(result.success).toBe(true);
       expect(result.newBalance).toBe(0);
@@ -381,7 +384,7 @@ describe('Wallet Module', () => {
     });
 
     it('should handle negative hours gracefully', async () => {
-      const result = await deductUsage('cus_test123', -1, 'Invalid usage');
+      const result = await deductUsage('cus_test123', -1, 'Invalid usage', 200);
 
       expect(result.success).toBe(true);
       expect(result.newBalance).toBe(0);
@@ -402,13 +405,13 @@ describe('Wallet Module', () => {
 
       const mockCustomer = {
         id: 'cus_test123',
-        balance: 500,
+        balance: -1000, // $10 credit (enough to pass the BALANCE GUARD)
       } as Stripe.Customer;
 
       vi.mocked(mockStripe.customers.listBalanceTransactions).mockResolvedValue(mockTransactions);
       vi.mocked(mockStripe.customers.retrieve).mockResolvedValue(mockCustomer);
 
-      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours');
+      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours', 200);
 
       expect(result.success).toBe(true);
       expect(result.skipped).toBe(true);
@@ -429,14 +432,14 @@ describe('Wallet Module', () => {
 
       const mockCustomer = {
         id: 'cus_test123',
-        balance: 500,
+        balance: -1000, // $10 credit (enough to pass the BALANCE GUARD)
       } as Stripe.Customer;
 
       vi.mocked(mockStripe.customers.listBalanceTransactions).mockResolvedValue(mockTransactions);
       vi.mocked(mockStripe.customers.createBalanceTransaction).mockResolvedValue({} as Stripe.CustomerBalanceTransaction);
       vi.mocked(mockStripe.customers.retrieve).mockResolvedValue(mockCustomer);
 
-      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours');
+      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours', 200);
 
       expect(result.success).toBe(true);
       expect(result.skipped).toBeUndefined();
@@ -444,16 +447,22 @@ describe('Wallet Module', () => {
     });
 
     it('should handle Stripe API errors', async () => {
+      const mockCustomer = {
+        id: 'cus_test123',
+        balance: -1000, // $10 credit (enough to pass the BALANCE GUARD)
+      } as Stripe.Customer;
+
       const mockTransactions = {
         data: [],
       } as Stripe.ApiList<Stripe.CustomerBalanceTransaction>;
 
+      vi.mocked(mockStripe.customers.retrieve).mockResolvedValue(mockCustomer);
       vi.mocked(mockStripe.customers.listBalanceTransactions).mockResolvedValue(mockTransactions);
       vi.mocked(mockStripe.customers.createBalanceTransaction).mockRejectedValue(
         new Error('Insufficient funds')
       );
 
-      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours');
+      const result = await deductUsage('cus_test123', 2.5, 'GPU usage: 2.5 hours', 200);
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Insufficient funds');
@@ -462,7 +471,7 @@ describe('Wallet Module', () => {
     it('should round amount correctly', async () => {
       const mockCustomer = {
         id: 'cus_test123',
-        balance: 100,
+        balance: -1000, // $10 credit (enough to pass the BALANCE GUARD)
       } as Stripe.Customer;
 
       const mockTransactions = {
@@ -473,7 +482,7 @@ describe('Wallet Module', () => {
       vi.mocked(mockStripe.customers.createBalanceTransaction).mockResolvedValue({} as Stripe.CustomerBalanceTransaction);
       vi.mocked(mockStripe.customers.retrieve).mockResolvedValue(mockCustomer);
 
-      await deductUsage('cus_test123', 1.333, 'Fractional hours');
+      await deductUsage('cus_test123', 1.333, 'Fractional hours', 200);
 
       expect(mockStripe.customers.createBalanceTransaction).toHaveBeenCalledWith(
         'cus_test123',
@@ -770,7 +779,8 @@ describe('Wallet Module', () => {
 
       vi.mocked(mockStripe.customers.listBalanceTransactions).mockResolvedValue(mockTransactions);
 
-      const result = await getWalletTransactions('cus_test123');
+      // maxItems > 0 takes the fast single-call path.
+      const result = await getWalletTransactions('cus_test123', 20);
 
       expect(result).toHaveLength(2);
       expect(result[0].id).toBe('txn_1');
@@ -793,39 +803,57 @@ describe('Wallet Module', () => {
       });
     });
 
-    it('should use default limit of 20', async () => {
-      const mockTransactions = {
-        data: [],
-      } as Stripe.ApiList<Stripe.CustomerBalanceTransaction>;
+    it('should auto-paginate all transactions when no limit is given', async () => {
+      // Default maxItems=0 means "unlimited": the code uses Stripe's async
+      // auto-pagination (for await … limit: 100). Mock an async-iterable list.
+      const txns = [
+        { id: 'txn_a' } as Stripe.CustomerBalanceTransaction,
+        { id: 'txn_b' } as Stripe.CustomerBalanceTransaction,
+      ];
+      vi.mocked(mockStripe.customers.listBalanceTransactions).mockReturnValue({
+        [Symbol.asyncIterator]() {
+          let i = 0;
+          return {
+            next: () =>
+              Promise.resolve(
+                i < txns.length
+                  ? { value: txns[i++], done: false }
+                  : { value: undefined, done: true }
+              ),
+          };
+        },
+      } as unknown as ReturnType<typeof mockStripe.customers.listBalanceTransactions>);
 
-      vi.mocked(mockStripe.customers.listBalanceTransactions).mockResolvedValue(mockTransactions);
+      const result = await getWalletTransactions('cus_test123');
 
-      await getWalletTransactions('cus_test123');
-
+      expect(result).toHaveLength(2);
+      expect(result[0].id).toBe('txn_a');
       expect(mockStripe.customers.listBalanceTransactions).toHaveBeenCalledWith('cus_test123', {
-        limit: 20,
+        limit: 100,
       });
     });
   });
 
   describe('calculateCost', () => {
+    // calculateCost(hours, hourlyRateCents) — rate is now a required 2nd arg
+    // (GPU rates come from the GpuProduct model). 200c = $2/hour.
     it('should calculate cost for given hours', () => {
-      expect(calculateCost(1)).toBe(200); // 1 hour * $2/hour
-      expect(calculateCost(2.5)).toBe(500); // 2.5 hours * $2/hour
-      expect(calculateCost(10)).toBe(2000); // 10 hours * $2/hour
+      expect(calculateCost(1, 200)).toBe(200); // 1 hour * $2/hour
+      expect(calculateCost(2.5, 200)).toBe(500); // 2.5 hours * $2/hour
+      expect(calculateCost(10, 200)).toBe(2000); // 10 hours * $2/hour
     });
 
     it('should handle zero hours', () => {
-      expect(calculateCost(0)).toBe(0);
+      expect(calculateCost(0, 200)).toBe(0);
     });
 
     it('should handle fractional hours', () => {
-      expect(calculateCost(0.5)).toBe(100); // 0.5 hours * $2/hour
-      expect(calculateCost(1.333)).toBe(267); // Rounded
+      expect(calculateCost(0.5, 200)).toBe(100); // 0.5 hours * $2/hour
+      expect(calculateCost(1.333, 200)).toBe(267); // Rounded
     });
 
     it('should handle large numbers', () => {
-      expect(calculateCost(100)).toBe(20000);
+      expect(calculateCost(100, 200)).toBe(20000);
     });
   });
 
@@ -856,8 +884,8 @@ describe('Wallet Module', () => {
   });
 
   describe('WALLET_CONFIG', () => {
-    it('should provide access to hourly rate', () => {
-      expect(WALLET_CONFIG.hourlyRateCents).toBe(200);
+    it('should NOT expose a static hourly rate (GPU rates come from GpuProduct)', () => {
+      expect((WALLET_CONFIG as Record<string, unknown>).hourlyRateCents).toBeUndefined();
     });
 
     it('should provide access to auto-refill threshold', () => {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyCustomerToken } from "@/lib/customer-auth";
+import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import { getWalletTransactions, formatCentsForUser } from "@/lib/wallet";
 
 /**
@@ -18,20 +19,20 @@ import { getWalletTransactions, formatCentsForUser } from "@/lib/wallet";
  */
 export async function GET(request: NextRequest) {
   try {
-    const authHeader = request.headers.get("Authorization");
-    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-    if (!token) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const auth = await getAuthenticatedCustomer(request);
+    if (auth instanceof NextResponse) return auth;
 
-    const payload = verifyCustomerToken(token);
-    if (!payload) {
-      return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
-    }
+    // PA-269: billing.view required — same gate as /api/account/billing-stats.
+    // Previously this route only verified the JWT was valid, so any Team Member
+    // or Read-only Member could read the owner's full transaction history +
+    // all-time spend by calling it directly. The sidebar hide was cosmetic.
+    const denial = requirePermission(auth, "billing.view", request);
+    if (denial) return denial;
 
-    // payload.customerId is the Stripe customer ID baked into the JWT at login time.
-    // For team members this is the owner's customer ID — the correct wallet to read.
-    const allRaw = await getWalletTransactions(payload.customerId);
+    // auth.payload.customerId is the Stripe customer ID baked into the JWT at
+    // login time. For team members this is the owner's customer ID — the same
+    // wallet this route read before the gate was added (no data-selection change).
+    const allRaw = await getWalletTransactions(auth.payload.customerId);
 
     // Apply the same bookkeeping filter as /api/account/verify
     const userFacing = allRaw.filter((txn) => {

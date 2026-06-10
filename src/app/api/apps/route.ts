@@ -8,6 +8,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { verifyCustomerToken } from "@/lib/auth";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { getStripe } from "@/lib/stripe";
 import { getAppsScenarioId } from "@/lib/scenarios";
 import { getScenarioCompatibleServices } from "@/lib/hostedai";
@@ -24,6 +26,26 @@ export async function GET(request: NextRequest) {
   if (!payload) {
     return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
+
+  // PA-175: gate against operating account so invited Team Members
+  // (no membership row on their OWN customer) pass through correctly.
+  const ctx = await resolveOperatingContext({
+    email: payload.email,
+    jwtCustomerId: payload.customerId,
+    activeAccountId: payload.activeAccountId,
+  });
+  if (!ctx) {
+    return NextResponse.json({ error: "Account not found" }, { status: 404 });
+  }
+  // PA-202 gate: Apps hidden from Read-only Member + Finance Manager.
+  const denial = await gatePermission({
+    payload,
+    accountId: ctx.accountId,
+    customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+    permission: "apps.use",
+    request,
+  });
+  if (denial) return denial;
 
   const subscriptionId = request.nextUrl.searchParams.get("subscriptionId");
 
@@ -55,8 +77,11 @@ export async function GET(request: NextRequest) {
   }
 
   // Fetch apps from the database instead of the hardcoded array
+  // Hide apps that haven't been enabled by an admin (PA-193): an app only
+  // shows in the user catalog when its admin setup has run (deployable=true
+  // implies a backing HAI service via serviceId).
   const dbApps = await prisma.gpuApp.findMany({
-    where: { active: true },
+    where: { active: true, deployable: true },
     orderBy: { displayOrder: "asc" },
     include: {
       product: {
@@ -164,6 +189,26 @@ export async function DELETE(request: NextRequest) {
   if (!payload) {
     return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
+
+  // PA-175: gate against operating account so invited Team Members
+  // (no membership row on their OWN customer) pass through correctly.
+  const ctx = await resolveOperatingContext({
+    email: payload.email,
+    jwtCustomerId: payload.customerId,
+    activeAccountId: payload.activeAccountId,
+  });
+  if (!ctx) {
+    return NextResponse.json({ error: "Account not found" }, { status: 404 });
+  }
+  // PA-202 gate: Apps hidden from Read-only Member + Finance Manager.
+  const denial = await gatePermission({
+    payload,
+    accountId: ctx.accountId,
+    customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+    permission: "apps.use",
+    request,
+  });
+  if (denial) return denial;
 
   const subscriptionId = request.nextUrl.searchParams.get("subscriptionId");
   const appSlug = request.nextUrl.searchParams.get("appSlug");

@@ -166,52 +166,62 @@ describe('Pool Management', () => {
 
   describe('getPoolSubscriptions', () => {
     it('should fetch pool subscriptions with cache', async () => {
-      const mockSubs: PoolSubscription[] = [
+      // HAI 2.2: getPoolSubscriptions now calls the unified instances API and
+      // maps each instance into the PoolSubscription shape.
+      const mockInstances = [
         {
           id: 'sub-1',
-          pool_id: 'pool-1',
-          pool_name: 'GPU Pool 1',
-          status: 'active',
-          gpu_count: 2,
+          name: 'GPU Pool 1',
+          status: 'running',
+          ip: [],
+          team: { id: 'team-123', name: 'Team 123' },
+          pod_info: {
+            pool_id: 1,
+            pool_name: 'GPU Pool 1',
+            pool_label: 'GPU Pool 1',
+          },
         },
       ];
 
       // First call - cache miss
       mockGetCached.mockReturnValueOnce(null);
-      mockRequest.mockResolvedValueOnce({
-        items: mockSubs,
-        page: 0,
-        per_page: 100,
-        total_items: 1,
-        total_pages: 1,
-      });
+      mockRequest.mockResolvedValueOnce({ items: mockInstances, total_items: 1 });
 
       const result1 = await getPoolSubscriptions('team-123');
 
       expect(mockRequest).toHaveBeenCalledWith(
         'GET',
-        '/gpuaas/pool-subscription?team_id=team-123&page=0&per_page=100'
+        '/instances/unified?page=0&per_page=100&team_id=team-123',
+        undefined,
+        60000
       );
-      expect(result1).toEqual(mockSubs);
+      // "running" maps to "subscribed" (billable status)
+      expect(result1).toHaveLength(1);
+      expect(result1[0].id).toBe('sub-1');
+      expect(result1[0].pool_id).toBe('1');
+      expect(result1[0].status).toBe('subscribed');
       expect(mockSetCache).toHaveBeenCalled();
 
       // Second call - cache hit
-      mockGetCached.mockReturnValueOnce(mockSubs);
+      mockGetCached.mockReturnValueOnce(result1);
       const result2 = await getPoolSubscriptions('team-123');
 
-      expect(result2).toEqual(mockSubs);
+      expect(result2).toEqual(result1);
       expect(mockRequest).toHaveBeenCalledTimes(1); // Not called again
     });
 
     it('should support metric window parameter', async () => {
       mockGetCached.mockReturnValueOnce(null);
-      mockRequest.mockResolvedValueOnce({ items: [] });
+      mockRequest.mockResolvedValueOnce({ items: [], total_items: 0 });
 
       await getPoolSubscriptions('team-123', 'last_24h');
 
+      // metricWindow only affects the cache key, not the unified endpoint URL.
       expect(mockRequest).toHaveBeenCalledWith(
         'GET',
-        '/gpuaas/pool-subscription?team_id=team-123&page=0&per_page=100&metric_window=last_24h'
+        '/instances/unified?page=0&per_page=100&team_id=team-123',
+        undefined,
+        60000
       );
     });
   });
@@ -236,9 +246,10 @@ describe('Pool Management', () => {
         expect.objectContaining({
           pool_id: 123, // Converted to number
           team_id: 'team-123',
-          vgpus: 2,
+          vgpus: 1, // Always enforced to 1 (multi-GPU not supported)
           instance_type_id: 'type-1',
-        })
+        }),
+        15000 // SUBSCRIBE_TIMEOUT_MS
       );
     });
 
@@ -248,16 +259,21 @@ describe('Pool Management', () => {
         new Error('Hosted.ai API error (409): Already subscribed')
       );
 
-      // Second call - fetch subscriptions
+      // Second call - fetch subscriptions (unified instances API).
+      // pool_id 456 must come through pod_info so the mapper preserves it.
       mockGetCached.mockReturnValueOnce(null);
       mockRequest.mockResolvedValueOnce({
         items: [
           {
             id: 'sub-existing',
-            pool_id: '456', // Use numeric string that matches
-            status: 'subscribed',
+            name: 'existing',
+            status: 'running', // maps to "subscribed"
+            ip: [],
+            team: { id: 'team-123', name: 'Team 123' },
+            pod_info: { pool_id: 456, pool_name: 'Pool 456' },
           },
         ],
+        total_items: 1,
       });
 
       const result = await subscribeToPool({
@@ -271,25 +287,26 @@ describe('Pool Management', () => {
       expect(mockClearCache).toHaveBeenCalled();
     });
 
-    it('should throw error when subscription not found after polling', async () => {
+    it('should return a pending subscription id when not found after polling', async () => {
       // Subscribe returns empty
       mockRequest.mockResolvedValueOnce({});
 
       // All polls return empty - subscription never appears
       for (let i = 0; i < 10; i++) {
         mockGetCached.mockReturnValueOnce(null);
-        mockRequest.mockResolvedValueOnce({ items: [] });
+        mockRequest.mockResolvedValueOnce({ items: [], total_items: 0 });
       }
 
-      // Should timeout after polling attempts
-      await expect(
-        subscribeToPool({
-          pool_id: '999',
-          team_id: 'team-123',
-          vgpus: 1,
-          instance_type_id: 'type-1',
-        })
-      ).rejects.toThrow('Failed to create subscription - no subscription found after subscribing');
+      // HAI 2.2 behavior: rather than throwing, the API returns a "pending-…"
+      // placeholder id and lets the dashboard poll for the real subscription.
+      const result = await subscribeToPool({
+        pool_id: '999',
+        team_id: 'team-123',
+        vgpus: 1,
+        instance_type_id: 'type-1',
+      });
+
+      expect(result.subscription_id).toMatch(/^pending-999-/);
     }, 60000);
   });
 
@@ -363,41 +380,38 @@ describe('Pool Management', () => {
       mockRequest.mockResolvedValueOnce(mockEstimate);
 
       const result = await calculatePoolSubscriptionCost({
-        pool_id: 'pool-1',
+        pool_id: '1',
         gpu_count: 2,
         duration_hours: 24,
         team_id: 'team-123',
       });
 
       expect(result).toEqual(mockEstimate);
+      // Payload now sends a numeric pool_id and `vgpus` (not `gpu_count`).
       expect(mockRequest).toHaveBeenCalledWith(
         'POST',
         '/gpuaas/calculate-pool-subscription',
         {
-          pool_id: 'pool-1',
-          gpu_count: 2,
+          pool_id: 1,
+          vgpus: 2,
           duration_hours: 24,
           team_id: 'team-123',
         }
       );
     });
 
-    it('should return fallback estimate on error', async () => {
+    it('should propagate API errors (no local fallback estimate)', async () => {
       mockRequest.mockRejectedValueOnce(new Error('API error'));
 
-      const result = await calculatePoolSubscriptionCost({
-        pool_id: 'pool-1',
-        gpu_count: 3,
-        duration_hours: 10,
-        team_id: 'team-123',
-      });
-
-      // Fallback: 3 GPUs * $2/hour * 10 hours = $60
-      expect(result).toEqual({
-        total_cost: 60,
-        hourly_cost: 6,
-        currency: 'USD',
-      });
+      // The fallback estimate was removed; callers must handle the failure.
+      await expect(
+        calculatePoolSubscriptionCost({
+          pool_id: '1',
+          gpu_count: 3,
+          duration_hours: 10,
+          team_id: 'team-123',
+        })
+      ).rejects.toThrow('API error');
     });
   });
 
@@ -507,7 +521,7 @@ describe('Pool Management', () => {
 
       expect(mockRequest).toHaveBeenCalledWith(
         'GET',
-        '/shared-volumes?team_id=team-123'
+        '/shared-volumes?team_id%5Beqstr%5D=team-123&per_page=100&page=0'
       );
       expect(result).toEqual(mockVolumes);
     });

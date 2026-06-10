@@ -2,6 +2,17 @@
 
 import { useState, useEffect, useCallback } from "react";
 
+const CODE_MAX = 50;
+const NAME_MAX = 100;
+const DESCRIPTION_MAX = 190;
+const DATE_MIN = "2020-01-01";
+const DATE_MAX = "2099-12-31";
+
+const stripHtmlTags = (s: string) =>
+  s
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<[^>]*>/g, "");
+
 interface Voucher {
   id: string;
   code: string;
@@ -150,6 +161,44 @@ export function VouchersTab() {
 
     // MySQL INT max — Voucher.creditCents/minTopupCents are Int columns
     const MAX_CENTS = 2_147_483_647;
+
+    const trimmedCode = form.code.trim().toUpperCase();
+    const trimmedName = stripHtmlTags(form.name).trim();
+    const trimmedDescription = form.description.trim();
+
+    if (!trimmedCode) {
+      alert("Code is required");
+      return;
+    }
+    if (trimmedCode.length > CODE_MAX) {
+      alert(`Code must be ${CODE_MAX} characters or fewer`);
+      return;
+    }
+    if (!trimmedName) {
+      alert("Name is required");
+      return;
+    }
+    if (trimmedName.length > NAME_MAX) {
+      alert(`Name must be ${NAME_MAX} characters or fewer`);
+      return;
+    }
+    if (trimmedDescription.length > DESCRIPTION_MAX) {
+      alert(`Description must be ${DESCRIPTION_MAX} characters or fewer`);
+      return;
+    }
+    for (const [label, value] of [
+      ["Starts At", form.startsAt],
+      ["Expires At", form.expiresAt],
+    ] as const) {
+      if (value && (value < DATE_MIN || value > DATE_MAX)) {
+        alert(`${label} must be between ${DATE_MIN} and ${DATE_MAX}`);
+        return;
+      }
+    }
+    if (form.startsAt && form.expiresAt && form.startsAt > form.expiresAt) {
+      alert("Starts At must be on or before Expires At");
+      return;
+    }
     if (!Number.isFinite(form.creditCents) || form.creditCents < 1) {
       alert("Credit amount must be a positive number");
       return;
@@ -165,12 +214,19 @@ export function VouchersTab() {
 
     setSaving(true);
 
+    const cleanedForm = {
+      ...form,
+      code: trimmedCode,
+      name: trimmedName,
+      description: trimmedDescription,
+    };
+
     try {
       const endpoint = "/api/admin/vouchers";
       const method = editingVoucher ? "PATCH" : "POST";
       const body = editingVoucher
-        ? { id: editingVoucher.id, ...form }
-        : form;
+        ? { id: editingVoucher.id, ...cleanedForm }
+        : cleanedForm;
 
       const res = await fetch(endpoint, {
         method,
@@ -403,6 +459,9 @@ export function VouchersTab() {
                     onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })}
                     disabled={!!editingVoucher}
                     placeholder="LAUNCH50"
+                    maxLength={CODE_MAX}
+                    pattern="[A-Za-z0-9_-]+"
+                    title={`Up to ${CODE_MAX} characters; letters, numbers, hyphens, and underscores only`}
                     className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg uppercase disabled:bg-gray-100"
                     required
                   />
@@ -416,6 +475,7 @@ export function VouchersTab() {
                     value={form.name}
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                     placeholder="Launch Promotion"
+                    maxLength={NAME_MAX}
                     className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg"
                     required
                   />
@@ -431,6 +491,7 @@ export function VouchersTab() {
                   value={form.description}
                   onChange={(e) => setForm({ ...form, description: e.target.value })}
                   placeholder="Optional description"
+                  maxLength={DESCRIPTION_MAX}
                   className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg"
                 />
               </div>
@@ -504,6 +565,8 @@ export function VouchersTab() {
                     type="date"
                     value={form.startsAt}
                     onChange={(e) => setForm({ ...form, startsAt: e.target.value })}
+                    min={DATE_MIN}
+                    max={DATE_MAX}
                     className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg"
                   />
                 </div>
@@ -515,6 +578,8 @@ export function VouchersTab() {
                     type="date"
                     value={form.expiresAt}
                     onChange={(e) => setForm({ ...form, expiresAt: e.target.value })}
+                    min={DATE_MIN}
+                    max={DATE_MAX}
                     className="w-full px-3 py-2 border border-[#e4e7ef] rounded-lg"
                   />
                 </div>

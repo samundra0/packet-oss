@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { getSSHKeys, addSSHKey, deleteSSHKey } from "@/lib/ssh-keys";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveMembership } from "@/lib/auth/membership";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 // GET - List SSH keys
 export async function GET(request: NextRequest) {
@@ -19,7 +22,18 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const keys = await getSSHKeys(payload.customerId);
+    // PA-175: scope to operating account so an invited Member sees the
+    // team's SSH keys (the keys their pods accept).
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
+    const keys = await getSSHKeys(ctx.accountId);
 
     return NextResponse.json({
       keys: keys.map((k) => ({
@@ -66,8 +80,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // PA-175: scope to operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const customerEmail = typeof ctx.customer.email === "string" ? ctx.customer.email : null;
+
+    // PA-175 gate: ssh_keys.manage required to add SSH keys.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail,
+      permission: "ssh_keys.manage",
+      request,
+    });
+    if (denial) return denial;
+
     // Limit number of keys per customer
-    const existingKeys = await getSSHKeys(payload.customerId);
+    const existingKeys = await getSSHKeys(ctx.accountId);
     if (existingKeys.length >= 10) {
       return NextResponse.json(
         { error: "Maximum of 10 SSH keys allowed" },
@@ -75,8 +110,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // PA-175 PR 2.5: attribute the key to the User issuing it so we can
+    // remove it on member removal. If the issuer has no User row yet
+    // (implicit Owner — rare), userId stays null and the key behaves like
+    // a legacy account-shared key.
+    const membership = await resolveMembership({
+      userId: payload.userId,
+      email: payload.email,
+      accountId: ctx.accountId,
+      customerEmail,
+    });
+
     const key = await addSSHKey({
-      stripeCustomerId: payload.customerId,
+      stripeCustomerId: ctx.accountId,
+      userId: membership?.userId ?? null,
       name,
       publicKey,
     });
@@ -125,7 +172,28 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    await deleteSSHKey(keyId, payload.customerId);
+    // PA-175: scope to operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
+    // PA-175 gate: ssh_keys.manage required to remove SSH keys.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "ssh_keys.manage",
+      request,
+      extra: { keyId },
+    });
+    if (denial) return denial;
+
+    await deleteSSHKey(keyId, ctx.accountId);
 
     return NextResponse.json({ success: true });
   } catch (error) {

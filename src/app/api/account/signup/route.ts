@@ -57,27 +57,25 @@ async function sendWelcomeAccountEmail(params: {
 
   const introParagraph = hasGpu
     ? `Your ${getBrandName()} account has been created. You were looking at <strong>${gpuName}</strong> — your dashboard is ready for you to browse live inventory, check pricing, and deploy when you're ready.`
-    : `Your ${getBrandName()} account has been created. You have 10,000 tokens included to explore our Token Factory LLM inference API.`;
+    : `Your ${getBrandName()} account has been created. Browse live GPU inventory and deploy a pod whenever you're ready.`;
 
   const ctaText = hasGpu ? "Browse GPU Inventory" : "Open Dashboard";
 
   const bulletPoints = hasGpu
     ? `<li>Browse live GPU inventory with real-time pricing</li>
             <li>Configure and save deployment settings</li>
-            <li>Use 10,000 free tokens for LLM inference</li>
             <li>Add $50 to your wallet when you're ready to deploy</li>`
-    : `<li>Use the Token Factory playground for LLM inference</li>
-            <li>Make OpenAI-compatible API calls</li>
-            <li>Create batch processing jobs</li>`;
+    : `<li>Browse live GPU inventory and pricing</li>
+            <li>Configure and save deployment settings</li>
+            <li>Deploy a pod from the dashboard when you're ready</li>`;
 
   const bulletPointsText = hasGpu
     ? `- Browse live GPU inventory with real-time pricing
 - Configure and save deployment settings
-- Use 10,000 free tokens for LLM inference
 - Add $50 to your wallet when you're ready to deploy`
-    : `- Use the Token Factory playground for LLM inference
-- Make OpenAI-compatible API calls
-- Create batch processing jobs`;
+    : `- Browse live GPU inventory and pricing
+- Configure and save deployment settings
+- Deploy a pod from the dashboard when you're ready`;
 
   const closingParagraph = hasGpu
     ? `Your account is completely free. When you're ready to launch a GPU, add $50 to your wallet from the Billing tab.`
@@ -114,7 +112,7 @@ async function sendWelcomeAccountEmail(params: {
 
   const fallbackText = `Hi ${customerName},
 
-${hasGpu ? `Your ${getBrandName()} account has been created. You were looking at ${gpuName} — your dashboard is ready for you to browse live inventory, check pricing, and deploy when you're ready.` : `Your ${getBrandName()} account has been created. You have 10,000 tokens included to explore our Token Factory LLM inference API.`}
+${hasGpu ? `Your ${getBrandName()} account has been created. You were looking at ${gpuName} — your dashboard is ready for you to browse live inventory, check pricing, and deploy when you're ready.` : `Your ${getBrandName()} account has been created. Browse live GPU inventory and deploy a pod whenever you're ready.`}
 
 ${ctaText}: ${dashboardUrl}
 
@@ -162,7 +160,14 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { email, termsAccepted, gpu, plan, utm, sessionId } = await request.json();
+    const { email, termsAccepted, gpu, plan, utm, sessionId, inviteToken, next } =
+      await request.json();
+    // PA-175: when arriving here from /invite/<token>, the invitation
+    // token rides through so the dashboard can surface the Accept modal.
+    const inviteSuffix =
+      typeof inviteToken === "string" && inviteToken.length > 0
+        ? `&invite=${encodeURIComponent(inviteToken)}`
+        : "";
 
     if (!email) {
       return NextResponse.json(
@@ -220,14 +225,16 @@ export async function POST(request: NextRequest) {
       // new-account path so we don't leak account existence.
       console.log(`[Signup] Existing customer found for ${customerEmail}, sending login link instead`);
       try {
-        await sendLoginEmailForCustomer(customerEmail);
+        await sendLoginEmailForCustomer(customerEmail, {
+          inviteToken: typeof inviteToken === "string" ? inviteToken : undefined,
+        });
       } catch (loginEmailError) {
         console.error(`[Signup] Failed to send login email for existing customer ${customerEmail}:`, loginEmailError);
       }
       return NextResponse.json({
         success: true,
         message: "Account created! Check your email for your dashboard link and API key.",
-        redirect: `${process.env.NEXT_PUBLIC_APP_URL}/success?type=existing&email=${encodeURIComponent(customerEmail)}`,
+        redirect: `${process.env.NEXT_PUBLIC_APP_URL}/success?type=existing&email=${encodeURIComponent(customerEmail)}${inviteSuffix}`,
       });
     }
 
@@ -374,9 +381,11 @@ export async function POST(request: NextRequest) {
       console.warn("⚠️ Failed to record TOS acceptance (non-fatal):", tosError);
     }
 
-    // Generate dashboard URL with token
-    const token = generateCustomerToken(customerEmail, stripeCustomer.id);
-    const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
+    // Generate dashboard URL with token (carry deep-link intent in the signed claim)
+    const token = generateCustomerToken(customerEmail, stripeCustomer.id, {
+      next: typeof next === "string" ? next : undefined,
+    });
+    const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}${inviteSuffix}`;
 
     // Send welcome email with API key (personalized for GPU visitors)
     try {
@@ -486,7 +495,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       message: "Account created! Check your email for your dashboard link and API key.",
-      redirect: `${process.env.NEXT_PUBLIC_APP_URL}/success?type=free&email=${encodeURIComponent(customerEmail)}`,
+      redirect: `${process.env.NEXT_PUBLIC_APP_URL}/success?type=free&email=${encodeURIComponent(customerEmail)}${inviteSuffix}`,
     });
   } catch (error) {
     console.error("Signup error:", error);

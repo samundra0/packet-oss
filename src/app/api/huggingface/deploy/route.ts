@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
+import { gatePermission } from "@/lib/auth/gate";
 import {
   createInstance,
   getServiceProvisioningInfo,
@@ -39,11 +41,15 @@ export async function POST(request: NextRequest) {
   try {
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
-    const { payload, teamId } = auth;
+    const { payload, teamId, accountId } = auth;
 
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });
     }
+
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = requirePermission(auth, "huggingface.use", request);
+    if (denial) return denial;
 
     const body = await request.json();
     const {
@@ -168,7 +174,7 @@ export async function POST(request: NextRequest) {
     }
 
     const prepaidAmountCents = Math.round((MINIMUM_BILLING_MINUTES / 60) * hourlyRateCents * gpuCount);
-    const walletBalance = await getWalletBalance(payload.customerId);
+    const walletBalance = await getWalletBalance(accountId);
 
     if (walletBalance.availableBalance < prepaidAmountCents) {
       return NextResponse.json(
@@ -178,11 +184,11 @@ export async function POST(request: NextRequest) {
     }
 
     // CHARGE BEFORE DEPLOYMENT
-    const preDeployId = `predeploy_${payload.customerId}_${Date.now()}`;
+    const preDeployId = `predeploy_${accountId}_${Date.now()}`;
     console.log(`[HF Deploy] Pre-charging $${(prepaidAmountCents / 100).toFixed(2)} for ${hfItemId}`);
 
     const deductResult = await deductUsage(
-      payload.customerId,
+      accountId,
       (MINIMUM_BILLING_MINUTES / 60) * gpuCount,
       `HF deploy: ${hfItemId} - ${product.name} - ${gpuCount} GPU(s) @ $${(hourlyRateCents / 100).toFixed(2)}/hr`,
       hourlyRateCents,
@@ -240,7 +246,7 @@ export async function POST(request: NextRequest) {
     } catch (deployError) {
       const errMsg = deployError instanceof Error ? deployError.message : "Unknown error";
       console.log(`[HF Deploy] Instance creation failed, refunding: ${errMsg}`);
-      await refundDeployment(payload.customerId, prepaidAmountCents, `Refund: HF deployment failed - ${errMsg.slice(0, 100)}`);
+      await refundDeployment(accountId, prepaidAmountCents, `Refund: HF deployment failed - ${errMsg.slice(0, 100)}`);
       throw deployError;
     }
 
@@ -252,7 +258,7 @@ export async function POST(request: NextRequest) {
         data: {
           subscriptionId: instanceId,
           instanceId,
-          stripeCustomerId: payload.customerId,
+          stripeCustomerId: accountId,
           displayName: podName,
           deployTime: new Date(),
           productId: product.id,
@@ -268,7 +274,7 @@ export async function POST(request: NextRequest) {
     const deployment = await prisma.huggingFaceDeployment.create({
       data: {
         subscriptionId: instanceId,
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: accountId,
         hfItemId,
         hfItemType: catalogItem?.type || "model",
         hfItemName: catalogItem?.name || hfItemId.split("/").pop() || hfItemId,
@@ -286,7 +292,7 @@ export async function POST(request: NextRequest) {
     console.log(`[HF Deploy] Created deployment ${deployment.id} for ${deployment.hfItemName} (instance ${instanceId})`);
 
     await logActivity(
-      payload.customerId,
+      accountId,
       "hf_deployment_started",
       `Started HuggingFace deployment: ${catalogItem?.name || hfItemId}`,
       { deploymentId: deployment.id, instanceId, hfItemId, deployScript, gpuCount }
@@ -333,23 +339,19 @@ export async function POST(request: NextRequest) {
  */
 export async function GET(request: NextRequest) {
   try {
-    const token = request.headers.get("authorization")?.replace("Bearer ", "");
+    // PA-175: use getAuthenticatedCustomer so the gate runs against the
+    // OPERATING account (invited Members on a switched-into team work).
+    const auth = await getAuthenticatedCustomer(request);
+    if (auth instanceof NextResponse) return auth;
+    const { accountId } = auth;
 
-    if (!token) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const payload = verifyCustomerToken(token);
-    if (!payload) {
-      return NextResponse.json(
-        { error: "Invalid or expired token" },
-        { status: 401 }
-      );
-    }
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = requirePermission(auth, "huggingface.use", request);
+    if (denial) return denial;
 
     const deployments = await prisma.huggingFaceDeployment.findMany({
       where: {
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: accountId,
       },
       orderBy: {
         createdAt: "desc",

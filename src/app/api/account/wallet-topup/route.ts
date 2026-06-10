@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken, generateCustomerToken } from "@/lib/customer-auth";
 import { getStripe } from "@/lib/stripe";
 import { validateVoucher } from "@/lib/voucher";
+import { gatePermission } from "@/lib/auth/gate";
 
 const TOP_UP_AMOUNTS = [
   { value: 2500, label: "$25" },
@@ -39,6 +40,16 @@ export async function POST(request: NextRequest) {
     if ("deleted" in customer && customer.deleted) {
       return NextResponse.json({ error: "Customer not found" }, { status: 404 });
     }
+
+    // PA-175 gate: only Owner / Admin / Finance Manager can top up the wallet.
+    const denial = await gatePermission({
+      payload,
+      accountId: customer.id,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "billing.manage",
+      request,
+    });
+    if (denial) return denial;
 
     // NOTE: billing_type upgrade from free/free_trial to hourly now happens in the
     // Stripe webhook (handleWalletTopup) AFTER payment succeeds. This prevents

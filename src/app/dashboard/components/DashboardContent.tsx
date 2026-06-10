@@ -19,6 +19,9 @@ import { ApiKeysSettings } from "@/components/ApiKeysSettings";
 import { GPUHardwareMetrics } from "@/components/GPUHardwareMetrics";
 import { AppsTab } from "./AppsTab";
 import { StorageTab } from "./StorageTab";
+import { resolveLaunchDeeplink } from "./launch-deeplink";
+import { ImpersonationBanner } from "./ImpersonationBanner";
+import { isTabAllowed } from "./tab-access";
 
 // Support tab — edition-gated: Pro uses Zammad ticketing, OSS uses contact form
 const SupportTab = hasPremiumFeature("support")
@@ -26,12 +29,6 @@ const SupportTab = hasPremiumFeature("support")
   : dynamic(() => import("./OssSupportTab").then(m => ({ default: m.OssSupportTab })));
 
 // Premium tabs — dynamically imported, only available in Pro edition
-const TokenFactoryTab = hasPremiumFeature("token-factory")
-  ? dynamic(() => import("./TokenFactoryTab").then(m => ({ default: m.TokenFactoryTab })))
-  : () => null;
-const PixelFactoryTab = hasPremiumFeature("pixel-factory")
-  ? dynamic(() => import("./PixelFactoryTab").then(m => ({ default: m.PixelFactoryTab })))
-  : () => null;
 const BareMetalTab = hasPremiumFeature("bare-metal")
   ? dynamic(() => import("./BareMetalTab").then(m => ({ default: m.BareMetalTab })))
   : () => null;
@@ -59,16 +56,23 @@ import { TopupModal, ActivityLogModal, TransactionsModal, BlackwellModal, Welcom
 import { MobileHeader, MobileNav, MobileMenuSheet, MobileMoreSheet } from "./MobileDashboard";
 import { ProfileSettings } from "./ProfileSettings";
 import { BudgetSettings } from "./BudgetSettings";
-import { getBrandName, getAppUrl, getLogoUrl } from "@/lib/branding";
+import { getBrandName, getAppUrl, getLogoUrl } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
-import { RateLimitSettings } from "./RateLimitSettings";
-import { SessionSettings } from "./SessionSettings";
 import SSHKeys from "@/components/SSHKeys";
 import { useDashboardData, useDashboardActions, useModals, TabType } from "./hooks";
 import { OnboardingChecklist } from "./OnboardingChecklist";
+import { AccountSwitcher } from "@/components/AccountSwitcher";
+import { InvitationAcceptModal } from "@/components/InvitationAcceptModal";
+import { useSearchParams } from "next/navigation";
 import { DashboardAnnouncements } from "./DashboardAnnouncements";
 
 export function DashboardContent() {
+  // PA-175: when /invite/<token> lands the user here with ?invite=<token>
+  // in the URL, we render the InvitationAcceptModal. Read it once up here
+  // so the JSX below can stay readable.
+  const dashboardSearchParams = useSearchParams();
+  const inviteTokenFromUrl = dashboardSearchParams.get("invite");
+
   // Use extracted hooks
   const {
     token,
@@ -170,6 +174,15 @@ export function DashboardContent() {
   // Track product ID to pre-select in launch modal (e.g., after returning from top-up)
   const [launchProductId, setLaunchProductId] = React.useState<string | undefined>(undefined);
 
+  // Track GPU category slug to pre-select in launch modal (deep-link ?gpu=<slug>)
+  const [launchCategorySlug, setLaunchCategorySlug] = React.useState<string | undefined>(undefined);
+
+  // Track GPU category slug to pre-select in the monthly plans modal (deep-link ?gpu=<slug>&plan=monthly)
+  const [monthlyCategorySlug, setMonthlyCategorySlug] = React.useState<string | undefined>(undefined);
+
+  // Guard so the post-login deep-link (next claim) is applied at most once.
+  const appliedNextRef = React.useRef(false);
+
   // When deploying a specific monthly subscription, lock the launch modal to
   // that product and pass the subscription ID to the instances API.
   const [launchSubscription, setLaunchSubscription] = React.useState<
@@ -182,9 +195,6 @@ export function DashboardContent() {
 
   // Unread support messages state
   const [hasUnreadSupport, setHasUnreadSupport] = React.useState(false);
-
-  // Session timeout setting (for footer display)
-  const [sessionTimeoutHours, setSessionTimeoutHours] = React.useState(1);
 
   // Mobile navigation state
   const [showMobileMenu, setShowMobileMenu] = React.useState(false);
@@ -285,13 +295,18 @@ export function DashboardContent() {
     },
   });
 
-  // Poll for unread support messages
+  // Poll for unread support messages (PA-226).
+  // - Hits the lean /api/support/unread endpoint (~1 Zammad call) instead of
+  //   the full /api/support/tickets path (3 + N calls).
+  // - Polls every 5 minutes, not every 30 seconds.
+  // - Pauses entirely while the tab is hidden; resumes with one immediate
+  //   check when the tab is visible again.
   React.useEffect(() => {
     if (!token) return;
 
     const checkUnread = async () => {
       try {
-        const res = await fetch("/api/support/tickets", {
+        const res = await fetch("/api/support/unread", {
           headers: { Authorization: `Bearer ${token}` },
         });
         const data = await res.json();
@@ -303,10 +318,41 @@ export function DashboardContent() {
       }
     };
 
-    checkUnread();
-    const interval = setInterval(checkUnread, 30000); // Check every 30 seconds
+    const POLL_MS = 5 * 60 * 1000;
+    let interval: ReturnType<typeof setInterval> | undefined;
 
-    return () => clearInterval(interval);
+    const start = () => {
+      if (interval !== undefined) return;
+      void checkUnread();
+      interval = setInterval(() => {
+        void checkUnread();
+      }, POLL_MS);
+    };
+
+    const stop = () => {
+      if (interval !== undefined) {
+        clearInterval(interval);
+        interval = undefined;
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    if (document.visibilityState === "visible") {
+      start();
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      stop();
+    };
   }, [token]);
 
   // Clear unread badge when viewing support tab
@@ -322,6 +368,18 @@ export function DashboardContent() {
       setActiveTab("support");
     }
   }, [ticketId, setActiveTab]);
+
+  // PA-269: guard permission-gated tabs against direct ?tab= navigation. The
+  // sidebar hides Billing/etc. for unprivileged roles, but the URL still mounts
+  // the tab. If the loaded permission map says this user can't view the active
+  // tab, bounce to the dashboard. (Defense-in-depth + UX — the data APIs are
+  // the real boundary and enforce the same permissions server-side.)
+  React.useEffect(() => {
+    if (!data?.can) return; // can-map not loaded yet — don't redirect on first paint
+    if (!isTabAllowed(activeTab, data.can)) {
+      setActiveTab("dashboard");
+    }
+  }, [activeTab, data?.can, setActiveTab]);
 
   // Handle return from Stripe top-up: show toast, auto-reopen launch modal
   React.useEffect(() => {
@@ -391,6 +449,55 @@ export function DashboardContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Category deep-link: /dashboard?gpu=<slug>&plan=<hourly|monthly>. Opens the
+  // matching launch flow pre-seeded (hourly stepper with the category chosen, or
+  // the monthly plans modal), then strips the params so a refresh/back doesn't
+  // re-trigger. Runs once on mount; the stepper's own fund-wallet gate handles
+  // an unfunded wallet at launch time, so the intent is preserved either way.
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const target = resolveLaunchDeeplink(window.location.search);
+    if (target.kind === "none") return;
+
+    if (target.kind === "monthly") {
+      if (target.categorySlug) setMonthlyCategorySlug(target.categorySlug);
+      setShowMonthlyPlansModal(true);
+    } else {
+      if (target.categorySlug) setLaunchCategorySlug(target.categorySlug);
+      setShowLaunchModal(true);
+    }
+
+    const url = new URL(window.location.href);
+    url.searchParams.delete("gpu");
+    url.searchParams.delete("plan");
+    window.history.replaceState({}, "", url.pathname + (url.search || ""));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Apply the post-login deep-link intent carried in the verified token (the
+  // `next` claim from the magic-link flow). Same modal handling as a direct
+  // ?gpu= URL, but sourced from the signed claim that survived login. Once only.
+  React.useEffect(() => {
+    if (appliedNextRef.current) return;
+    const next = data?.next;
+    if (!next || typeof window === "undefined") return;
+    appliedNextRef.current = true;
+    let search = "";
+    try {
+      search = new URL(next, window.location.origin).search;
+    } catch {
+      return;
+    }
+    const target = resolveLaunchDeeplink(search);
+    if (target.kind === "monthly") {
+      if (target.categorySlug) setMonthlyCategorySlug(target.categorySlug);
+      setShowMonthlyPlansModal(true);
+    } else if (target.kind === "hourly") {
+      if (target.categorySlug) setLaunchCategorySlug(target.categorySlug);
+      setShowLaunchModal(true);
+    }
+  }, [data]);
+
   // Show welcome modal for brand-new users (no balance, no infra, not returning from Stripe)
   React.useEffect(() => {
     if (!data || loading) return;
@@ -399,7 +506,13 @@ export function DashboardContent() {
       const params = new URLSearchParams(window.location.search);
       if (params.get("topup") === "success") return;
     }
-    const walletBalance = data.wallet?.balance ?? 0;
+    // Don't pop over a deep-linked launch/monthly modal — direct ?gpu= or a
+    // next-claim carried through login — that intent wins.
+    if (showLaunchModal || showMonthlyPlansModal || data.next) return;
+    // PA-271: wallet is redacted (null) for non-billing users — don't infer a
+    // "new user" top-up prompt from an absent balance.
+    if (!data.wallet) return;
+    const walletBalance = data.wallet.balance;
     const isNewUser =
       walletBalance <= 0 &&
       poolSubscriptions.length === 0 &&
@@ -413,15 +526,27 @@ export function DashboardContent() {
   // On-demand requires a funded wallet, regardless of monthly subscriptions.
   // Monthly pods launch via their own card button (setLaunchSubscription path).
   const handleLaunchGpu = React.useCallback(() => {
-    const walletBalance = data?.wallet?.balance ?? 0;
-    if (walletBalance <= 0) {
+    // PA-271: for non-billing users the wallet is redacted (null) — we can't and
+    // needn't pre-check balance here; the launch modal + server enforce
+    // affordability. Only show the top-up prompt when we know the wallet is empty.
+    if (data?.wallet && data.wallet.balance <= 0) {
       setShowWelcomeModal(true);
       return;
     }
     setShowLaunchModal(true);
-  }, [data?.wallet?.balance, setShowLaunchModal]);
+  }, [data?.wallet, setShowLaunchModal]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // PA-267: revoke the server-side session + clear the cookie so a copied
+    // refresh token is dead immediately, then return to sign-in.
+    try {
+      await fetch("/api/account/logout", {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+    } catch {
+      // best-effort — navigate away regardless
+    }
     window.location.href = "/account";
   };
 
@@ -436,9 +561,19 @@ export function DashboardContent() {
   };
 
   if (loading) {
+    // When a deep-link (?gpu=/&plan=) has already queued a modal to open, tell
+    // the user what's coming so the load doesn't read as a stuck spinner.
+    const deeplinkLabel = showMonthlyPlansModal
+      ? "Opening monthly plans…"
+      : showLaunchModal
+        ? "Opening GPU options…"
+        : null;
     return (
-      <div className="flex items-center justify-center min-h-screen">
+      <div className="flex flex-col items-center justify-center min-h-screen gap-4">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500"></div>
+        {deeplinkLabel && (
+          <p className="text-sm text-[var(--muted)]">{deeplinkLabel}</p>
+        )}
       </div>
     );
   }
@@ -540,6 +675,11 @@ export function DashboardContent() {
     ? totalHourlyRate / activeSubscriptions.length
     : 0;
 
+  // PA-271: gate every financial surface (sidebar balance, stat cards, monthly
+  // subscriptions, transactions modal, billing tab) on billing.view. The verify
+  // payload is already redacted server-side; this also hides the empty widgets.
+  const canViewBilling = !!data.can?.["billing.view"];
+
   let spentFromTxns = 0;
   const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime() / 1000;
   data.transactions.forEach((txn) => {
@@ -565,13 +705,39 @@ export function DashboardContent() {
   const balanceAmount = data.wallet?.balance ? data.wallet.balance / 100 : 0;
   const runtimeHours = totalHourlyRate > 0 ? balanceAmount / totalHourlyRate : (balanceAmount / avgHourlyRate);
 
+  // PA-224: per-context display name.
+  // - In the user's OWN workspace (isOwner=true): prefer the Stripe customer
+  //   name they set themselves; only fall back to User.displayName if Stripe
+  //   has no name (e.g., legacy customers).
+  // - In an INVITED workspace (isOwner=false): use User.displayName so the
+  //   greeting reflects the viewer, not the inviter's Stripe profile.
+  const headerDisplayName = data.isOwner
+    ? (data.customer.name || data.userDisplayName || data.userEmail.split("@")[0])
+    : (data.userDisplayName || data.userEmail.split("@")[0]);
+
   return (
-    <div className="flex h-screen overflow-hidden flex-col md:flex-row">
+    <div className="flex h-screen flex-col overflow-hidden">
+      {data.skipTwoFactor && (
+        <ImpersonationBanner
+          customerEmail={data.customer.email}
+          adminEmail={data.impersonator?.adminEmail}
+        />
+      )}
+      <div className="flex flex-1 min-h-0 overflow-hidden flex-col md:flex-row">
+      {/* PA-175: when ?invite=<token> is present, surface the accept modal.
+          Strips itself from the URL on accept / cancel. */}
+      {inviteTokenFromUrl && token && (
+        <InvitationAcceptModal
+          token={inviteTokenFromUrl}
+          jwt={token}
+          userEmail={data.userEmail || data.customer.email}
+        />
+      )}
       <TruConversionIdentity email={data.customer.email} />
       {/* Mobile Header */}
       <MobileHeader
-        balance={data.wallet?.balanceFormatted || "$0"}
-        userName={data.customer.name || data.customer.email.split("@")[0]}
+        balance={canViewBilling ? (data.wallet?.balanceFormatted || "$0") : undefined}
+        userName={headerDisplayName}
         onMenuOpen={() => setShowMobileMenu(true)}
         onTopUp={() => setShowTopupModal(true)}
         logoUrl={logoUrl}
@@ -592,22 +758,28 @@ export function DashboardContent() {
           </Link>
         </div>
 
-        {/* User Info */}
+        {/* User Info — show the LOGGED-IN user's identity (PA-224), not the
+            operating account's customer. An invited member switching into
+            their inviter's team should keep seeing their own name. */}
         <div className="p-6 border-b border-[var(--line)]">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-12 h-12 bg-gradient-to-br from-teal-400 to-teal-600 rounded-full flex items-center justify-center text-white font-semibold text-lg">
-              {(data.customer.name || data.customer.email).charAt(0).toUpperCase()}
+              {headerDisplayName.charAt(0).toUpperCase()}
             </div>
             <div className="min-w-0">
               <p className="text-xs text-[var(--muted)]">{greeting},</p>
-              <p className="font-semibold text-[var(--ink)] truncate">{data.customer.name || data.customer.email.split("@")[0]}</p>
+              <p className="font-semibold text-[var(--ink)] truncate">{headerDisplayName}</p>
             </div>
           </div>
           {(tagline || easterEgg) && (
             <p className="text-xs text-zinc-400 italic mb-4 pl-1">{easterEgg || tagline}</p>
           )}
 
-          {/* Balance Card - Live Cost Ticker */}
+          {/* Multi-team switcher — only renders when user belongs to >1 team */}
+          {token && <AccountSwitcher token={token} />}
+
+          {/* Balance Card - Live Cost Ticker — billing-gated (PA-271) */}
+          {canViewBilling && (
           <div className="rounded-2xl p-4 text-white bg-gradient-to-br from-zinc-900 to-zinc-800">
             {/* Low balance banner */}
             {liveCostTicker.status === "critical" && (
@@ -682,6 +854,7 @@ export function DashboardContent() {
               </div>
             )}
           </div>
+          )}
         </div>
 
         {/* Navigation */}
@@ -698,43 +871,36 @@ export function DashboardContent() {
           <div className="pt-4 pb-1">
             <p className="px-4 text-xs font-medium text-zinc-400 uppercase tracking-wider">Compute</p>
           </div>
-          {isPro() && (
+          {/* PA-202: per-role module visibility. HF / Apps are hidden from
+              Read-only Member + Finance Manager. */}
+          {data.can?.["huggingface.use"] && (
             <NavItem
-              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>}
-              label="Token Factory"
-              badge="Alpha"
-              active={activeTab === "tokenfactory"}
-              onClick={() => setActiveTab("tokenfactory")}
+              icon={<span className="text-lg">🤗</span>}
+              label="Hugging Face"
+              active={activeTab === "huggingface"}
+              onClick={() => setActiveTab("huggingface")}
             />
           )}
-          {isPro() && (
+          {data.can?.["apps.use"] && (
             <NavItem
-              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>}
-              label="Pixel Factory"
-              badge="Alpha"
-              active={activeTab === "pixelfactory"}
-              onClick={() => setActiveTab("pixelfactory")}
+              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" /></svg>}
+              label="Apps"
+              active={activeTab === "apps"}
+              onClick={() => setActiveTab("apps")}
             />
           )}
-          <NavItem
-            icon={<span className="text-lg">🤗</span>}
-            label="Hugging Face"
-            active={activeTab === "huggingface"}
-            onClick={() => setActiveTab("huggingface")}
-          />
-          <NavItem
-            icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" /></svg>}
-            label="Apps"
-            active={activeTab === "apps"}
-            onClick={() => setActiveTab("apps")}
-          />
-          <NavItem
-            icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>}
-            label="Storage"
-            active={activeTab === "storage"}
-            onClick={() => setActiveTab("storage")}
-          />
-          {isPro() && data.bareMetalEnabled && (
+          {/* Storage: read-only visibility for both RoM (gpu.access) and FM
+              (billing.view). Actions inside the tab are gated on
+              storage.manage so neither can add/delete. */}
+          {(data.can?.["gpu.access"] || data.can?.["billing.view"]) && (
+            <NavItem
+              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>}
+              label="Storage"
+              active={activeTab === "storage"}
+              onClick={() => setActiveTab("storage")}
+            />
+          )}
+          {isPro() && data.bareMetalEnabled && data.can?.["gpu.provision"] && (
             <NavItem
               icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" /></svg>}
               label="Bare Metal"
@@ -742,31 +908,37 @@ export function DashboardContent() {
               onClick={() => setActiveTab("baremetal")}
             />
           )}
-          <NavItem
-            icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>}
-            label="Metrics"
-            active={activeTab === "metrics"}
-            onClick={() => setActiveTab("metrics")}
-          />
+          {/* Metrics: shown to RoM (gpu.access) and FM (billing.view).
+              Server-side filtering scopes the data to what each role can see. */}
+          {(data.can?.["gpu.access"] || data.can?.["billing.view"]) && (
+            <NavItem
+              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>}
+              label="Metrics"
+              active={activeTab === "metrics"}
+              onClick={() => setActiveTab("metrics")}
+            />
+          )}
 
           {/* Account Section */}
           <div className="pt-4 pb-1">
             <p className="px-4 text-xs font-medium text-zinc-400 uppercase tracking-wider">Account</p>
           </div>
-          <NavItem
-            icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>}
-            label="Billing"
-            active={activeTab === "billing"}
-            onClick={() => setActiveTab("billing")}
-          />
-          {data.isOwner && (
+          {/* Billing hidden from Team Member + Read-only Member (no billing.view). */}
+          {data.can?.["billing.view"] && (
             <NavItem
-              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>}
-              label="Team"
-              active={activeTab === "team"}
-              onClick={() => setActiveTab("team")}
+              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>}
+              label="Billing"
+              active={activeTab === "billing"}
+              onClick={() => setActiveTab("billing")}
             />
           )}
+          {/* Team tab visible to all active members (members list is default-read). */}
+          <NavItem
+            icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>}
+            label="Team"
+            active={activeTab === "team"}
+            onClick={() => setActiveTab("team")}
+          />
           <NavItem
             icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>}
             label="Settings"
@@ -795,28 +967,32 @@ export function DashboardContent() {
             onClick={() => setActiveTab("support")}
             showBadge={hasUnreadSupport}
           />
-          <NavItem
-            icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" /></svg>}
-            label="Referrals"
-            active={activeTab === "referrals"}
-            onClick={() => setActiveTab("referrals")}
-          />
+          {data.can?.["referral.view"] && (
+            <NavItem
+              icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" /></svg>}
+              label="Referrals"
+              active={activeTab === "referrals"}
+              onClick={() => setActiveTab("referrals")}
+            />
+          )}
         </nav>
 
         {/* Footer Links */}
         <div className="p-4 border-t border-[var(--line)] space-y-1">
-          <button
-            onClick={openBillingPortal}
-            disabled={billingPortalLoading}
-            className="flex items-center gap-3 px-4 py-2 text-sm text-[var(--muted)] hover:text-zinc-700 transition-colors w-full text-left disabled:opacity-50"
-          >
-            {billingPortalLoading ? (
-              <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-            ) : (
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
-            )}
-            Stripe Portal
-          </button>
+          {data.can?.["billing.view"] && (
+            <button
+              onClick={openBillingPortal}
+              disabled={billingPortalLoading}
+              className="flex items-center gap-3 px-4 py-2 text-sm text-[var(--muted)] hover:text-zinc-700 transition-colors w-full text-left disabled:opacity-50"
+            >
+              {billingPortalLoading ? (
+                <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+              )}
+              Stripe Portal
+            </button>
+          )}
           <button
             onClick={() => setShowLogoutModal(true)}
             className="flex items-center gap-3 px-4 py-2 text-sm text-[var(--muted)] hover:text-zinc-700 transition-colors w-full text-left"
@@ -847,29 +1023,35 @@ export function DashboardContent() {
                   <p className="text-sm text-[var(--muted)]">Manage your GPU instances</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setActiveTab("referrals")}
-                    className="text-sm text-teal-600 hover:text-teal-700 font-medium flex items-center gap-1.5"
-                  >
-                    <span>🎁</span>
-                    Refer a friend
-                  </button>
-                  <button
-                    onClick={handleLaunchGpu}
-                    className="px-4 py-2.5 border border-zinc-200 bg-white hover:bg-zinc-50 text-sm font-medium text-zinc-600 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
-                    </svg>
-                    On-demand
-                  </button>
-                  <button
-                    onClick={() => setShowMonthlyPlansModal(true)}
-                    className="px-4 py-2.5 bg-(--blue) hover:bg-(--blue-dark) text-white text-sm font-medium rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
-                  >
-                    Monthly
-                    <span className="text-blue-200 font-semibold text-xs">· Save up to 40%</span>
-                  </button>
+                  {data.can?.["referral.view"] && (
+                    <button
+                      onClick={() => setActiveTab("referrals")}
+                      className="text-sm text-teal-600 hover:text-teal-700 font-medium flex items-center gap-1.5"
+                    >
+                      <span>🎁</span>
+                      Refer a friend
+                    </button>
+                  )}
+                  {data.can?.["gpu.provision"] && (
+                    <>
+                      <button
+                        onClick={handleLaunchGpu}
+                        className="px-4 py-2.5 border border-zinc-200 bg-white hover:bg-zinc-50 text-sm font-medium text-zinc-600 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+                        </svg>
+                        On-demand
+                      </button>
+                      <button
+                        onClick={() => setShowMonthlyPlansModal(true)}
+                        className="px-4 py-2.5 bg-(--blue) hover:bg-(--blue-dark) text-white text-sm font-medium rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        Monthly
+                        <span className="text-blue-200 font-semibold text-xs">· Save up to 40%</span>
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -896,6 +1078,8 @@ export function DashboardContent() {
                   </div>
                 </div>
 
+                {/* PA-271: Spent / GPU Hours / Projected are financial — billing.view only */}
+                {canViewBilling && (<>
                 <div className="bg-white rounded-2xl p-5 border border-[var(--line)]">
                   <div className="text-xs text-[var(--muted)] mb-1">GPU Hours</div>
                   <div className="text-3xl font-bold text-[var(--ink)]">{gpuHoursFromTxns.toFixed(2)}h</div>
@@ -919,10 +1103,11 @@ export function DashboardContent() {
                   <div className="text-3xl font-bold text-[var(--ink)]">~${projectedSpend.toFixed(0)}</div>
                   <div className="text-xs text-zinc-400">this month</div>
                 </div>
+                </>)}
               </div>
 
-              {/* Monthly Subscription Entitlements — header always rendered so "Add Subscription" is reachable */}
-              {(() => {
+              {/* Monthly Subscription Entitlements — billing-gated (PA-271) */}
+              {canViewBilling && (() => {
                 // Each subscription can cover multiple slots via `quantity`; a single pod
                 // can only satisfy ONE slot. Iterate slot-by-slot and claim pods greedily
                 // so a qty=2 sub with one running pod still surfaces a "Not Deployed" card.
@@ -967,12 +1152,14 @@ export function DashboardContent() {
                           <span className="ml-2 text-sm font-normal text-zinc-400">({undeployedSubs.length})</span>
                         )}
                       </h2>
-                      <button
-                        onClick={() => setShowMonthlyPlansModal(true)}
-                        className="text-sm text-teal-600 hover:text-teal-700 font-medium"
-                      >
-                        Add Subscription
-                      </button>
+                      {data.can?.["gpu.provision"] && (
+                        <button
+                          onClick={() => setShowMonthlyPlansModal(true)}
+                          className="text-sm text-teal-600 hover:text-teal-700 font-medium"
+                        >
+                          Add Subscription
+                        </button>
+                      )}
                     </div>
                     {undeployedSubs.length === 0 ? (
                       <div className="bg-white rounded-2xl border border-dashed border-[var(--line)] p-5">
@@ -987,12 +1174,14 @@ export function DashboardContent() {
                                 : "Commit to a GPU monthly and pay a lower effective hourly rate than on-demand."}
                             </p>
                           </div>
-                          <button
-                            onClick={() => setShowMonthlyPlansModal(true)}
-                            className="shrink-0 px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white font-medium rounded-xl transition-colors text-sm"
-                          >
-                            View plans
-                          </button>
+                          {data.can?.["gpu.provision"] && (
+                            <button
+                              onClick={() => setShowMonthlyPlansModal(true)}
+                              className="shrink-0 px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white font-medium rounded-xl transition-colors text-sm"
+                            >
+                              View plans
+                            </button>
+                          )}
                         </div>
                       </div>
                     ) : (
@@ -1041,28 +1230,30 @@ export function DashboardContent() {
                                   <span className="ml-2 text-rose-500 font-medium">Cancels at period end</span>
                                 )}
                               </div>
-                              <button
-                                onClick={() => {
-                                  if (sub.productId) {
-                                    setLaunchSubscription({
-                                      productId: sub.productId,
-                                      stripeSubscriptionId: sub.id,
-                                    });
-                                    setShowLaunchModal(true);
-                                  } else {
-                                    // Fallback: no product link — use the
-                                    // normal launch path and rely on the API
-                                    // to resolve the sub from the price ID.
-                                    handleLaunchGpu();
-                                  }
-                                }}
-                                className="w-full px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white font-medium rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
-                              >
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                                </svg>
-                                Deploy GPU
-                              </button>
+                              {data.can?.["gpu.provision"] && (
+                                <button
+                                  onClick={() => {
+                                    if (sub.productId) {
+                                      setLaunchSubscription({
+                                        productId: sub.productId,
+                                        stripeSubscriptionId: sub.id,
+                                      });
+                                      setShowLaunchModal(true);
+                                    } else {
+                                      // Fallback: no product link — use the
+                                      // normal launch path and rely on the API
+                                      // to resolve the sub from the price ID.
+                                      handleLaunchGpu();
+                                    }
+                                  }}
+                                  className="w-full px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white font-medium rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
+                                >
+                                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                  </svg>
+                                  Deploy GPU
+                                </button>
+                              )}
                             </div>
                           </div>
                         );
@@ -1134,6 +1325,7 @@ export function DashboardContent() {
                           isMonthly={isMonthly}
                           monthlyPriceDisplay={monthlyPrice}
                           billingPortalUrl={isMonthly ? data?.billingPortalUrl : undefined}
+                          can={data?.can}
                         />
                       );
                     })}
@@ -1147,12 +1339,14 @@ export function DashboardContent() {
                     </div>
                     <h3 className="text-lg font-medium text-[var(--ink)] mb-2">{emptyState.title}</h3>
                     <p className="text-sm text-[var(--muted)] mb-6">{emptyState.subtitle}</p>
-                    <button
-                      onClick={handleLaunchGpu}
-                      className="px-6 py-3 bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white font-medium rounded-xl transition-colors"
-                    >
-                      Launch GPU
-                    </button>
+                    {data.can?.["gpu.provision"] && (
+                      <button
+                        onClick={handleLaunchGpu}
+                        className="px-6 py-3 bg-[var(--blue)] hover:bg-[var(--blue-dark)] text-white font-medium rounded-xl transition-colors"
+                      >
+                        Launch GPU
+                      </button>
+                    )}
                   </div>
                 ) : null}
 
@@ -1276,16 +1470,20 @@ export function DashboardContent() {
                 {/* Real-time GPU Hardware Metrics (from Netdata) */}
                 {totalRunning > 0 && <GPUHardwareMetrics token={token!} variant="dashboard" />}
 
-                {/* Billing Chart Card */}
-                <div className="bg-white rounded-2xl border border-[var(--line)] p-5">
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-semibold text-[var(--ink)]">Billing</h3>
-                    <span className="text-xs text-zinc-400">Last 14 days</span>
+                {/* Billing Chart Card — hidden for roles without billing.view
+                    (Read-only Member, Team Member). Same gate as the Billing
+                    sidebar tab. */}
+                {data.can?.["billing.view"] && (
+                  <div className="bg-white rounded-2xl border border-[var(--line)] p-5">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="font-semibold text-[var(--ink)]">Billing</h3>
+                      <span className="text-xs text-zinc-400">Last 14 days</span>
+                    </div>
+                    <div className="h-44">
+                      <UsageChart transactions={data.transactions} />
+                    </div>
                   </div>
-                  <div className="h-44">
-                    <UsageChart transactions={data.transactions} />
-                  </div>
-                </div>
+                )}
 
                 {/* Activity Log Card */}
                 <div className="bg-white rounded-2xl border border-[var(--line)] p-5">
@@ -1331,7 +1529,7 @@ export function DashboardContent() {
             </>
           )}
 
-          {activeTab === "billing" && (
+          {activeTab === "billing" && canViewBilling && (
             <BillingTab
               transactions={data.transactions}
               walletBalance={data.wallet?.balanceFormatted || "$0"}
@@ -1345,59 +1543,18 @@ export function DashboardContent() {
             />
           )}
 
-          {activeTab === "team" && data.isOwner && (
+          {activeTab === "team" && (
             <div>
               <h1 className="text-2xl font-bold text-[var(--ink)] mb-6">Team</h1>
-              <TeamMembers token={token!} isOwner={data.isOwner} />
-            </div>
-          )}
-
-          {activeTab === "tokenfactory" && token && <TokenFactoryTab token={token} />}
-
-          {activeTab === "pixelfactory" && (
-            <div style={{
-              maxWidth: "640px",
-              margin: "80px auto",
-              textAlign: "center",
-              padding: "60px 40px",
-              background: "var(--panel)",
-              borderRadius: "16px",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
-            }}>
-              <div style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto 24px",
-                background: "linear-gradient(135deg, var(--blue) 0%, var(--teal) 100%)",
-                borderRadius: "20px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                opacity: 0.7,
-              }}>
-                <svg style={{ width: "40px", height: "40px", color: "white" }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-              </div>
-              <h2 style={{
-                fontSize: "24px",
-                fontWeight: "700",
-                color: "var(--ink)",
-                fontFamily: "var(--font-display)",
-                marginBottom: "12px",
-              }}>
-                Pixel Factory is Under Maintenance
-              </h2>
-              <p style={{
-                fontSize: "15px",
-                color: "var(--muted)",
-                lineHeight: "1.6",
-                maxWidth: "440px",
-                margin: "0 auto",
-              }}>
-                {"We're upgrading our image generation infrastructure. Pixel Factory will be back shortly. Thanks for your patience!"}
-              </p>
+              <TeamMembers
+                token={token!}
+                accountId={data.customer.id}
+                canInvite={data.can?.["team.invite"] ?? data.isOwner}
+                canManage={data.can?.["team.manage"] ?? data.isOwner}
+                currentUserId={null}
+                teamName={data.customer.teamName}
+                ownerEmailFallback={data.customer.email}
+              />
             </div>
           )}
 
@@ -1439,7 +1596,12 @@ export function DashboardContent() {
             />
           )}
 
-          {activeTab === "storage" && token && <StorageTab token={token} />}
+          {activeTab === "storage" && token && (
+            <StorageTab
+              token={token}
+              canManage={data?.can?.["storage.manage"] ?? false}
+            />
+          )}
 
           {activeTab === "baremetal" && token && <BareMetalTab token={token} onTopUp={() => setShowTopupModal(true)} />}
 
@@ -1455,15 +1617,6 @@ export function DashboardContent() {
 
               {/* Budget Controls Section */}
               <BudgetSettings token={token!} />
-
-              {/* Rate Limit Settings Section */}
-              <RateLimitSettings token={token!} />
-
-              {/* Session Settings Section */}
-              <SessionSettings
-                token={token!}
-                onSessionTimeoutChange={setSessionTimeoutHours}
-              />
 
               {/* API Keys Section */}
               <ApiKeysSettings token={token!} />
@@ -1499,8 +1652,6 @@ export function DashboardContent() {
         {/* Footer - Desktop only */}
         <footer className="hidden md:block border-t border-[var(--line)] bg-white/80 backdrop-blur-xl px-8 py-4">
           <p className="text-center text-[var(--muted)] text-xs">
-            Session expires in {sessionTimeoutHours} {sessionTimeoutHours === 1 ? "hour" : "hours"} · <Link href="/account" className="text-[var(--blue)] hover:underline">Request new link</Link>
-            <span className="mx-2">·</span>
             © {new Date().getFullYear()} {brandName} · Powered by <a href="https://hosted.ai" className="text-[var(--blue)] hover:underline" target="_blank" rel="noopener noreferrer">hosted.ai</a>
             {process.env.NEXT_PUBLIC_APP_VERSION && <>
               <span className="mx-2">·</span>
@@ -1511,11 +1662,16 @@ export function DashboardContent() {
       </main>
 
       {/* Launch GPU Modal */}
+      {/* key forces a clean remount when the pre-seeded product/subscription
+          changes, so the stepper re-initialises instead of keeping stale state
+          (the init effect only runs on isOpen/token changes). */}
       <LaunchGPUModal
+        key={launchSubscription?.productId ?? launchProductId ?? launchCategorySlug ?? "browse"}
         isOpen={showLaunchModal}
         onClose={() => {
           setShowLaunchModal(false);
           setLaunchProductId(undefined);
+          setLaunchCategorySlug(undefined);
           setLaunchSubscription(null);
         }}
         token={token!}
@@ -1523,6 +1679,7 @@ export function DashboardContent() {
         onSuccess={(launchInfo) => {
           setProvisioningGpu(launchInfo);
           setLaunchProductId(undefined);
+          setLaunchCategorySlug(undefined);
           setLaunchSubscription(null);
           const pollInterval = setInterval(() => fetchInstances(), 3000);
           setTimeout(() => clearInterval(pollInterval), 60000);
@@ -1538,6 +1695,7 @@ export function DashboardContent() {
         onTopup={handleTopup}
         topupLoading={topupLoading}
         initialProductId={launchProductId}
+        initialCategorySlug={launchCategorySlug}
         lockedProductId={launchSubscription?.productId}
         stripeSubscriptionId={launchSubscription?.stripeSubscriptionId}
       />
@@ -1561,14 +1719,16 @@ export function DashboardContent() {
         onDownloadCSV={downloadActivityCSV}
       />
 
-      {/* Transactions Modal */}
-      <TransactionsModal
-        isOpen={showTransactionsModal}
-        onClose={() => setShowTransactionsModal(false)}
-        transactions={data?.transactions || []}
-        formatDateTime={formatDateTime}
-        onDownloadCSV={downloadTransactionsCSV}
-      />
+      {/* Transactions Modal — billing-gated (PA-271) */}
+      {canViewBilling && (
+        <TransactionsModal
+          isOpen={showTransactionsModal}
+          onClose={() => setShowTransactionsModal(false)}
+          transactions={data?.transactions || []}
+          formatDateTime={formatDateTime}
+          onDownloadCSV={downloadTransactionsCSV}
+        />
+      )}
 
       {/* Logout Confirmation Modal */}
       <LogoutConfirmModal
@@ -1588,8 +1748,12 @@ export function DashboardContent() {
       {/* Monthly plans picker — lists all active monthly products */}
       <MonthlyPlansModal
         isOpen={showMonthlyPlansModal}
-        onClose={() => setShowMonthlyPlansModal(false)}
+        onClose={() => {
+          setShowMonthlyPlansModal(false);
+          setMonthlyCategorySlug(undefined);
+        }}
         customerEmail={data?.customer?.email}
+        initialCategorySlug={monthlyCategorySlug}
       />
 
       {/* Welcome Modal for new users */}
@@ -1614,9 +1778,10 @@ export function DashboardContent() {
       <MobileMenuSheet
         isOpen={showMobileMenu}
         onClose={() => setShowMobileMenu(false)}
-        userName={data.customer.name || data.customer.email.split("@")[0]}
-        userEmail={data.customer.email}
+        userName={headerDisplayName}
+        userEmail={data.userEmail}
         isOwner={data.isOwner}
+        can={data.can}
         bareMetalEnabled={isPro() && data.bareMetalEnabled}
         onTabChange={(tab) => {
           setActiveTab(tab as TabType);
@@ -1675,6 +1840,7 @@ export function DashboardContent() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

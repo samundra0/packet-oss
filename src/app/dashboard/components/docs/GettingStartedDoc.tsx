@@ -50,10 +50,6 @@ export function GettingStartedDoc() {
             <td>One-click deployment of any HuggingFace model with vLLM inference server.</td>
           </tr>
           <tr>
-            <td><strong>Token Factory</strong></td>
-            <td>OpenAI-compatible API for LLM inference with batch processing and LoRA support.</td>
-          </tr>
-          <tr>
             <td><strong>Persistent Storage</strong></td>
             <td>NFS-based storage that survives instance restarts. Perfect for datasets and checkpoints.</td>
           </tr>
@@ -385,11 +381,6 @@ uvicorn app:app --host 0.0.0.0 --port 8000`}</code>
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td><strong>Token Factory</strong></td>
-            <td>Use our hosted LLM inference API with pay-per-token pricing</td>
-            <td><a href="?tab=tokenfactory">Token Factory Docs</a></td>
-          </tr>
           <tr>
             <td><strong>HuggingFace Deployment</strong></td>
             <td>One-click deployment of any HuggingFace model</td>

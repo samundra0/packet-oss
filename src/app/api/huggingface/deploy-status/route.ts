@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import { getUnifiedInstances } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
 import { sendHfDeploymentEmail } from "@/lib/email";
@@ -138,6 +139,10 @@ export async function GET(request: NextRequest) {
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
     const { payload, customer, teamId } = auth;
+
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = requirePermission(auth, "huggingface.use", request);
+    if (denial) return denial;
 
     const { searchParams } = new URL(request.url);
     const instanceId = searchParams.get("subscriptionId");

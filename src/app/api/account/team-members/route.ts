@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import { sendEmail, escapeHtml } from "@/lib/email";
 import { generateCustomerToken } from "@/lib/customer-auth";
 import {
@@ -168,6 +169,12 @@ export async function POST(request: NextRequest) {
 
     console.log("[Team Invite] Token valid for customer:", payload.customerId);
 
+    // PR 3 PRE-WORK SECURITY FIX (2026-05-19): same bug class as the legacy
+    // DELETE — POST had no role check, so any team member could invite people.
+    // Gate via team.invite (teamAdmin only per PA-201 matrix).
+    const inviteDenial = requirePermission(auth, "team.invite", request);
+    if (inviteDenial) return inviteDenial;
+
     const { email, name } = await request.json();
     console.log("[Team Invite] Inviting email:", email, "name:", name);
 
@@ -263,21 +270,26 @@ export async function POST(request: NextRequest) {
 }
 
 // DELETE - Remove a team member
+// PR 3 PRE-WORK SECURITY FIX (2026-05-19):
+// Previously this route had no role check — ANY authenticated team member
+// (not just the Owner) could DELETE other members of their own account by
+// passing the legacy memberId. `payload.customerId` only verifies the caller
+// is acting on their own account, NOT that they have permission to remove
+// people. That's a privilege escalation for non-Owner members.
+//
+// Fix: gate via `getAuthenticatedCustomer` + `requirePermission("team.manage")`
+// — only Team Admins (incl. Owner) can hit this endpoint. The UI no longer
+// uses this route (PR 3 switched to /api/accounts/:accountId/members/:userId),
+// so callers should be effectively zero — but the route stays gated for
+// defense-in-depth until it's removed entirely.
 export async function DELETE(request: NextRequest) {
   try {
-    const token = request.headers.get("authorization")?.replace("Bearer ", "");
+    const auth = await getAuthenticatedCustomer(request);
+    if (auth instanceof NextResponse) return auth;
+    const { payload } = auth;
 
-    if (!token) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const payload = verifyCustomerToken(token);
-    if (!payload) {
-      return NextResponse.json(
-        { error: "Invalid or expired token" },
-        { status: 401 }
-      );
-    }
+    const denial = requirePermission(auth, "team.manage", request);
+    if (denial) return denial;
 
     const { searchParams } = new URL(request.url);
     const memberId = searchParams.get("id");
@@ -289,7 +301,8 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Remove the team member
+    // Remove the team member (legacy table). Defense in depth: pass the
+    // caller's customerId so the deletion is also scoped to their account.
     await removeTeamMember(memberId, payload.customerId);
 
     return NextResponse.json({ success: true });

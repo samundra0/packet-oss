@@ -29,6 +29,10 @@ interface GPUCardServicesProps {
   subscriptionId: string;
   podName?: string;
   onServicesUpdated: (services: ExposedService[]) => void;
+  /** Whether the current user can expose/un-expose services. Matches the
+   *  gpu.provision permission used by the /api/services route. RoM and FM
+   *  view the list read-only with both controls hidden. */
+  canProvision: boolean;
 }
 
 export function GPUCardServices({
@@ -38,6 +42,7 @@ export function GPUCardServices({
   subscriptionId,
   podName,
   onServicesUpdated,
+  canProvision,
 }: GPUCardServicesProps) {
   const [showExposeServiceForm, setShowExposeServiceForm] = useState(false);
   const [serviceForm, setServiceForm] = useState<ServiceForm>({
@@ -157,18 +162,20 @@ export function GPUCardServices({
             </svg>
             <span className="text-sm font-medium text-[var(--ink)]">Exposed Services</span>
           </div>
-          <button
-            onClick={() => {
-              setShowExposeServiceForm(!showExposeServiceForm);
-              if (showExposeServiceForm) {
-                setEditingServiceId(null);
-                setServiceForm({ service_name: '', port: '', protocol: 'TCP', service_type: 'http' });
-              }
-            }}
-            className="text-xs px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 font-medium transition-colors"
-          >
-            {showExposeServiceForm ? 'Cancel' : '+ Expose Port'}
-          </button>
+          {canProvision && (
+            <button
+              onClick={() => {
+                setShowExposeServiceForm(!showExposeServiceForm);
+                if (showExposeServiceForm) {
+                  setEditingServiceId(null);
+                  setServiceForm({ service_name: '', port: '', protocol: 'TCP', service_type: 'http' });
+                }
+              }}
+              className="text-xs px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 font-medium transition-colors"
+            >
+              {showExposeServiceForm ? 'Cancel' : '+ Expose Port'}
+            </button>
+          )}
         </div>
 
         {loadingServices && (
@@ -291,15 +298,17 @@ export function GPUCardServices({
                         </span>
                       )}
                     </div>
-                    <button
-                      onClick={() => handleDeleteService(service.id)}
-                      className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
-                      title="Remove"
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
+                    {canProvision && (
+                      <button
+                        onClick={() => handleDeleteService(service.id)}
+                        className="p-1.5 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                        title="Remove"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                   <div className="text-xs text-zinc-500 mb-2">
                     Port {service.internal_port || service.port} → {service.external_port || service.port}

@@ -31,7 +31,11 @@ vi.mock('@/components/BrandLogo', () => ({
 }));
 
 import { POST } from '@/app/api/checkout/route';
-import { WelcomeModal } from '@/app/dashboard/components/modals/WelcomeModal';
+// The monthly flat-rate checkout was moved out of WelcomeModal (PA-163 removed
+// the "Flat Rate Blackwell" card from the on-demand welcome modal) into
+// BlackwellModal, which is now the component that performs the monthly
+// /api/checkout with termsAccepted: true.
+import { BlackwellModal } from '@/app/dashboard/components/modals/BlackwellModal';
 
 function makeRequest(body: unknown): NextRequest {
   return new NextRequest('http://localhost:3000/api/checkout', {
@@ -86,7 +90,7 @@ describe('POST /api/checkout — TOS enforcement (PA-147)', () => {
   });
 });
 
-describe('WelcomeModal → /api/checkout (PA-147)', () => {
+describe('BlackwellModal → /api/checkout (PA-147)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -118,17 +122,15 @@ describe('WelcomeModal → /api/checkout (PA-147)', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     render(
-      <WelcomeModal
+      <BlackwellModal
         isOpen={true}
         onClose={() => {}}
-        token="test-jwt-token"
-        topupLoading={false}
-        onTopup={() => {}}
         customerEmail="customer@example.com"
       />
     );
 
-    const btn = await screen.findByText(/Flat Rate Blackwell/i);
+    // The Subscribe CTA only enables once the monthly product has loaded.
+    const btn = await screen.findByText(/Subscribe — \$199\/mo/i);
     btn.closest('button')!.click();
 
     await waitFor(() => {

@@ -13,7 +13,7 @@ import { getStripe } from "@/lib/stripe";
 import { getWalletBalance } from "@/lib/wallet";
 import { getSharedVolumes } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
-import Stripe from "stripe";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 export async function GET(request: NextRequest) {
   try {
@@ -27,8 +27,20 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
     }
 
+    // PA-175: resolve the operating account. JWT.customerId is the auth
+    // identity (which can be the monthly billing artefact); the workspace
+    // we read wallet/team/SSH/etc. from is the primary or the active team.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
     const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(payload.customerId)) as Stripe.Customer;
+    const customer = ctx.customer;
+    const accountId = ctx.accountId;
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });
@@ -51,57 +63,37 @@ export async function GET(request: NextRequest) {
         orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
         include: { categories: { select: { id: true } } },
       }),
-      getWalletBalance(payload.customerId).then(w => w.availableBalance).catch(() => 0),
+      getWalletBalance(accountId).then(w => w.availableBalance).catch(() => 0),
       getSharedVolumes(teamId).catch(() => []),
       prisma.sSHKey.findMany({
-        where: { stripeCustomerId: payload.customerId },
+        where: { stripeCustomerId: accountId },
         select: { id: true, name: true, fingerprint: true, createdAt: true },
         orderBy: { createdAt: "desc" },
       }).catch(() => []),
     ]);
 
     // === ENTITLEMENT CHECK ===
-    // Check which billing types the customer is entitled to
     const customerBillingType = customer.metadata?.billing_type;
     const hasHourlyWallet = customerBillingType === "hourly" || customerBillingType === "free_trial" || customerBillingType === "free";
 
-    // Check monthly subscriptions across all customer accounts with same email
+    // Monthly subscriptions live on linked monthly customer(s). Reuse the
+    // context's monthlyCustomerIds instead of re-listing by email.
     const subscribedPriceIds = new Set<string>();
-    let hourlyCustomerId: string | null = hasHourlyWallet ? payload.customerId : null;
-
-    if (customer.email) {
+    const hourlyCustomerId: string | null = hasHourlyWallet ? accountId : null;
+    const subsLookupIds = [accountId, ...ctx.monthlyCustomerIds];
+    for (const cid of subsLookupIds) {
       try {
-        const allCustomers = await stripe.customers.list({ email: customer.email, limit: 20 });
-        for (const cust of allCustomers.data) {
-          const bt = cust.metadata?.billing_type;
-          if (!hourlyCustomerId && (bt === "hourly" || bt === "free_trial" || bt === "free")) {
-            hourlyCustomerId = cust.id;
-          }
-          try {
-            const subs = await stripe.subscriptions.list({ customer: cust.id, status: "active", limit: 10 });
-            for (const sub of subs.data) {
-              const priceId = sub.items?.data?.[0]?.price?.id;
-              if (priceId) subscribedPriceIds.add(priceId);
-            }
-          } catch (err) {
-            console.error(`Failed to fetch subscriptions for ${cust.id}:`, err);
-          }
+        const subs = await stripe.subscriptions.list({ customer: cid, status: "active", limit: 10 });
+        for (const sub of subs.data) {
+          const priceId = sub.items?.data?.[0]?.price?.id;
+          if (priceId) subscribedPriceIds.add(priceId);
         }
       } catch (err) {
-        console.error("Failed to list customers by email:", err);
+        console.error(`Failed to fetch subscriptions for ${cid}:`, err);
       }
     }
 
-    // Re-fetch wallet from hourly customer if different from primary
-    let walletBalanceCents = walletBalance;
-    if (hourlyCustomerId && hourlyCustomerId !== payload.customerId) {
-      try {
-        const hourlyWallet = await getWalletBalance(hourlyCustomerId);
-        walletBalanceCents = hourlyWallet.availableBalance;
-      } catch (err) {
-        console.error(`Failed to fetch wallet from hourly customer ${hourlyCustomerId}:`, err);
-      }
-    }
+    const walletBalanceCents = walletBalance;
 
     // === FILTER PRODUCTS BY ENTITLEMENT ===
     const entitledProducts = dbProducts.filter(p => {

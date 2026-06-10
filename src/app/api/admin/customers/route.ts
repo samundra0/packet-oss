@@ -18,6 +18,23 @@ const SORT_FIELD_MAP: Record<string, string> = {
   created: "stripeCreatedAt",
 };
 
+// PA-180: the table only shows email + name to admins. teamId is a UUID and
+// `id` is the opaque Stripe customer id — short numeric queries like "88"
+// were matching hex pairs inside UUIDs and returning rows the admin couldn't
+// correlate with their query. Only widen the search to those columns when
+// the query actually looks like an id of that shape.
+function buildSearchOr(search: string) {
+  const looksLikeStripeId = /^cus_/i.test(search);
+  const looksLikeUuidFragment = search.length >= 8 && /^[0-9a-f-]+$/i.test(search);
+
+  return [
+    { email: { contains: search } },
+    { name: { contains: search } },
+    ...(looksLikeStripeId ? [{ id: { contains: search } }] : []),
+    ...(looksLikeUuidFragment ? [{ teamId: { contains: search } }] : []),
+  ];
+}
+
 export async function GET(request: NextRequest) {
   const sessionToken = request.cookies.get("admin_session")?.value;
   if (!sessionToken) {
@@ -44,16 +61,7 @@ export async function GET(request: NextRequest) {
       const allCached = await prisma.customerCache.findMany({
         where: {
           isDeleted: false,
-          ...(search
-            ? {
-                OR: [
-                  { email: { contains: search } },
-                  { name: { contains: search } },
-                  { id: { contains: search } },
-                  { teamId: { contains: search } },
-                ],
-              }
-            : {}),
+          ...(search ? { OR: buildSearchOr(search) } : {}),
         },
       });
 
@@ -97,16 +105,7 @@ export async function GET(request: NextRequest) {
 
     const where: Prisma.CustomerCacheWhereInput = {
       isDeleted: false,
-      ...(search
-        ? {
-            OR: [
-              { email: { contains: search } },
-              { name: { contains: search } },
-              { id: { contains: search } },
-              { teamId: { contains: search } },
-            ],
-          }
-        : {}),
+      ...(search ? { OR: buildSearchOr(search) } : {}),
     };
 
     const [cachedCustomers, total] = await Promise.all([

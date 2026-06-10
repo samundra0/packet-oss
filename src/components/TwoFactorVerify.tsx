@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getBrandName, getLogoUrl } from "@/lib/branding";
+import { getBrandName, getLogoUrl } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
 
 interface TwoFactorVerifyProps {

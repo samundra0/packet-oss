@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { getStripe } from "@/lib/stripe";
 import { resolveAllTeamsForEmail } from "@/lib/customer-resolver";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   createInstance,
   getUnifiedInstances,
@@ -15,11 +16,13 @@ import { prisma } from "@/lib/prisma";
 import { sendGpuLaunchedEmail } from "@/lib/email";
 import { generateCustomerToken } from "@/lib/customer-auth";
 import { getWalletBalance, deductUsage, refundDeployment } from "@/lib/wallet";
+import { monitorDeployStatus } from "@/lib/deploy-monitor";
 import { cacheCustomer } from "@/lib/customer-cache";
 // Pricing now comes from GpuProduct model, not static config
 import { randomBytes } from "crypto";
 import Stripe from "stripe";
 import { installMetricsCollector } from "@/lib/metrics-collector";
+import { gatePermission } from "@/lib/auth/gate";
 
 // Billing constants
 const MINIMUM_BILLING_MINUTES = 30; // Minimum billing period in minutes
@@ -41,25 +44,29 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Resolve ALL teams for this email — customers may have multiple Stripe
-    // accounts (hourly + monthly) that link to different hosted.ai teams.
-    // We consolidate all pods into a single dashboard view.
-    const resolved = await resolveAllTeamsForEmail(payload.email, payload.customerId);
-    if (!resolved || resolved.allTeamIds.length === 0) {
+    // PA-175: resolve the OPERATING account, not just the user's own teams.
+    // A Read-only / Team Member viewing their owner's team needs the
+    // owner's team pods — those live on the owner's customer, not theirs.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx || ctx.allTeamIds.length === 0) {
       return NextResponse.json(
         { error: "No team associated with this account" },
         { status: 400 }
       );
     }
 
-    const customer = resolved.primaryCustomer;
+    const customer = ctx.customer;
     cacheCustomer(customer).catch(() => {});
-    console.log(`[Instances GET] Resolved ${payload.email}: primary=${customer.id}, teams=[${resolved.allTeamIds.join(",")}]`);
+    console.log(`[Instances GET] Resolved ${payload.email}: account=${customer.id}, teams=[${ctx.allTeamIds.join(",")}]`);
 
     // HAI 2.2: Fetch unified instances from ALL teams in parallel
     let poolSubscriptions: PoolSubscription[] = [];
     const teamFetchResults = await Promise.all(
-      resolved.allTeamIds.map(async (teamId) => {
+      ctx.allTeamIds.map(async (teamId) => {
         try {
           const result = await getUnifiedInstances(teamId);
           return result.items || [];
@@ -96,7 +103,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    console.log(`[Instances GET] Fetched ${poolSubscriptions.length} unified instances across ${resolved.allTeamIds.length} team(s)`);
+    console.log(`[Instances GET] Fetched ${poolSubscriptions.length} unified instances across ${ctx.allTeamIds.length} team(s)`);
 
     // Fetch instance details in parallel to get shared_volumes and root_disk info
     if (poolSubscriptions.length > 0) {
@@ -137,12 +144,27 @@ export async function GET(request: NextRequest) {
             ram_mb: detail.instance_type.ram_mb,
           };
         }
+
+        // PA-183: the LIST endpoint's pod_info often omits vgpu_count (or
+        // reports 1 while the instance is still Pending), so a multi-GPU
+        // instance renders as "1 GPU". The DETAIL endpoint carries the real
+        // provisioned count — backfill it here so the card shows e.g. "2 GPU".
+        const detailVgpu = detail.pod_info?.vgpu_count;
+        if (typeof detailVgpu === "number" && detailVgpu > 0) {
+          poolSubscriptions[i].per_pod_info = {
+            ...poolSubscriptions[i].per_pod_info,
+            vgpu_count: detailVgpu,
+          };
+          if (poolSubscriptions[i].pods?.[0]) {
+            poolSubscriptions[i].pods![0].gpu_count = detailVgpu;
+          }
+        }
       }
     }
 
     // Fetch pod metadata for unified instances
     const instanceIds = poolSubscriptions.map(s => String(s.id));
-    type MetaValue = { displayName: string | null; notes: string | null; hourlyRate?: number; startupScriptStatus?: string | null; stripeSubscriptionId?: string; billingType?: string };
+    type MetaValue = { displayName: string | null; notes: string | null; hourlyRate?: number; startupScriptStatus?: string | null; stripeSubscriptionId?: string; billingType?: string; deployStatus?: string | null; deployStatusReason?: string | null };
     let podMetadata: Record<string, MetaValue> = {};
     let hfDeployments: Record<string, {
       id: string;
@@ -168,7 +190,20 @@ export async function GET(request: NextRequest) {
             ],
           },
         });
-        podMetadata = metadata.reduce((acc, m) => {
+        // Tie-breaker for the (rare) case where multiple rows reference the
+        // same HAI instance: prefer the row that has instanceId populated, then
+        // the row whose subscriptionId uses the canonical "instance-" prefix,
+        // then an explicit billingType. This keeps a stray reconciliation-style
+        // row from overwriting a properly-deployed monthly row when both exist.
+        const rowScore = (m: typeof metadata[number]) => {
+          let s = 0;
+          if (m.instanceId) s += 4;
+          if (m.subscriptionId.startsWith("instance-")) s += 2;
+          if (m.billingType) s += 1;
+          return s;
+        };
+        const sortedMeta = [...metadata].sort((a, b) => rowScore(a) - rowScore(b));
+        podMetadata = sortedMeta.reduce((acc, m) => {
           const metaValue: MetaValue = {
             displayName: m.displayName,
             notes: m.notes,
@@ -176,6 +211,8 @@ export async function GET(request: NextRequest) {
             startupScriptStatus: m.startupScriptStatus,
             stripeSubscriptionId: m.stripeSubscriptionId || undefined,
             billingType: m.billingType || undefined,
+            deployStatus: m.deployStatus,
+            deployStatusReason: m.deployStatusReason,
           };
           // Index by instanceId (primary key for 2.2)
           if (m.instanceId) acc[m.instanceId] = metaValue;
@@ -239,17 +276,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Resolve to primary customer for deployment (wallet, team)
+    // PA-175: resolve the OPERATING account so an invited member deploying
+    // from a switched-into team targets the team Owner's customer (wallet,
+    // team_id, SSH keys, predeploy lock all live there). Before this fix
+    // the deploy went against the JWT user's OWN primary customer, which
+    // is wrong when they're operating in a team they don't own.
     const stripe = await getStripe();
-    const resolved = await resolveAllTeamsForEmail(payload.email, payload.customerId);
-    if (!resolved || resolved.allTeamIds.length === 0) {
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
       return NextResponse.json(
         { error: "No team associated with this account" },
         { status: 400 }
       );
     }
-
-    const customer = resolved.primaryCustomer;
+    const customer = ctx.customer;
     cacheCustomer(customer).catch(() => {});
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
@@ -258,6 +302,17 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // PA-175 gate: provisioning a new GPU requires gpu.provision on the
+    // OPERATING team (not the JWT user's own customer).
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "gpu.provision",
+      request,
+    });
+    if (denial) return denial;
 
     const body = await request.json();
     const {
@@ -412,7 +467,7 @@ async function handleUnifiedInstanceCreate({
   }
 
   try {
-    await stripe.customers.update(payload.customerId, {
+    await stripe.customers.update(customer.id, {
       metadata: { ...customer.metadata, [lockKey]: now.toString() },
     });
   } catch (lockErr) {
@@ -421,16 +476,21 @@ async function handleUnifiedInstanceCreate({
 
   const clearDeployLock = async () => {
     try {
-      const fresh = await stripe.customers.retrieve(payload.customerId) as Stripe.Customer;
+      const fresh = await stripe.customers.retrieve(customer.id) as Stripe.Customer;
       cacheCustomer(fresh).catch(() => {});
       const meta = { ...fresh.metadata };
       delete meta[lockKey];
-      const unlocked = await stripe.customers.update(payload.customerId, { metadata: meta });
+      const unlocked = await stripe.customers.update(customer.id, { metadata: meta });
       cacheCustomer(unlocked as Stripe.Customer).catch(() => {});
     } catch (e) {
       console.error("[Billing] Failed to release lock:", e);
     }
   };
+
+  // Tracks the wallet pre-charge so the outer catch can refund if anything
+  // throws between deductUsage and the createInstance try/catch — e.g. the
+  // SSH key DB lookup at lines ~700-717 (PA-158 secondary gap).
+  let prechargedCents = 0;
 
   try {
     // Use provisioning-info to get locked defaults from the service
@@ -652,7 +712,7 @@ async function handleUnifiedInstanceCreate({
         );
       }
 
-      const walletBalance = await getWalletBalance(payload.customerId);
+      const walletBalance = await getWalletBalance(customer.id);
       if (walletBalance.availableBalance < prepaidAmountCents) {
         await clearDeployLock();
         return NextResponse.json(
@@ -663,10 +723,10 @@ async function handleUnifiedInstanceCreate({
 
       deployTime = new Date();
       prepaidUntil = new Date(deployTime.getTime() + prepaidMinutes * 60 * 1000);
-      const preDeployId = `predeploy_${payload.customerId}_${Date.now()}`;
+      const preDeployId = `predeploy_${customer.id}_${Date.now()}`;
 
       const deductResult = await deductUsage(
-        payload.customerId,
+        customer.id,
         (prepaidMinutes / 60) * gpuCount,
         `GPU deploy: ${gpuProduct.name} @ $${(hourlyRateCents / 100).toFixed(2)}/hr`,
         hourlyRateCents,
@@ -680,6 +740,7 @@ async function handleUnifiedInstanceCreate({
           { status: 402 }
         );
       }
+      prechargedCents = prepaidAmountCents;
     }
 
     // === DEPLOY via create-instance ===
@@ -703,7 +764,7 @@ async function handleUnifiedInstanceCreate({
       const keyIds = (ssh_key_ids as string[]).filter(id => typeof id === "string" && id.length > 0);
       if (keyIds.length > 0) {
         const savedKeys = await prisma.sSHKey.findMany({
-          where: { id: { in: keyIds }, stripeCustomerId: payload.customerId },
+          where: { id: { in: keyIds }, stripeCustomerId: customer.id },
           select: { id: true, publicKey: true },
         });
         publicKeys = savedKeys.map(k => k.publicKey);
@@ -740,10 +801,12 @@ async function handleUnifiedInstanceCreate({
         const errMsg = deployError instanceof Error ? deployError.message : "";
         console.log(`[Billing] Deployment failed, refunding $${(prepaidAmountCents / 100).toFixed(2)}`);
         await refundDeployment(
-          payload.customerId,
+          customer.id,
           prepaidAmountCents,
           `Refund: deployment failed - ${errMsg.slice(0, 100)}`
         );
+        // Refund handled here; signal the outer catch to skip it.
+        prechargedCents = 0;
       }
       await clearDeployLock();
       throw deployError;
@@ -760,13 +823,17 @@ async function handleUnifiedInstanceCreate({
     // the real HAI-confirmed pool_id if this is unavailable at deploy time
     const derivedPoolId: string | null = selectedPoolId ? String(selectedPoolId) : null;
 
-    // Save PodMetadata with instanceId
+    // Save PodMetadata with deployStatus="provisioning". The dashboard polls
+    // GET /api/instances and shows a "Provisioning…" badge until the
+    // background monitor flips this to "running" (or "failed_refunded" on
+    // HAI-side failure — see PA-158).
+    let metadataSaved = false;
     try {
       await prisma.podMetadata.create({
         data: {
           subscriptionId: `instance-${instanceId}`, // Unique placeholder for legacy compat
           instanceId,
-          stripeCustomerId: payload.customerId,
+          stripeCustomerId: customer.id,
           displayName: name as string,
           deployTime,
           prepaidUntil: isMonthlyDeploy ? null : prepaidUntil,
@@ -777,14 +844,18 @@ async function handleUnifiedInstanceCreate({
           metricsToken,
           startupScript: (startup_script as string) || null,
           startupScriptStatus: "pending",
+          deployStatus: "provisioning",
           billingType: isMonthlyDeploy ? "monthly" : "hourly",
           stripeSubscriptionId: resolvedStripeSubId || null,
           sharedVolumeId: sharedVolumes[0] || null,
         },
       });
+      metadataSaved = true;
       console.log(`[HAI 2.2] Saved PodMetadata for instance ${instanceId}`);
 
-      // Install metrics collector and run startup script
+      // Install metrics collector and run startup script. Both internally
+      // wait for the pod to reach "running" before doing real work, so
+      // it's safe to schedule them now.
       installMetricsCollector(instanceId, teamId, metricsToken).catch((err) => {
         console.error(`[Metrics] Failed to install for ${instanceId}:`, err);
       });
@@ -797,11 +868,13 @@ async function handleUnifiedInstanceCreate({
       console.error("[HAI 2.2] Failed to save PodMetadata:", metaErr);
     }
 
-    // Log wallet transaction (hourly only)
+    // Log wallet transaction (hourly only). The pre-charge is real regardless
+    // of whether the pod ultimately runs; a refund (if any) appears as its
+    // own Stripe balance transaction.
     if (!isMonthlyDeploy && prepaidAmountCents > 0) {
       await prisma.walletTransaction.create({
         data: {
-          stripeCustomerId: payload.customerId,
+          stripeCustomerId: customer.id,
           teamId,
           type: "gpu_deploy",
           amountCents: prepaidAmountCents,
@@ -816,48 +889,93 @@ async function handleUnifiedInstanceCreate({
       }).catch((e) => console.error("[Billing] Failed to log WalletTransaction:", e));
     }
 
-    // Activity logging and email
-    const priorLaunch = await getFirstGpuLaunch(payload.customerId);
-    await logGPULaunched(payload.customerId, gpuProduct.name, gpuCount, name as string, instanceId);
+    // PA-158: spawn a fire-and-forget poller that watches HAI for the
+    // instance to reach "running". If it never does, the monitor refunds the
+    // wallet, marks PodMetadata as failed_refunded, and best-effort-deletes
+    // the HAI instance. Success-side effects (email, onboarding, activity)
+    // happen here on confirmation so the customer doesn't get a "GPU ready"
+    // email for a deploy that ultimately failed.
+    if (metadataSaved) {
+      const launchedEmail = customer.email!;
+      const launchedDisplayName = customer.name || customer.email?.split("@")[0] || "Unknown";
+      const launchedProductName = gpuProduct.name;
+      const launchedPodName = name as string;
+      const launchedIsMonthly = !!isMonthlyDeploy;
+      const launchedCustomerId = customer.id;
+      const launchedEmailLower = payload.email;
+      void (async () => {
+        try {
+          const result = await monitorDeployStatus({
+            instanceId,
+            customerId: customer.id,
+            prechargedCents: isMonthlyDeploy ? 0 : prepaidAmountCents,
+            isMonthlyDeploy: !!isMonthlyDeploy,
+          });
+          if (!result.ready) return;
 
-    sendOnboardingEvent({
-      type: "gpu.launched",
-      email: payload.email,
-      name: customer.name || customer.email?.split("@")[0] || "Unknown",
-      metadata: {
-        "Stripe Customer ID": payload.customerId,
-        "GPU Type": gpuProduct.name,
-        "Pod Name": name as string,
-        "GPU Count": gpuCount,
-        "Billing Type": isMonthlyDeploy ? "monthly" : "hourly",
-        "Instance ID": instanceId,
-        "First GPU": !priorLaunch ? "Yes" : "No",
-      },
-    });
-
-    try {
-      const dashboardToken = generateCustomerToken(payload.email.toLowerCase(), payload.customerId);
-      const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${dashboardToken}`;
-      await sendGpuLaunchedEmail({
-        to: customer.email!,
-        customerName: customer.name || customer.email!.split("@")[0],
-        poolName: gpuProduct.name,
-        gpuCount,
-        dashboardUrl,
-      });
-    } catch (emailErr) {
-      console.error("Failed to send GPU launched email:", emailErr);
+          // Confirmed running — fire post-launch side effects.
+          try {
+            const priorLaunch = await getFirstGpuLaunch(launchedCustomerId);
+            await logGPULaunched(launchedCustomerId, launchedProductName, gpuCount, launchedPodName, instanceId);
+            sendOnboardingEvent({
+              type: "gpu.launched",
+              email: launchedEmailLower,
+              name: launchedDisplayName,
+              metadata: {
+                "Stripe Customer ID": launchedCustomerId,
+                "GPU Type": launchedProductName,
+                "Pod Name": launchedPodName,
+                "GPU Count": gpuCount,
+                "Billing Type": launchedIsMonthly ? "monthly" : "hourly",
+                "Instance ID": instanceId,
+                "First GPU": !priorLaunch ? "Yes" : "No",
+              },
+            });
+            const dashboardToken = generateCustomerToken(launchedEmailLower.toLowerCase(), launchedCustomerId);
+            const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${dashboardToken}`;
+            await sendGpuLaunchedEmail({
+              to: launchedEmail,
+              customerName: launchedDisplayName,
+              poolName: launchedProductName,
+              gpuCount,
+              dashboardUrl,
+            });
+          } catch (sideEffectErr) {
+            console.error(`[HAI 2.2] Post-launch side effects failed for ${instanceId}:`, sideEffectErr);
+          }
+        } catch (monitorErr) {
+          console.error(`[HAI 2.2] Background deploy monitor crashed for ${instanceId}:`, monitorErr);
+        }
+      })();
     }
 
     return NextResponse.json({
       success: true,
       instance_id: instanceId,
-      message: isMonthlyDeploy ? "Monthly GPU deployed successfully" : "GPU deployed successfully",
+      deploy_status: "provisioning",
+      message: isMonthlyDeploy
+        ? "Monthly GPU deployment started — provisioning."
+        : "GPU deployment started — provisioning.",
     });
   } catch (error) {
     await clearDeployLock();
     console.error("[HAI 2.2] Create instance error:", error);
     const errorMessage = error instanceof Error ? error.message : "Failed to create instance";
+
+    // PA-158 secondary gap: refund if the wallet was already pre-charged.
+    // The inner createInstance try/catch handles its own refund; this catches
+    // failures between deductUsage and that try (SSH key DB lookup, etc).
+    if (prechargedCents > 0) {
+      try {
+        await refundDeployment(
+          customer.id,
+          prechargedCents,
+          `Refund: deployment aborted before HAI call - ${errorMessage.slice(0, 100)}`
+        );
+      } catch (refundErr) {
+        console.error("[Billing] Outer-catch refund failed:", refundErr);
+      }
+    }
 
     if (errorMessage.includes("Insufficient resources") || errorMessage.includes("10189007")) {
       return NextResponse.json(

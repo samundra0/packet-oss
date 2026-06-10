@@ -9,7 +9,6 @@ import {
   Pro6000BlackwellDoc,
   OpenAIGatewayDoc,
   InferencePlaygroundDoc,
-  TokenFactoryDoc,
   GPUMetricsDoc,
   TokenUsageDoc,
   ServiceExposureDoc,
@@ -40,7 +39,6 @@ type DocSection =
   | "pro-6000-blackwell"
   | "openai-gateway"
   | "inference-playground"
-  | "token-factory"
   | "gpu-metrics"
   | "token-usage"
   | "service-exposure"
@@ -67,7 +65,6 @@ const navItems: NavItemConfig[] = [
   // Using Your Models
   { id: "openai-gateway", label: "OpenAI API", shortLabel: "API", isNew: true },
   { id: "inference-playground", label: "Playground", shortLabel: "Play", isNew: true },
-  { id: "token-factory", label: "Token Factory", shortLabel: "Factory", isNew: true },
   // Monitoring & Analytics
   { id: "gpu-metrics", label: "GPU Metrics", shortLabel: "GPU", isNew: true },
   { id: "token-usage", label: "Token Usage", shortLabel: "Tokens", isNew: true },
@@ -100,8 +97,6 @@ export function DocsTab({ isOwner }: DocsTabProps) {
         return <OpenAIGatewayDoc />;
       case "inference-playground":
         return <InferencePlaygroundDoc />;
-      case "token-factory":
-        return <TokenFactoryDoc />;
       // Monitoring & Analytics
       case "gpu-metrics":
         return <GPUMetricsDoc />;
@@ -190,7 +185,6 @@ export function DocsTab({ isOwner }: DocsTabProps) {
           <optgroup label="Using Your Models">
             <option value="openai-gateway">OpenAI API ✨</option>
             <option value="inference-playground">Playground ✨</option>
-            <option value="token-factory">Token Factory ✨</option>
           </optgroup>
           <optgroup label="Monitoring">
             <option value="gpu-metrics">GPU Metrics ✨</option>

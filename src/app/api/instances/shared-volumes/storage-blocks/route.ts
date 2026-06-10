@@ -7,9 +7,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
 import { getSharedStorageBlocks } from "@/lib/hostedai";
-import Stripe from "stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 export async function GET(request: NextRequest) {
   try {
@@ -28,12 +28,29 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "region_id is required" }, { status: 400 });
     }
 
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(payload.customerId)) as Stripe.Customer;
-    const teamId = customer.metadata?.hostedai_team_id;
+    // PA-175: resolve operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const teamId = ctx.customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });
     }
+
+    // PA-202 gate: storage block sizes are part of the create-volume flow → storage.manage.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "storage.manage",
+      request,
+    });
+    if (denial) return denial;
 
     const blocks = await getSharedStorageBlocks(Number(regionId), teamId);
 

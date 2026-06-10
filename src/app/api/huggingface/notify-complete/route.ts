@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -16,6 +17,10 @@ export async function POST(request: NextRequest) {
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
     const { payload, customer } = auth;
+
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = requirePermission(auth, "huggingface.use", request);
+    if (denial) return denial;
 
     const body = await request.json();
     const { subscriptionId, modelName } = body;

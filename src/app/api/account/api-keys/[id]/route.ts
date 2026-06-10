@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { prisma } from "@/lib/prisma";
 import { logApiKeyDeleted } from "@/lib/activity";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -26,6 +28,16 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     const { id } = await params;
 
+    // PA-175: scope to operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
     // Find the API key
     const apiKey = await prisma.apiKey.findUnique({
       where: { id },
@@ -38,8 +50,8 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Verify ownership
-    if (apiKey.stripeCustomerId !== payload.customerId) {
+    // Verify ownership against operating account.
+    if (apiKey.stripeCustomerId !== ctx.accountId) {
       return NextResponse.json(
         { error: "API key not found" },
         { status: 404 }
@@ -54,6 +66,17 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
+    // PA-175 gate: only Owner / Admin can revoke API keys.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "api_keys.revoke",
+      request,
+      extra: { apiKeyId: id },
+    });
+    if (denial) return denial;
+
     // Revoke the key
     await prisma.apiKey.update({
       where: { id },
@@ -61,7 +84,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     });
 
     // Log activity
-    logApiKeyDeleted(payload.customerId, apiKey.name).catch(() => {});
+    logApiKeyDeleted(ctx.accountId, apiKey.name).catch(() => {});
 
     return NextResponse.json({
       success: true,

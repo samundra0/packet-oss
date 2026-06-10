@@ -438,9 +438,41 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+# SSH WebSocket service — the web terminal's backend (tsx src/server/ssh-websocket.ts),
+# listening on SSH_WS_PORT. Apache proxies /ssh-ws to it; without this service the
+# terminal has nothing to connect to.
+cat > "/etc/systemd/system/${SERVICE_NAME}-ssh-ws.service" <<EOF
+[Unit]
+Description=GPU Cloud Dashboard SSH WebSocket Server
+After=network.target ${SERVICE_NAME}.service
+Wants=${SERVICE_NAME}.service
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=$(which npx) tsx src/server/ssh-websocket.ts
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=10
+Environment=NODE_ENV=production
+EnvironmentFile=${INSTALL_DIR}/.env.local
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=${INSTALL_DIR}
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
-success "Systemd service created"
+systemctl enable "${SERVICE_NAME}-ssh-ws"
+success "Systemd services created (app + ssh-ws)"
 
 # ── Step 7: Configure Apache2 ───────────────────────────────────────────────
 
@@ -477,7 +509,7 @@ if ! $SKIP_APACHE; then
     RewriteEngine On
     RewriteCond %{HTTP:Upgrade} websocket [NC]
     RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/ws/ssh(.*) ws://127.0.0.1:${SSH_WS_PORT}/ws/ssh\$1 [P,L]
+    RewriteRule ^/ssh-ws(.*) ws://127.0.0.1:${SSH_WS_PORT}/ssh-ws\$1 [P,L]
 
     # Security headers
     Header always set X-Content-Type-Options "nosniff"
@@ -580,7 +612,7 @@ APACHE
     RewriteEngine On\\
     RewriteCond %{HTTP:Upgrade} websocket [NC]\\
     RewriteCond %{HTTP:Connection} upgrade [NC]\\
-    RewriteRule ^/ws/ssh(.*) ws://127.0.0.1:${SSH_WS_PORT}/ws/ssh\$1 [P,L]" "$SSL_VHOST"
+    RewriteRule ^/ssh-ws(.*) ws://127.0.0.1:${SSH_WS_PORT}/ssh-ws\$1 [P,L]" "$SSL_VHOST"
           apache2ctl configtest && systemctl reload apache2
           success "WebSocket proxy added to SSL vhost"
         fi
@@ -611,7 +643,7 @@ APACHE
     RewriteEngine On
     RewriteCond %{HTTP:Upgrade} websocket [NC]
     RewriteCond %{HTTP:Connection} upgrade [NC]
-    RewriteRule ^/ws/ssh(.*) ws://127.0.0.1:${SSH_WS_PORT}/ws/ssh\$1 [P,L]
+    RewriteRule ^/ssh-ws(.*) ws://127.0.0.1:${SSH_WS_PORT}/ssh-ws\$1 [P,L]
 
     ErrorLog \${APACHE_LOG_DIR}/${APP_NAME}_error.log
     CustomLog \${APACHE_LOG_DIR}/${APP_NAME}_access.log combined
@@ -644,8 +676,9 @@ fi
 
 # ── Step 8: Start service ───────────────────────────────────────────────────
 
-log "Starting service..."
+log "Starting services..."
 systemctl start "$SERVICE_NAME"
+systemctl start "${SERVICE_NAME}-ssh-ws"
 
 # Wait for the app to start
 sleep 3
@@ -653,6 +686,11 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
   success "Service is running"
 else
   warn "Service may not have started correctly. Check: journalctl -u ${SERVICE_NAME} -f"
+fi
+if systemctl is-active --quiet "${SERVICE_NAME}-ssh-ws"; then
+  success "SSH terminal service is running"
+else
+  warn "SSH terminal service may not have started. Check: journalctl -u ${SERVICE_NAME}-ssh-ws -f"
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────
@@ -666,6 +704,7 @@ echo "  App URL:       ${APP_URL}"
 echo "  Install dir:   ${INSTALL_DIR}"
 echo "  Config:        ${INSTALL_DIR}/.env.local"
 echo "  Service:       systemctl status ${SERVICE_NAME}"
+echo "  SSH terminal:  systemctl status ${SERVICE_NAME}-ssh-ws"
 echo "  Logs:          journalctl -u ${SERVICE_NAME} -f"
 echo ""
 echo "  Next steps:"

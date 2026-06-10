@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getLogoUrl } from "@/lib/branding";
+import { getLogoUrl } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
 
 interface TosConsentModalProps {

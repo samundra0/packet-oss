@@ -33,7 +33,7 @@ describe("Default Policies", () => {
 
       const policies = await getDefaultPolicies();
 
-      expect(client.hostedaiRequest).toHaveBeenCalledWith("GET", "/policy/defaults");
+      expect(client.hostedaiRequest).toHaveBeenCalledWith("GET", "/policy/defaults?nature=general");
       expect(policies).toEqual({
         instanceType: "inst-123",
         service: "svc-456",

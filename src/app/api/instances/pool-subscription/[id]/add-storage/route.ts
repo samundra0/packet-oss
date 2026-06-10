@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   getUnifiedInstanceDetail,
   getSharedVolumes,
@@ -29,9 +30,16 @@ export async function GET(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
     }
 
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(payload.customerId)) as Stripe.Customer;
-    const teamId = customer.metadata?.hostedai_team_id;
+    // PA-175: resolve operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const teamId = ctx.customer.metadata?.hostedai_team_id;
 
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });
@@ -105,13 +113,32 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
     }
 
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(payload.customerId)) as Stripe.Customer;
+    // PA-175: resolve operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const customer = ctx.customer;
     const teamId = customer.metadata?.hostedai_team_id;
 
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });
     }
+
+    // PA-175 gate: attaching storage is a managed action.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "storage.manage",
+      request,
+      extra: { instanceId, action: "add-storage" },
+    });
+    if (denial) return denial;
 
     const body = await request.json();
     const { volume_id, storage_block_id } = body;

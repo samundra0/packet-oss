@@ -12,6 +12,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { prisma } from "@/lib/prisma";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { randomBytes } from "crypto";
 
 export async function POST(request: NextRequest) {
@@ -25,6 +27,26 @@ export async function POST(request: NextRequest) {
     if (!payload) {
       return NextResponse.json({ error: "Invalid or expired token" }, { status: 401 });
     }
+
+    // PA-175: gate against operating account so invited Team Members
+    // pass (they have no membership row on their OWN customer).
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    // PA-202 gate: Apps hidden from Read-only Member + Finance Manager.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "apps.use",
+      request,
+    });
+    if (denial) return denial;
 
     const body = await request.json();
     const { appId, product_id, region_id } = body;

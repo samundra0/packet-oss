@@ -45,16 +45,18 @@ describe('HostedAI Client', () => {
 
       const result = await hostedaiRequest('GET', '/instances/123');
 
+      // The request now also passes an AbortController `signal` for timeouts,
+      // so match on the load-bearing fields and tolerate the extra property.
       expect(mockFetch).toHaveBeenCalledWith(
         `${MOCK_API_URL}/api/instances/123`,
-        {
+        expect.objectContaining({
           method: 'GET',
           headers: {
             'X-API-Key': MOCK_API_KEY,
             'Content-Type': 'application/json',
           },
           body: undefined,
-        }
+        })
       );
       expect(result).toEqual(mockData);
     });
@@ -73,14 +75,14 @@ describe('HostedAI Client', () => {
 
       expect(mockFetch).toHaveBeenCalledWith(
         `${MOCK_API_URL}/api/instances`,
-        {
+        expect.objectContaining({
           method: 'POST',
           headers: {
             'X-API-Key': MOCK_API_KEY,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(requestData),
-        }
+        })
       );
       expect(result).toEqual(mockResponse);
     });
@@ -241,8 +243,8 @@ describe('HostedAI Client', () => {
 
       setCache('test-key', testData);
 
-      // Advance time by 4 minutes (less than 5 minute TTL)
-      vi.advanceTimersByTime(4 * 60 * 1000);
+      // Advance time by 1 minute (less than the 2 minute TTL)
+      vi.advanceTimersByTime(1 * 60 * 1000);
 
       // Should still be cached
       expect(getCached('test-key')).toEqual(testData);
@@ -283,12 +285,13 @@ describe('HostedAI Client', () => {
   });
 
   describe('Environment configuration', () => {
-    it('should return correct API URL', () => {
-      expect(getApiUrl()).toBe(MOCK_API_URL);
+    it('should return correct API URL', async () => {
+      // getApiUrl is now async (DB-backed platform settings, env fallback).
+      await expect(getApiUrl()).resolves.toBe(MOCK_API_URL);
     });
 
-    it('should return correct API key', () => {
-      expect(getApiKey()).toBe(MOCK_API_KEY);
+    it('should return correct API key', async () => {
+      await expect(getApiKey()).resolves.toBe(MOCK_API_KEY);
     });
   });
 

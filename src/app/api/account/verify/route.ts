@@ -1,18 +1,39 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
 import { verifyCustomerToken, type CustomerTokenPayload } from "@/lib/customer-auth";
-import { resolveAllTeamsForEmail } from "@/lib/customer-resolver";
+import {
+  createCustomerSession,
+  buildSessionCookie,
+  isEphemeralToken,
+  SESSION_COOKIE_NAME,
+} from "@/lib/auth/customer-session";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { getWalletTransactions, formatCents, formatCentsForUser } from "@/lib/wallet";
 import { createOneTimeLogin, ensureRoles } from "@/lib/hostedai";
 import { getTwoFactorStatus } from "@/lib/two-factor";
 import { logCustomerLogin } from "@/lib/admin-activity";
 import { logAccountLogin, logTeamMemberJoined } from "@/lib/activity";
 import { recordFirstLogin } from "@/lib/lifecycle";
-import { getTeamMemberByEmail, acceptTeamInvite, isTeamMember } from "@/lib/team-members";
+import { getTeamMemberByEmail, acceptTeamInvite } from "@/lib/team-members";
 import { prisma } from "@/lib/prisma";
 import { getSetting } from "@/lib/settings";
 import { findSuspension } from "@/lib/customer-suspension";
+import { resolveMembership } from "@/lib/auth/membership";
+import { redactBillingPayload } from "@/lib/billing-visibility";
+import {
+  can,
+  PERMISSIONS,
+  ROLE_PERMISSIONS,
+  PACKET_ROLES,
+  getHaiRoleForPacketRole,
+  type Permission,
+  type PacketRole,
+} from "@/lib/auth/role-permissions";
 import Stripe from "stripe";
+
+function isPacketRole(role: string): role is PacketRole {
+  return (PACKET_ROLES as readonly string[]).includes(role);
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -36,25 +57,30 @@ export async function POST(request: NextRequest) {
 
     const stripe = await getStripe();
 
-    // Resolve all teams and customers for this email — handles customers
-    // with separate hourly + monthly Stripe accounts
-    const resolved = await resolveAllTeamsForEmail(payload.email, payload.customerId);
-    if (!resolved) {
+    // PA-175: unified resolution. Honors JWT.activeAccountId for the multi-team
+    // case; falls back to user's own Stripe customer; falls back to team-only
+    // (invitee with no own Stripe customer) lookup via team_membership.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
       return NextResponse.json(
         { error: "Account not found" },
         { status: 404 }
       );
     }
 
-    const customer = resolved.primaryCustomer;
+    const customer = ctx.customer;
     const billingType = customer.metadata?.billing_type;
     const teamId = customer.metadata?.hostedai_team_id;
-    const monthlyCustomerIds = resolved.monthlyCustomerIds;
-    console.log(`[Verify] Resolved ${payload.email}: primary=${customer.id}, teams=[${resolved.allTeamIds.join(",")}], monthly=[${monthlyCustomerIds.join(",")}]`);
+    const monthlyCustomerIds = ctx.monthlyCustomerIds;
+    console.log(`[Verify] Resolved ${payload.email}: account=${customer.id}, teams=[${ctx.allTeamIds.join(",")}], monthly=[${monthlyCustomerIds.join(",")}]`);
 
     // Block suspended customers (fraud lockout). Checks all linked customer
     // IDs since one suspended account locks the whole email out.
-    const suspension = await findSuspension(resolved.allCustomerIds);
+    const suspension = await findSuspension(ctx.allCustomerIds);
     if (suspension) {
       console.warn(`[Verify] Blocked suspended customer ${payload.email} (${customer.id})`);
       return NextResponse.json(
@@ -250,6 +276,35 @@ export async function POST(request: NextRequest) {
 
     // ── Parallel fetch: OTL + billing portal + 2FA ──
     const verifyRoles = await ensureRoles();
+
+    // PA-175: derive the OTL role from the user's actual Packet role. Hard-
+    // coding teamAdmin destroys invited members' roles because HAI's
+    // /create-otl updates UserTeam.role_id whenever it differs from the
+    // input (models/one_time_login_tokens.go:242-244). /verify runs on every
+    // dashboard load, so the member's HAI role was being reset on every
+    // page refresh.
+    const customerEmailForOtl =
+      typeof customer.email === "string" ? customer.email : null;
+    const otlIsOwner =
+      payload.email.toLowerCase() === customer.email?.toLowerCase();
+    const otlMembership = await resolveMembership({
+      userId: payload.userId,
+      email: payload.email,
+      accountId: customer.id,
+      customerEmail: customerEmailForOtl,
+    });
+    const otlPacketRole: PacketRole | null =
+      otlMembership && isPacketRole(otlMembership.role)
+        ? otlMembership.role
+        : null;
+    const otlMembershipIsOwner = otlMembership?.isOwner ?? false;
+    const otlHaiSlug = otlPacketRole
+      ? getHaiRoleForPacketRole(otlPacketRole, otlMembershipIsOwner)
+      : otlIsOwner
+        ? "teamAdmin"
+        : "readOnlyMember";
+    const otlRoleId = verifyRoles[otlHaiSlug];
+
     // TOS version check (runs in parallel, fail-closed: if query fails, gate stays up)
     const tosVersionPromise = getSetting("TOS_VERSION").then(async (ver) => {
       if (!ver) return { version: null, accepted: true }; // Kill switch: no version = no gate
@@ -269,7 +324,7 @@ export async function POST(request: NextRequest) {
             email: payload.email,
             send_email_invite: false,
             teamId: teamId,
-            roleId: verifyRoles.teamAdmin,
+            roleId: otlRoleId,
           }).catch((error) => {
             console.error("Failed to generate OTL:", error);
             return null;
@@ -277,7 +332,9 @@ export async function POST(request: NextRequest) {
         : Promise.resolve(null),
       stripe.billingPortal.sessions.create({
         customer: customer.id,
-        return_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`,
+        // PA-267: no token in the return URL — the session cookie authenticates
+        // the return to /dashboard, so the token can't leak via Stripe's redirect.
+        return_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard`,
       }),
       getTwoFactorStatus(payload.email),
       tosVersionPromise,
@@ -289,19 +346,12 @@ export async function POST(request: NextRequest) {
     // Team members have a different email than the Stripe customer
     const isOwner = payload.email.toLowerCase() === customer.email?.toLowerCase();
 
-    // If this is a team member, verify they still belong to the team
-    // When a team member is removed, their JWT may still be valid (up to 1 hour),
-    // so we must check the DB to enforce removal immediately.
+    // PA-175: the legacy isTeamMember check (against team_member_legacy)
+    // is superseded by the resolveMembership call below — that consults
+    // team_membership (the new model) and returns null/revoked for non-members.
+    // The legacy lifecycle hook (acceptTeamInvite for team_member_legacy rows)
+    // is still useful for accounts that haven't moved to the new flow.
     if (!isOwner) {
-      const stillMember = await isTeamMember(payload.email, customer.id);
-      if (!stillMember) {
-        return NextResponse.json(
-          { error: "Your access to this team has been revoked" },
-          { status: 403 }
-        );
-      }
-
-      // Mark their invite as accepted on first login
       try {
         const teamMember = await getTeamMemberByEmail(payload.email);
         if (teamMember && !teamMember.acceptedAt && teamMember.stripeCustomerId === customer.id) {
@@ -319,8 +369,9 @@ export async function POST(request: NextRequest) {
     // - Token already carries twoFactorVerified from a prior TOTP check
     const skipTwoFactor = payload.skipTwoFactor === true || payload.twoFactorVerified === true;
 
-    // Log customer login to admin activity
-    logCustomerLogin(payload.email, customer.id, !isOwner).catch(() => {});
+    // Log customer login to admin activity. During admin "Login as", attribute
+    // it to the acting admin (not "system") for a clean audit trail.
+    logCustomerLogin(payload.email, customer.id, !isOwner, payload.impersonator?.adminEmail).catch(() => {});
 
     // Log to customer activity — skip for admin "login as" sessions so customers
     // don't see admin impersonation events in their own activity feed.
@@ -344,13 +395,60 @@ export async function POST(request: NextRequest) {
     // Track lifecycle milestone (first login)
     recordFirstLogin(customer.id).catch(() => {});
 
-    // Check if bare metal is enabled for this customer
+    // Check if bare metal is enabled for this customer + load teamName
     const customerSettings = await prisma.customerSettings.findUnique({
       where: { stripeCustomerId: customer.id },
-      select: { bareMetalEnabled: true },
+      select: { bareMetalEnabled: true, teamName: true },
     });
 
-    return NextResponse.json({
+    // PA-175 PR 3: surface the user's Packet role + can() map. The
+    // membership was already resolved above (otlMembership) so HAI's
+    // /create-otl gets the correct role; reuse that result here.
+    const membership = otlMembership;
+    const role: PacketRole | null = otlPacketRole;
+    const membershipIsOwner = otlMembershipIsOwner;
+    const canMap = Object.fromEntries(
+      PERMISSIONS.map((perm) => [perm, can(role, membershipIsOwner, perm)]),
+    ) as Record<Permission, boolean>;
+    const roleDisplayName = role ? ROLE_PERMISSIONS[role].displayName : null;
+
+    // PA-224: surface the logged-in user's display name so the dashboard
+    // sidebar greets the actual viewer, not the operating account's Stripe
+    // customer (which is the inviter when an invited member switches in).
+    const userRow = await prisma.user.findUnique({
+      where: { email: payload.email.toLowerCase() },
+      select: { displayName: true },
+    });
+    const userDisplayName = userRow?.displayName ?? null;
+
+    // PA-267: on a fresh magic-link arrival — a non-ephemeral token with no
+    // session cookie yet — establish a persistent 15-day session. Impersonation
+    // (skipTwoFactor) is ephemeral and never gets a row, so it stays tab-scoped.
+    // Repeat loads already carry the cookie, so no duplicate rows are created.
+    // Only persist once 2FA is satisfied — never create a session for a token
+    // still pending its TOTP step (the magic-link token before verification).
+    const twoFactorSatisfied = !twoFactorStatus.enabled || payload.twoFactorVerified === true;
+    let sessionRefreshToken: string | null = null;
+    if (
+      !isEphemeralToken(payload) &&
+      twoFactorSatisfied &&
+      !request.cookies.get(SESSION_COOKIE_NAME)?.value
+    ) {
+      try {
+        sessionRefreshToken = await createCustomerSession({
+          customerId: payload.customerId,
+          email: payload.email,
+          userId: payload.userId,
+          activeAccountId: payload.activeAccountId,
+          userAgent: request.headers.get("user-agent"),
+          ip: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null,
+        });
+      } catch (err) {
+        console.error("[Verify] Failed to create customer session (non-fatal):", err);
+      }
+    }
+
+    const res = NextResponse.json({
       customer: {
         id: customer.id,
         email: customer.email,
@@ -358,24 +456,49 @@ export async function POST(request: NextRequest) {
         billingType,
         teamId,
         created: customer.created,
+        teamName: customerSettings?.teamName ?? null,
       },
-      wallet,
-      transactions,
-      subscription,
-      subscriptions,
-      recentPayments,
+      // PA-271: redact billing data to []/null for users without billing.view.
+      // The verify response is what the whole dashboard reads from, so gating
+      // it here (server-side) is the real boundary — a Read-only/Team Member
+      // switched into the owner's workspace can no longer read their finances
+      // from the sidebar, stat cards, Monthly Subscriptions card, or Billing tab.
+      ...redactBillingPayload(canMap["billing.view"], {
+        wallet,
+        transactions,
+        subscription,
+        subscriptions,
+        recentPayments,
+      }),
       gpuDashboardUrl,
-      billingPortalUrl: portalSession.url,
-      isOwner,
+      billingPortalUrl: canMap["billing.view"] ? portalSession.url : null,
+      isOwner, // legacy field — kept for back-compat during PR 3 UI rollout
+      // PA-175 PR 3: authoritative role + permission set for the UI.
+      role,
+      roleDisplayName,
+      membershipIsOwner, // server-side Owner flag (separate from legacy email-match isOwner)
+      can: canMap,
       userEmail: payload.email, // The logged-in user's email (may differ from customer email for team members)
+      userDisplayName, // PA-224: logged-in user's display name (User.displayName), used for sidebar greeting
       bareMetalEnabled: customerSettings?.bareMetalEnabled ?? false,
       twoFactor: twoFactorStatus, // 2FA status for the user
       skipTwoFactor, // Admin bypass flag
+      impersonator: payload.impersonator ?? null, // admin "Login as" marker → impersonation banner
+      // PA-266: deep-link intent carried through login in the signed token.
+      // Already sanitized at sign time; the dashboard opens the matching modal.
+      next: payload.next ?? null,
+      // PA-267: signals the client a 15-day cookie session was set, so it can
+      // safely strip the one-time token from the URL (kills token-in-URL leak).
+      sessionPersisted: !!sessionRefreshToken,
       tosConsent: {
         required: !tosResult.accepted,
         currentVersion: tosResult.version,
       },
     });
+    if (sessionRefreshToken) {
+      res.cookies.set(buildSessionCookie(sessionRefreshToken, process.env.NODE_ENV === "production"));
+    }
+    return res;
   } catch (error) {
     console.error("Account verify error:", error);
     return NextResponse.json(

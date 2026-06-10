@@ -43,6 +43,10 @@ export default function HuggingFaceTab({
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  // PA-180: tracks whether the user has actually submitted a search, so we
+  // can distinguish "no results for query" from "pre-search default browse".
+  const [searchSubmitted, setSearchSubmitted] = useState(false);
+  const [lastSearchQuery, setLastSearchQuery] = useState("");
 
   // Filters
   const [selectedTask, setSelectedTask] = useState<string>("");
@@ -188,6 +192,8 @@ export default function HuggingFaceTab({
     if (!searchQuery.trim() || searchQuery.length < 2) return;
 
     setSearching(true);
+    setSearchSubmitted(true);
+    setLastSearchQuery(searchQuery);
     try {
       const params = new URLSearchParams({
         q: searchQuery,
@@ -218,6 +224,8 @@ export default function HuggingFaceTab({
   const clearSearch = () => {
     setSearchQuery("");
     setSearchResults([]);
+    setSearchSubmitted(false);
+    setLastSearchQuery("");
     setSelectedTask("");
     setSelectedLibrary("");
     setSelectedParamSize("");
@@ -536,7 +544,7 @@ export default function HuggingFaceTab({
           >
             {searching ? "..." : "Search"}
           </button>
-          {searchResults.length > 0 && (
+          {(searchSubmitted || searchQuery.length > 0) && (
             <button
               onClick={clearSearch}
               className="px-4 py-2.5 text-[var(--muted)] hover:text-[var(--ink)]"
@@ -576,6 +584,23 @@ export default function HuggingFaceTab({
               />
             ))}
           </div>
+        </div>
+      ) : searchSubmitted && !searching ? (
+        // PA-180: explicit empty state so users don't mistake the default
+        // browse tabs below for "search returned irrelevant results".
+        <div className="mb-8 text-center py-16 border border-dashed border-[var(--line)] rounded-xl">
+          <h2 className="text-lg font-semibold text-[var(--ink)] mb-2">
+            No models found for &ldquo;{lastSearchQuery}&rdquo;
+          </h2>
+          <p className="text-sm text-[var(--muted)] mb-4">
+            Try a different name, broaden the query, or clear the filters.
+          </p>
+          <button
+            onClick={clearSearch}
+            className="px-4 py-2 text-sm text-[var(--blue)] hover:underline"
+          >
+            Clear search
+          </button>
         </div>
       ) : (
         <>

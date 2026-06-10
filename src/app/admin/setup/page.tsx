@@ -4,7 +4,7 @@ import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getLogoUrl } from "@/lib/branding";
+import { getLogoUrl } from "@/lib/branding-client";
 import { useBranding } from "@/hooks/useBranding";
 
 function AdminSetupContent() {

@@ -322,13 +322,17 @@ export function logLoginLinkSent(
 export function logCustomerLogin(
   customerEmail: string,
   customerId: string,
-  isTeamMember: boolean = false
+  isTeamMember: boolean = false,
+  actorEmail: string = "system"
 ): Promise<AdminActivity> {
   const userType = isTeamMember ? "Team member" : "Customer";
+  const impersonated = actorEmail !== "system";
   return logAdminActivity(
-    "system",
+    actorEmail,
     "customer_login",
-    `${userType} ${customerEmail} logged in`,
-    { customerEmail, customerId, isTeamMember }
+    impersonated
+      ? `Admin ${actorEmail} signed in as ${userType.toLowerCase()} ${customerEmail} (impersonation)`
+      : `${userType} ${customerEmail} logged in`,
+    { customerEmail, customerId, isTeamMember, ...(impersonated ? { impersonatorEmail: actorEmail } : {}) }
   );
 }

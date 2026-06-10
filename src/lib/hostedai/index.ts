@@ -35,6 +35,13 @@ export {
   terminateTeam,
   getTeam,
   changeTeamPackage,
+  // PA-175
+  listTeamMembers,
+  findTeamMemberByEmail,
+  inviteToTeam,
+  changeUserRole,
+  setMemberStatus,
+  removeUserFromTeam,
 } from "./teams";
 
 // Re-export billing functions
@@ -83,9 +90,10 @@ export {
   getUnifiedInstanceDetail,
   getAllUnifiedInstances,
   podVolumeAction,
+  waitForInstanceRunning,
 } from "./instances";
 
-export type { UnifiedInstance, UnifiedInstanceDetail } from "./instances";
+export type { UnifiedInstance, UnifiedInstanceDetail, WaitResult, WaitForInstanceOptions } from "./instances";
 
 export type { AddDiskParams, AddDiskPricing } from "./instances";
 

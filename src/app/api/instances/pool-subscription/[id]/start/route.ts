@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import {
   startInstance,
   getInstanceCredentials,
@@ -25,6 +26,10 @@ export async function POST(
 
     const { id } = await params;
     console.log("[HAI 2.2] Starting instance:", id);
+
+    // PA-175 gate: starting an instance launches usage → gpu.provision.
+    const denial = requirePermission(auth, "gpu.provision", request, { instanceId: id, action: "start" });
+    if (denial) return denial;
 
     // Verify ownership via unified instances
     let found = false;

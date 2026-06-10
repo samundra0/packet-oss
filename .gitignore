@@ -122,3 +122,4 @@ ansible.log
 .claude/skills/gstack/
 agentdb.rvf
 agentdb.rvf.lock
+.rtk/

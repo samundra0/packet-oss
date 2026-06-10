@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { type BrandConfig } from "@/lib/branding";
+import { type BrandConfig } from "@/lib/branding-client";
 
 /** Strip query strings from local paths — next/image rejects them. */
 function cleanLocalUrl(url: string): string {

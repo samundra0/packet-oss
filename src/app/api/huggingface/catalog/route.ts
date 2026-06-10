@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   HF_CATALOG,
   getAllCatalogItems,
@@ -14,7 +15,6 @@ import {
 import { getPoolVRAM, getCompatibilityMessage } from "@/lib/gpu-specs";
 import { getAllPools } from "@/lib/hostedai";
 import { getModelMemory, type HfMemResult } from "@/lib/hf-mem";
-import Stripe from "stripe";
 
 // Cache for real memory data (in-memory, resets on server restart)
 const realMemoryCache = new Map<string, { vramGb: number; timestamp: number }>();
@@ -110,6 +110,30 @@ export async function GET(request: NextRequest) {
         { status: 401 }
       );
     }
+
+    // PA-175: gate against the OPERATING account, not the JWT user's own
+    // customer. Otherwise invited Team Members get a 403 because they have
+    // no team_membership row on their own customer (where they're just an
+    // implicit Owner) and the gate's implicit-Owner fallback requires the
+    // customerEmail which we'd otherwise have to fetch separately.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+      permission: "huggingface.use",
+      request,
+    });
+    if (denial) return denial;
 
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type") || "popular";

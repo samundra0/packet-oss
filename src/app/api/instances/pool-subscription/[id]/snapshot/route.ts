@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   getPoolSubscriptions,
   getConnectionInfo,
@@ -171,11 +172,27 @@ export async function POST(
 
     const { displayName, notes, saveData, storageBlockId, terminateAfterSave } = parsed.data;
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
+    // PA-175: resolve operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const customer = ctx.customer;
+
+    // PA-175 gate: creating a snapshot is a managed action.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "snapshots.manage",
+      request,
+      extra: { subscriptionId, action: "create-snapshot" },
+    });
+    if (denial) return denial;
 
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
@@ -482,7 +499,7 @@ du -sh "$SNAPSHOT_DIR"
     // Create the snapshot
     const snapshot = await prisma.podSnapshot.create({
       data: {
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: ctx.accountId,
         displayName,
         notes: notes || null,
         snapshotType,

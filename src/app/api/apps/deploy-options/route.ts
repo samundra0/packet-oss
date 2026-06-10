@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/auth";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
 import { prisma } from "@/lib/prisma";
 import { getGpuScenarioId } from "@/lib/scenarios";
 import {
@@ -17,6 +17,7 @@ import {
   getServiceCompatibleRegions,
 } from "@/lib/hostedai";
 import { getWalletBalance } from "@/lib/wallet";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 export async function GET(request: NextRequest) {
   const token = request.headers.get("authorization")?.replace("Bearer ", "");
@@ -30,16 +31,32 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const stripe = await getStripe();
-    const customer = await stripe.customers.retrieve(payload.customerId);
-    if (!customer || customer.deleted) {
-      return NextResponse.json({ error: "Customer not found" }, { status: 400 });
+    // PA-175: operating-account scoping so invited Team Members see the
+    // team's deploy options and pass the apps.use gate.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
     }
+    const customer = ctx.customer;
 
-    const teamId = (customer as { metadata?: Record<string, string> }).metadata?.hostedai_team_id;
+    const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json({ error: "No team associated" }, { status: 400 });
     }
+
+    // PA-202 gate: Apps hidden from Read-only Member + Finance Manager.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "apps.use",
+      request,
+    });
+    if (denial) return denial;
 
     // Fetch all active products with a linked HAI service
     const products = await prisma.gpuProduct.findMany({
@@ -89,8 +106,9 @@ export async function GET(request: NextRequest) {
       })
     );
 
-    // Fetch wallet balance
-    const wallet = await getWalletBalance(payload.customerId);
+    // Fetch wallet balance from the OPERATING account — apps are charged
+    // to the team owner's wallet, not the invited user's personal one.
+    const wallet = await getWalletBalance(ctx.accountId);
 
     return NextResponse.json({
       products: availableProducts,

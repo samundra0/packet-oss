@@ -1,15 +1,21 @@
+# OSS pnpm settings (overlaid over the repo's root pnpm-workspace.yaml at export).
+#
+# Why this differs from the Pro repo's root file: the Pro CI builds on a
+# toolchain-free node:22 image and leaves compile-heavy deps OFF, but an OSS
+# install runs on a real server (install.sh) and the app genuinely needs the
+# native modules built — argon2/bcrypt (auth), ssh2/cpu-features (web terminal),
+# better-sqlite3, sharp (images), etc. So OSS approves their build scripts.
+#
+# pnpm 11 reads the allowBuilds map (true/false); pnpm 10 reads
+# onlyBuiltDependencies (array). Both are kept so either version installs
+# cleanly without prompting (the install scripts run unattended).
+
 # Dependency overrides (moved here from package.json "pnpm" field,
 # which pnpm 10+ no longer reads). Values must match pnpm-lock.yaml.
 overrides:
   qs: '>=6.14.1'
   lodash: '>=4.17.23'
 
-# Build-script approvals.
-# pnpm 11 reads the allowBuilds map (true/false); pnpm 10 reads
-# onlyBuiltDependencies (array). Both are kept so either version installs
-# cleanly without prompting (the install scripts run unattended).
-# true  = native / build-tool deps the app needs at runtime or build.
-# false = telemetry / donation postinstalls with no functional effect.
 allowBuilds:
   '@prisma/client': true
   '@prisma/engines': true

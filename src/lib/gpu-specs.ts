@@ -26,8 +26,11 @@ export const GPU_SPECS: Record<string, GPUSpec> = {
   "H100 PCIe": { name: "H100 PCIe", vramGb: 80, architecture: "Hopper", tensorCores: true },
   "H200": { name: "H200", vramGb: 141, architecture: "Hopper", tensorCores: true },
 
-  // Data center - Blackwell
-  "B200": { name: "B200", vramGb: 180, architecture: "Blackwell", tensorCores: true },
+  // Data center - Blackwell. VRAM follows the canonical hardware spec
+  // (assets.hosted.ai/gpu_specs.json): B200 and B100 are both 192 GB HBM3e.
+  // NB: some marketing/SKU copy lists the B200 as "180GB" for the shared
+  // "Dynamic" offering — that's a product label, not the chip's VRAM.
+  "B200": { name: "B200", vramGb: 192, architecture: "Blackwell", tensorCores: true },
   "B100": { name: "B100", vramGb: 192, architecture: "Blackwell", tensorCores: true },
 };
 

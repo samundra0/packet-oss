@@ -9,7 +9,7 @@
 import type { TenantConfig } from '@/lib/tenant/types';
 import { isPro } from '@/lib/edition';
 import {
-  getAppUrl, getApiBaseUrl, getBrandName, getPrimaryColor, getAccentColor,
+  getAppUrl, getApiBaseUrl, getDashboardUrl, getBrandName, getPrimaryColor, getAccentColor,
   getSupportEmail, getLogoUrl, getCompanyName, getCompanyAddress,
   getEmailFromName, getEmailFromAddress, getEmailFooterText,
 } from "@/lib/branding";
@@ -57,12 +57,17 @@ function getOssBranding(): EmailBranding {
 export async function getEmailBranding(tenant?: TenantConfig): Promise<EmailBranding> {
   if (!isPro()) return getOssBranding();
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getDefaultTenantConfig } = require('@/lib/tenant/resolve');
+  // Lazy dynamic import keeps the premium tenant module out of the OSS build's
+  // static graph (it's excluded there) while staying behind the isPro() guard.
+  // Unlike a native require(), a dynamic import() is alias-resolved + transformed
+  // by Vite/Vitest, so it loads correctly under both Next and the test runner.
+  const { getDefaultTenantConfig } = await import('@/lib/tenant/resolve');
   const t = tenant || await getDefaultTenantConfig();
+  // The dashboard lives on its own host (getDashboardUrl, e.g. dash.packet.ai),
+  // distinct from the marketing site (getAppUrl, e.g. packet.ai).
   const domain = t.isDefault
-    ? new URL(getAppUrl()).hostname
-    : (t.domains[0] || new URL(getAppUrl()).hostname);
+    ? new URL(getDashboardUrl()).hostname
+    : (t.domains[0] || new URL(getDashboardUrl()).hostname);
 
   return {
     brandName: t.brandName,

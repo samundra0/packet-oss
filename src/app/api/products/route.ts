@@ -26,6 +26,9 @@ export async function GET() {
         badgeText: true,
         vramGb: true,
         cudaCores: true,
+        categories: {
+          select: { id: true, name: true, slug: true, displayOrder: true },
+        },
       },
     });
 

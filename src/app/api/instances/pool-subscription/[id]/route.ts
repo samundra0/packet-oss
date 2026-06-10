@@ -7,7 +7,8 @@ import { prisma } from "@/lib/prisma";
 import { sendGpuTerminatedEmail } from "@/lib/email";
 import { generateCustomerToken } from "@/lib/customer-auth";
 import { cacheCustomer } from "@/lib/customer-cache";
-import Stripe from "stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
 // Check if the ID looks like an HAI 2.2 instance (i-{uuid}) vs numeric (legacy pool subscription)
 function isInstanceId(id: string): boolean {
@@ -112,7 +113,17 @@ export async function PATCH(
       }
     }
 
-    // Legacy: upsert by subscriptionId
+    // Legacy: upsert by subscriptionId. PA-175: scope create to operating
+    // account so an invited Member writing metadata on a team pod doesn't
+    // create a rogue row attributed to their own customer.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
     const metadata = await prisma.podMetadata.upsert({
       where: { subscriptionId: id },
       update: {
@@ -121,7 +132,7 @@ export async function PATCH(
       },
       create: {
         subscriptionId: id,
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: ctx.accountId,
         displayName: displayName || null,
         notes: notes || null,
       },
@@ -162,11 +173,19 @@ export async function DELETE(
       );
     }
 
-    // Get customer to find team ID
+    // PA-175: resolve the OPERATING account. An invited Team Admin / Member
+    // terminating a team pod must hit the team owner's wallet for refund,
+    // not their own.
     const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const customer = ctx.customer;
     cacheCustomer(customer).catch(() => {});
 
     const teamId = customer.metadata?.hostedai_team_id;
@@ -178,6 +197,18 @@ export async function DELETE(
     }
 
     const { id } = await params;
+
+    // PA-175 gate: terminating a pool subscription / unified instance requires gpu.terminate
+    // on the OPERATING team.
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "gpu.terminate",
+      request,
+      extra: { id },
+    });
+    if (denial) return denial;
 
     // === HAI 2.2: Unified instance deletion ===
     if (isInstanceId(id)) {
@@ -207,7 +238,7 @@ export async function DELETE(
 
             if (creditBackCents > 0) {
               const unusedMins = Math.round(unusedMs / 60000);
-              await stripe.customers.createBalanceTransaction(payload.customerId, {
+              await stripe.customers.createBalanceTransaction(ctx.accountId, {
                 amount: -creditBackCents,
                 currency: "usd",
                 description: `GPU early termination credit: ${unusedMins} mins unused`,
@@ -222,7 +253,7 @@ export async function DELETE(
               const finalChargeCents = Math.round(unbilledHours * hourlyRateCents);
               if (finalChargeCents > 0) {
                 const unbilledMins = Math.round(unbilledHours * 60);
-                await stripe.customers.createBalanceTransaction(payload.customerId, {
+                await stripe.customers.createBalanceTransaction(ctx.accountId, {
                   amount: finalChargeCents,
                   currency: "usd",
                   description: `GPU final usage: ${unbilledMins} mins after prepaid period`,
@@ -262,7 +293,7 @@ export async function DELETE(
         }
       }
 
-      await logGPUTerminated(payload.customerId, "GPU Instance", displayName, id);
+      await logGPUTerminated(ctx.accountId, "GPU Instance", displayName, id);
 
       try {
         const dashboardToken = generateCustomerToken(payload.email.toLowerCase(), payload.customerId);
@@ -342,7 +373,7 @@ export async function DELETE(
 
           if (creditBackCents > 0) {
             const unusedMins = Math.round(unusedMs / 60000);
-            await stripe.customers.createBalanceTransaction(payload.customerId, {
+            await stripe.customers.createBalanceTransaction(ctx.accountId, {
               amount: -creditBackCents, // Negative amount = credit
               currency: "usd",
               description: `GPU early termination credit: ${unusedMins} mins unused`,
@@ -367,7 +398,7 @@ export async function DELETE(
 
             if (finalChargeCents > 0) {
               const unbilledMins = Math.round(unbilledHours * 60);
-              await stripe.customers.createBalanceTransaction(payload.customerId, {
+              await stripe.customers.createBalanceTransaction(ctx.accountId, {
                 amount: finalChargeCents,
                 currency: "usd",
                 description: `GPU final usage: ${unbilledMins} mins after prepaid period`,
@@ -403,19 +434,19 @@ export async function DELETE(
     // Decrement activePods in CustomerCache so it stays in sync
     try {
       const cached = await prisma.customerCache.findUnique({
-        where: { id: payload.customerId },
+        where: { id: ctx.accountId },
         select: { activePods: true },
       });
       if (cached && cached.activePods > 0) {
         await prisma.customerCache.update({
-          where: { id: payload.customerId },
+          where: { id: ctx.accountId },
           data: { activePods: cached.activePods - 1 },
         });
       }
     } catch { /* non-critical */ }
 
     // Log the activity
-    await logGPUTerminated(payload.customerId, poolName, displayNameForLog, String(subscriptionId));
+    await logGPUTerminated(ctx.accountId, poolName, displayNameForLog, String(subscriptionId));
 
     // Send email notification
     try {

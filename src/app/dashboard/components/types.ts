@@ -2,7 +2,15 @@
  * Shared types for dashboard components
  */
 
+import type { PacketRole, Permission } from "@/lib/auth/role-permissions";
+
 export interface AccountData {
+  /** PA-266: post-login deep-link target carried in the signed token (sanitized server-side). */
+  next?: string | null;
+  /** Admin "Login as" bypass flag — true when this is an impersonation session. */
+  skipTwoFactor?: boolean;
+  /** Admin "Login as" marker — the acting admin, when impersonating. */
+  impersonator?: { adminEmail: string } | null;
   customer: {
     id: string;
     email: string;
@@ -10,6 +18,8 @@ export interface AccountData {
     billingType: string;
     teamId: string;
     created: number;
+    /** PA-175 team display name (CustomerSettings.teamName). Null = no override; UI falls back to email. */
+    teamName: string | null;
   };
   wallet: {
     balance: number;
@@ -55,13 +65,28 @@ export interface AccountData {
   gpuDashboardUrl: string | null;
   billingPortalUrl: string;
   bareMetalEnabled?: boolean;
+  /** Legacy field — true when JWT email matches Stripe customer email. Kept for back-compat. Use `can` for new gating. */
   isOwner: boolean;
+  /** PA-175 PR 3: Packet role on this account. null if no membership. */
+  role: PacketRole | null;
+  /** Display name for the role (e.g., "Team Admin"). */
+  roleDisplayName: string | null;
+  /** Server-side Owner flag (immutable, Stripe-linked). UI never surfaces "Owner" as a separate role — used only to hide Remove/Demote on the Owner row. */
+  membershipIsOwner: boolean;
+  /** Permission map: `can[perm] === true` if the current user has that permission. */
+  can: Record<Permission, boolean>;
   userEmail: string;
+  /** PA-224: logged-in user's display name (independent of operating-account customer.name).
+   *  Used for sidebar greeting so invited members see THEIR name, not the inviter's. */
+  userDisplayName: string | null;
   twoFactor: {
     enabled: boolean;
     hasBackupCodes: boolean;
   };
 }
+
+// Re-exports so consumers can use a single import path.
+export type { PacketRole, Permission } from "@/lib/auth/role-permissions";
 
 export interface ActivityEvent {
   id: string;

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { requirePermission } from "@/lib/auth/audit";
 import { getUnifiedInstances } from "@/lib/hostedai";
 import {
   generateDeployScript,
@@ -28,7 +29,7 @@ export async function POST(request: NextRequest) {
   try {
     const auth = await getAuthenticatedCustomer(request);
     if (auth instanceof NextResponse) return auth;
-    const { payload, teamId } = auth;
+    const { teamId, accountId } = auth;
 
     if (!teamId) {
       return NextResponse.json(
@@ -36,6 +37,10 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // PA-202 gate: Hugging Face hidden from Read-only Member + Finance Manager.
+    const denial = requirePermission(auth, "huggingface.use", request);
+    if (denial) return denial;
 
     const body = await request.json();
     const { hfItemId, subscriptionId: instanceId, hfToken, openWebUI, netdata } = body;
@@ -178,7 +183,7 @@ export async function POST(request: NextRequest) {
     await prisma.huggingFaceDeployment.create({
       data: {
         subscriptionId: String(instanceId),
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: accountId,
         hfItemId,
         hfItemType: catalogItem?.type || "model",
         hfItemName: modelName,
@@ -196,7 +201,7 @@ export async function POST(request: NextRequest) {
 
     // Log activity
     await logActivity(
-      payload.customerId,
+      accountId,
       isInstalling ? "hf_deployment_installing" : "hf_deployment_running",
       `Deployed ${modelName} to existing GPU`,
       {

@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { startVNCSession, stopVNCSession, getPoolSubscriptions } from "@/lib/hostedai";
-import Stripe from "stripe";
 
 // POST - Start VNC session for an instance
 // NOTE: VNC is only supported for traditional VM instances, not GPUaaS pods
@@ -26,12 +26,16 @@ export async function POST(
       );
     }
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
-
+    // PA-175: resolve operating account for invited members.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const customer = ctx.customer;
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json(
@@ -39,6 +43,17 @@ export async function POST(
         { status: 400 }
       );
     }
+
+    // PA-175 gate: VNC sessions are interactive pod access (gpu.access).
+    const denial = await gatePermission({
+      payload,
+      accountId: ctx.accountId,
+      customerEmail: typeof customer.email === "string" ? customer.email : null,
+      permission: "gpu.access",
+      request,
+      extra: { instanceId, action: "vnc-start" },
+    });
+    if (denial) return denial;
 
     // Check if this is a GPUaaS pod (VNC not supported)
     const subscriptions = await getPoolSubscriptions(teamId);
@@ -91,13 +106,16 @@ export async function DELETE(
       );
     }
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
-
-    const teamId = customer.metadata?.hostedai_team_id;
+    // PA-175: resolve operating account.
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+    const teamId = ctx.customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json(
         { error: "No team associated with this account" },

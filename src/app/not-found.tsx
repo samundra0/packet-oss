@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import { BrandLogo } from "@/components/BrandLogo";
-import { getLogoUrl } from "@/lib/branding";
+import { getLogoUrl } from "@/lib/branding-client";
 
 const gpuJokes = [
   "Looks like this page got lost in the tensor cores.",

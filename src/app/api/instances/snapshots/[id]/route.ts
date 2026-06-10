@@ -1,8 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
+import type { CustomerTokenPayload } from "@/lib/auth/customer";
 import { prisma } from "@/lib/prisma";
 import { deleteSharedVolume } from "@/lib/hostedai";
+import { gatePermission } from "@/lib/auth/gate";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { z } from "zod";
+
+// PA-175 helper: resolve operating account + run permission gate. Used by
+// every handler in this route so an invited member (Read-only excluded by
+// permission, but Member can) operating in their team queries the team's
+// snapshots, not their own personal ones.
+async function resolveAndGate(request: NextRequest, payload: CustomerTokenPayload) {
+  const ctx = await resolveOperatingContext({
+    email: payload.email,
+    jwtCustomerId: payload.customerId,
+    activeAccountId: payload.activeAccountId,
+  });
+  if (!ctx) {
+    return {
+      denial: NextResponse.json({ error: "Account not found" }, { status: 404 }),
+      accountId: null as string | null,
+    };
+  }
+  const denial = await gatePermission({
+    payload,
+    accountId: ctx.accountId,
+    customerEmail: typeof ctx.customer.email === "string" ? ctx.customer.email : null,
+    permission: "snapshots.manage",
+    request,
+  });
+  return { denial: denial as NextResponse | null, accountId: ctx.accountId };
+}
 
 // GET - Get a single snapshot by ID
 export async function GET(
@@ -24,12 +53,19 @@ export async function GET(
       );
     }
 
+    // PA-202 gate (against operating account, not JWT user's own).
+    const { denial, accountId } = await resolveAndGate(request, payload);
+    if (denial) return denial;
+    if (!accountId) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
     const { id: snapshotId } = await params;
 
     const snapshot = await prisma.podSnapshot.findFirst({
       where: {
         id: snapshotId,
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: accountId,
       },
     });
 
@@ -109,6 +145,13 @@ export async function PATCH(
       );
     }
 
+    // PA-202 gate (against operating account, not JWT user's own).
+    const { denial, accountId } = await resolveAndGate(request, payload);
+    if (denial) return denial;
+    if (!accountId) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
     const { id: snapshotId } = await params;
     const body = await request.json();
 
@@ -124,7 +167,7 @@ export async function PATCH(
     const existing = await prisma.podSnapshot.findFirst({
       where: {
         id: snapshotId,
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: accountId,
       },
     });
 
@@ -183,13 +226,20 @@ export async function DELETE(
       );
     }
 
+    // PA-202 gate (against operating account, not JWT user's own).
+    const { denial, accountId } = await resolveAndGate(request, payload);
+    if (denial) return denial;
+    if (!accountId) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
     const { id: snapshotId } = await params;
 
     // Verify ownership before deleting
     const snapshot = await prisma.podSnapshot.findFirst({
       where: {
         id: snapshotId,
-        stripeCustomerId: payload.customerId,
+        stripeCustomerId: accountId,
       },
     });
 

@@ -60,9 +60,19 @@ async function fetchDefaultPoliciesFromAPI(): Promise<DefaultPolicies | null> {
   try {
     console.log("[DefaultPolicies] Fetching from hosted.ai API...");
 
+    // Scope to the `general` nature. The ariel HAI release split policies into
+    // general/baremetal natures, so the unscoped /policy/defaults now returns
+    // TWO defaults per type (general + baremetal). This parser maps purely by
+    // `type` ("last wins"), which would silently resolve a mix of general and
+    // baremetal IDs depending on response order — and a baremetal policy ID
+    // sent into a team's general policy set is rejected by ariel
+    // (400 "invalid policy id general resource policy"), which surfaced as a
+    // 500 on signup/checkout/webhook team creation (PA-279). The `?nature=general`
+    // filter returns only the five general-nature defaults. Titan (pre-ariel)
+    // returns one default per type and ignores the unknown query param.
     const response = await hostedaiRequest<PolicyDefault[]>(
       "GET",
-      "/policy/defaults"
+      "/policy/defaults?nature=general"
     );
 
     if (!response || !Array.isArray(response)) {
