@@ -457,6 +457,31 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: true, data: categories });
       }
 
+      case "resync-service": {
+        if (!id) {
+          return NextResponse.json({ error: "Product ID is required" }, { status: 400 });
+        }
+        const product = await prisma.gpuProduct.findUnique({
+          where: { id },
+          include: { categories: { select: { id: true } } },
+        });
+        if (!product) {
+          return NextResponse.json({ error: "Product not found" }, { status: 404 });
+        }
+        if (!product.serviceId) {
+          return NextResponse.json({ error: "Product has no HAI service configured" }, { status: 400 });
+        }
+        const categoryIds = product.categories.map((c: { id: string }) => c.id);
+        if (categoryIds.length > 0) {
+          const { syncServiceScenarios } = await import("@/lib/scenarios");
+          await syncServiceScenarios(product.serviceId, categoryIds);
+        } else {
+          const { assignGpuService } = await import("@/lib/scenarios");
+          await assignGpuService(product.serviceId);
+        }
+        return NextResponse.json({ success: true, message: `Resynced service ${product.serviceId} for ${categoryIds.length} category scenario(s)` });
+      }
+
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }

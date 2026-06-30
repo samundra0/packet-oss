@@ -257,6 +257,18 @@ export async function syncServiceScenarios(
     clearCache(`/service/${serviceId}`);
     await updateHAIService(serviceId, { scenarios: newScenarios });
     console.log(`[Scenarios] Synced service ${serviceId} scenarios successfully`);
+
+    // Also explicitly assign via POST /scenario/assign-service — HAI's customer-facing
+    // scenario-compatible-services endpoint may use explicit assignments rather than the
+    // service's scenarios array, so we need both paths to ensure availability shows correctly.
+    await Promise.all(
+      scenarioIds.map(sid =>
+        assignServiceToScenario(serviceId, sid).catch(err =>
+          console.warn(`[Scenarios] assign-service failed for scenario ${sid}:`, err)
+        )
+      )
+    );
+    console.log(`[Scenarios] Assigned service ${serviceId} to ${scenarioIds.length} category scenario(s) via assign-service`);
   } catch (error) {
     console.error(`[Scenarios] Failed to sync service ${serviceId} scenarios:`, error);
   }

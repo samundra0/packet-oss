@@ -504,6 +504,25 @@ export function ProductsTab() {
     }
   };
 
+  const handleResyncService = async (id: string, productName: string) => {
+    try {
+      const res = await fetch("/api/admin/gpu-products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "resync-service", id }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`Resynced: ${data.message}`);
+      } else {
+        alert(data.error || `Failed to resync ${productName}`);
+      }
+    } catch (error) {
+      console.error("Resync error:", error);
+      alert("Failed to resync service");
+    }
+  };
+
   // Category CRUD handlers
   const handleSaveCategory = async () => {
     if (!categoryForm.name) { alert("Category name is required"); return; }
@@ -1092,6 +1111,15 @@ export function ProductsTab() {
                       >
                         <Pencil className="w-4 h-4" />
                       </button>
+                      {product.serviceId && (
+                        <button
+                          onClick={() => handleResyncService(product.id, product.name)}
+                          className="p-1.5 text-[#5b6476] hover:text-teal-600 hover:bg-teal-50 rounded transition-colors"
+                          title="Resync HAI service scenarios (fixes 'No GPU available')"
+                        >
+                          <RefreshCw className="w-4 h-4" />
+                        </button>
+                      )}
                       <button
                         onClick={() => handleDelete(product.id)}
                         className="p-1.5 text-[#5b6476] hover:text-red-600 hover:bg-red-50 rounded transition-colors"
