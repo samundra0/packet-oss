@@ -28,7 +28,7 @@ import {
   setMemberStatus,
   removeUserFromTeam,
 } from "@/lib/hostedai";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import type Stripe from "stripe";
 
 function isPacketRole(role: string): role is PacketRole {
@@ -98,7 +98,8 @@ export async function lookupInvitation(
       teamName = settings.teamName;
       accountLabel = settings.teamName;
     } else {
-      const stripe = await getStripe();
+      const stripe = await getStripeOrNull();
+      if (!stripe) return { ok: false, status: 400, error: "Payment processor not configured" };
       const c = (await stripe.customers.retrieve(
         invitation.stripeCustomerId,
       )) as Stripe.Customer;
@@ -176,18 +177,26 @@ export async function acceptInvitation(
   }
 
   // Look up the account's HAI team. Without it we can't bind the HAI side.
-  const stripe = await getStripe();
-  const customer = (await stripe.customers.retrieve(
-    invitation.stripeCustomerId,
-  )) as Stripe.Customer;
-  if (customer.deleted) {
-    return {
-      ok: false,
-      status: 410,
-      error: "The account this invitation belongs to no longer exists.",
-    };
+  const stripe = await getStripeOrNull();
+  let teamId: string | undefined;
+  if (stripe) {
+    const customer = (await stripe.customers.retrieve(
+      invitation.stripeCustomerId,
+    )) as Stripe.Customer;
+    if (customer.deleted) {
+      return {
+        ok: false,
+        status: 410,
+        error: "The account this invitation belongs to no longer exists.",
+      };
+    }
+    teamId = customer.metadata?.hostedai_team_id;
+  } else {
+    const cached = await import("@/lib/prisma").then(m =>
+      m.prisma.customerCache.findUnique({ where: { id: invitation.stripeCustomerId } })
+    );
+    teamId = cached?.teamId || undefined;
   }
-  const teamId = customer.metadata?.hostedai_team_id;
   if (!teamId) {
     return {
       ok: false,

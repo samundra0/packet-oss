@@ -9,7 +9,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { getWalletBalance } from "@/lib/wallet";
 import { getSharedVolumes } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
@@ -38,10 +38,10 @@ export async function GET(request: NextRequest) {
     if (!ctx) {
       return NextResponse.json({ error: "Account not found" }, { status: 404 });
     }
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
     const customer = ctx.customer;
     const accountId = ctx.accountId;
-    const teamId = customer.metadata?.hostedai_team_id;
+    const teamId = customer.metadata?.hostedai_team_id || ctx.allTeamIds[0];
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });
     }
@@ -80,16 +80,18 @@ export async function GET(request: NextRequest) {
     // context's monthlyCustomerIds instead of re-listing by email.
     const subscribedPriceIds = new Set<string>();
     const hourlyCustomerId: string | null = hasHourlyWallet ? accountId : null;
-    const subsLookupIds = [accountId, ...ctx.monthlyCustomerIds];
-    for (const cid of subsLookupIds) {
-      try {
-        const subs = await stripe.subscriptions.list({ customer: cid, status: "active", limit: 10 });
-        for (const sub of subs.data) {
-          const priceId = sub.items?.data?.[0]?.price?.id;
-          if (priceId) subscribedPriceIds.add(priceId);
+    if (stripe) {
+      const subsLookupIds = [accountId, ...ctx.monthlyCustomerIds];
+      for (const cid of subsLookupIds) {
+        try {
+          const subs = await stripe.subscriptions.list({ customer: cid, status: "active", limit: 10 });
+          for (const sub of subs.data) {
+            const priceId = sub.items?.data?.[0]?.price?.id;
+            if (priceId) subscribedPriceIds.add(priceId);
+          }
+        } catch (err) {
+          console.error(`Failed to fetch subscriptions for ${cid}:`, err);
         }
-      } catch (err) {
-        console.error(`Failed to fetch subscriptions for ${cid}:`, err);
       }
     }
 

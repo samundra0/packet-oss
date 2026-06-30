@@ -62,11 +62,11 @@ export interface CreateTeamParams {
     password?: string; // Password for pre-onboarding the user
     pre_onboard?: boolean; // Whether to pre-onboard the user (skip onboarding form)
   }>;
-  pricing_policy_id: string;
-  resource_policy_id: string;
-  service_policy_id: string;
-  instance_type_policy_id: string;
-  image_policy_id: string;
+  pricing_policy_id?: string;
+  resource_policy_id?: string;
+  service_policy_id?: string;
+  instance_type_policy_id?: string;
+  image_policy_id?: string;
 }
 
 // ============================================

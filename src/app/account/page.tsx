@@ -124,7 +124,7 @@ function AccountContent() {
         return;
       }
 
-      // Signup success — redirect to success page
+      // Signup success — show "check your email" instead of redirecting
       if (mode === "signup" && data.redirect) {
         clearUtmData();
         if (!IS_OSS) {
@@ -136,7 +136,7 @@ function AccountContent() {
             (window as any).lintrk("track", { conversion_id: 24436340 });
           }
         }
-        router.push(data.redirect);
+        setSubmitted(true);
         return;
       }
 

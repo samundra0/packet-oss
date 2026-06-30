@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { getStripe } from "./stripe";
+import { getStripeOrNull } from "./stripe";
 import { getAutoRefillThresholdCents, getAutoRefillAmountCents } from "./pricing";
 import { addSpend } from "./lifecycle";
 import { cacheCustomer } from "./customer-cache";
@@ -23,16 +23,22 @@ export interface UsageRecord {
  * Get customer's wallet balance from Stripe cash balance
  */
 export async function getWalletBalance(customerId: string): Promise<WalletBalance> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  if (stripe) {
+    const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
+    cacheCustomer(customer).catch(() => {});
+    return {
+      availableBalance: -(customer.balance || 0),
+      pendingBalance: 0,
+      currency: "usd",
+    };
+  }
 
-  // Use customer balance (not cash_balance) - this is simpler and more appropriate
-  const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
-  cacheCustomer(customer).catch(() => {});
-
-  // customer.balance: positive = they owe us, negative = they have credit
-  // We convert to "available balance" where positive = credit available
+  // No Stripe — read from local cache (Stripe convention: positive = debt, flip for display)
+  const { prisma } = await import("@/lib/prisma");
+  const cached = await prisma.customerCache.findUnique({ where: { id: customerId }, select: { balanceCents: true } });
   return {
-    availableBalance: -(customer.balance || 0), // Flip sign so positive = credit
+    availableBalance: -(cached?.balanceCents || 0), // Flip: positive = credit
     pendingBalance: 0,
     currency: "usd",
   };
@@ -47,7 +53,8 @@ export async function fundWallet(
   amountCents: number,
   paymentMethodId?: string
 ): Promise<{ success: boolean; paymentIntentId?: string; error?: string }> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  if (!stripe) return { success: false, error: "Payment processor not configured" };
 
   try {
     // Get customer's default payment method if not provided
@@ -145,10 +152,10 @@ export async function deductUsage(
   customerId: string,
   hoursUsed: number,
   description: string,
-  hourlyRateCents: number, // Required - must come from GpuProduct pricing
+  hourlyRateCents: number,
   syncCycleId?: string
 ): Promise<{ success: boolean; newBalance?: number; error?: string; skipped?: boolean }> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
   const amountCents = Math.round(hoursUsed * hourlyRateCents);
 
   if (amountCents <= 0) {
@@ -156,82 +163,49 @@ export async function deductUsage(
   }
 
   try {
-    // BALANCE GUARD: Reject debits that would exceed available credit
-    const currentCustomer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
-    cacheCustomer(currentCustomer).catch(() => {});
-    const availableCredit = -(currentCustomer.balance || 0);
+    if (stripe) {
+      const currentCustomer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
+      cacheCustomer(currentCustomer).catch(() => {});
+      const availableCredit = -(currentCustomer.balance || 0);
+      if (availableCredit < amountCents) {
+        return { success: false, error: `Insufficient balance: $${(availableCredit / 100).toFixed(2)} available, $${(amountCents / 100).toFixed(2)} required` };
+      }
+
+      // Deduplication check (Stripe path)
+      const recentTransactions = await stripe.customers.listBalanceTransactions(customerId, { limit: 10 });
+      const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300;
+      const dup = syncCycleId
+        ? recentTransactions.data.find(t => t.metadata?.sync_cycle_id === syncCycleId && t.created > fiveMinutesAgo)
+        : recentTransactions.data.find(t => t.description === description && t.created > fiveMinutesAgo);
+
+      if (dup) {
+        const c = await stripe.customers.retrieve(customerId) as Stripe.Customer;
+        return { success: true, newBalance: c.balance, skipped: true };
+      }
+
+      await stripe.customers.createBalanceTransaction(customerId, {
+        amount: amountCents, currency: "usd", description,
+        metadata: { hours_used: hoursUsed.toString(), rate_cents: hourlyRateCents.toString(), ...(syncCycleId && { sync_cycle_id: syncCycleId }) },
+      });
+      addSpend(customerId, amountCents).catch(() => {});
+      const updatedCustomer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
+      return { success: true, newBalance: updatedCustomer.balance };
+    }
+
+    // ── No Stripe: deduct from local cache (Stripe convention: positive = debt) ──
+    const { prisma } = await import("@/lib/prisma");
+    const cached = await prisma.customerCache.findUnique({ where: { id: customerId }, select: { balanceCents: true } });
+    const currentBalance = cached?.balanceCents || 0;
+    const availableCredit = -currentBalance; // Flip: positive = credit
     if (availableCredit < amountCents) {
-      console.warn(`[Wallet] Blocking debit of ${amountCents}c for ${customerId}: only ${availableCredit}c available`);
-      return {
-        success: false,
-        error: `Insufficient balance: $${(availableCredit / 100).toFixed(2)} available, $${(amountCents / 100).toFixed(2)} required`,
-      };
+      return { success: false, error: `Insufficient balance: $${(availableCredit / 100).toFixed(2)} available, $${(amountCents / 100).toFixed(2)} required` };
     }
-
-    // DEDUPLICATION CHECK: Prevent race conditions where two sync calls create duplicate charges
-    // If syncCycleId is provided, check for that exact ID (allows same-amount charges across cycles)
-    // Otherwise, fall back to description matching (legacy behavior)
-    const recentTransactions = await stripe.customers.listBalanceTransactions(customerId, {
-      limit: 10,
-    });
-
-    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300; // 5 minutes
-
-    let duplicateTransaction;
-    if (syncCycleId) {
-      // New behavior: Check for exact sync cycle ID match
-      // This allows two different cycles to create identical-amount charges
-      duplicateTransaction = recentTransactions.data.find(
-        txn => txn.metadata?.sync_cycle_id === syncCycleId && txn.created > fiveMinutesAgo
-      );
-    } else {
-      // Legacy behavior: Check for description match
-      duplicateTransaction = recentTransactions.data.find(
-        txn => txn.description === description && txn.created > fiveMinutesAgo
-      );
-    }
-
-    if (duplicateTransaction) {
-      console.log(`[Wallet] Skipping duplicate deduction for ${customerId}: "${description}" already charged at ${new Date(duplicateTransaction.created * 1000).toISOString()}${syncCycleId ? ` (cycle: ${syncCycleId})` : ''}`);
-      // Get current balance to return
-      const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
-      cacheCustomer(customer).catch(() => {});
-      return {
-        success: true,
-        newBalance: customer.balance,
-        skipped: true
-      };
-    }
-
-    // Add a balance transaction (positive = customer owes us)
-    await stripe.customers.createBalanceTransaction(customerId, {
-      amount: amountCents, // Positive = debit from customer balance
-      currency: "usd",
-      description,
-      metadata: {
-        hours_used: hoursUsed.toString(),
-        rate_cents: hourlyRateCents.toString(),
-        ...(syncCycleId && { sync_cycle_id: syncCycleId }),
-      },
-    });
-
-    // Track lifecycle spend
-    addSpend(customerId, amountCents).catch(() => {});
-
-    // Get updated balance
-    const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
-    cacheCustomer(customer).catch(() => {});
-
-    return {
-      success: true,
-      newBalance: customer.balance // Positive = they owe us, Negative = credit
-    };
+    const newBalance = currentBalance + amountCents; // Add debt (moves toward zero/positive)
+    await prisma.customerCache.update({ where: { id: customerId }, data: { balanceCents: newBalance } });
+    return { success: true, newBalance };
   } catch (error) {
     console.error("Usage deduction error:", error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to deduct usage"
-    };
+    return { success: false, error: error instanceof Error ? error.message : "Failed to deduct usage" };
   }
 }
 
@@ -242,7 +216,8 @@ export async function deductUsage(
 export async function checkAndRefillWallet(
   customerId: string
 ): Promise<{ refilled: boolean; amount?: number; error?: string }> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  if (!stripe) return { refilled: false, error: "Payment processor not configured" };
 
   try {
     const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
@@ -366,16 +341,15 @@ export async function getWalletTransactions(
   customerId: string,
   maxItems: number = 0
 ): Promise<Stripe.CustomerBalanceTransaction[]> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  if (!stripe) return [];
   const all: Stripe.CustomerBalanceTransaction[] = [];
 
   if (maxItems > 0) {
-    // Fast path: single API call for limited results
     const page = await stripe.customers.listBalanceTransactions(customerId, { limit: maxItems });
     return page.data;
   }
 
-  // Unlimited: auto-paginate all transactions
   for await (const txn of stripe.customers.listBalanceTransactions(customerId, { limit: 100 })) {
     all.push(txn);
   }
@@ -418,7 +392,8 @@ export async function refundDeployment(
   amountCents: number,
   description: string
 ): Promise<{ success: boolean; error?: string }> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  if (!stripe) return { success: false, error: "Payment processor not configured" };
 
   if (amountCents <= 0) {
     return { success: true };

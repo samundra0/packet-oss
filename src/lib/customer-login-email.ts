@@ -9,7 +9,7 @@
  * All email sends are wrapped in try/catch so failures are non-fatal (anti-enumeration).
  */
 
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { sendEmail } from "@/lib/email";
 import {
   emailLayout, emailButton, emailGreeting, emailText, emailMuted,
@@ -259,13 +259,38 @@ export async function sendLoginEmailForCustomer(
   options: { inviteToken?: string; next?: string } = {},
 ): Promise<boolean> {
   const normalizedEmail = email.toLowerCase().trim();
-  const stripe = await getStripe();
-  // PA-175: when an invitation token is supplied, every dashboard URL we
-  // emit gets `&invite=<token>` appended so the dashboard shows the Accept
-  // modal as soon as the user lands.
+  const stripe = await getStripeOrNull();
   const inviteSuffix = options.inviteToken
     ? `&invite=${encodeURIComponent(options.inviteToken)}`
     : "";
+
+  // No Stripe — try local cache lookup
+  if (!stripe) {
+    const { prisma } = await import("@/lib/prisma");
+    const cached = await prisma.customerCache.findFirst({
+      where: { email: normalizedEmail, isDeleted: false },
+    });
+    if (!cached) return false;
+    const token = generateCustomerToken(normalizedEmail, cached.id, { expiresInHours: 1, next: options.next });
+    const accountUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}${inviteSuffix}`;
+    const customerName = cached.name || normalizedEmail.split("@")[0];
+    try {
+      const { sendEmail } = await import("@/lib/email");
+      const { getBrandName } = await import("@/lib/branding");
+      const brandName = getBrandName();
+      await sendEmail({
+        to: normalizedEmail,
+        subject: `Your ${brandName} login link`,
+        html: `<p>Hi ${customerName},</p><p>Click <a href="${accountUrl}">here</a> to log in to your dashboard.</p><p>This link expires in 1 hour.</p>`,
+        text: `Hi ${customerName},\n\nClick here to log in: ${accountUrl}\n\nThis link expires in 1 hour.`,
+      });
+      console.log(`[LoginEmail] Sent OSS login email to ${normalizedEmail}`);
+      return true;
+    } catch (err) {
+      console.error(`[LoginEmail] Failed to send OSS login email:`, err);
+      return false;
+    }
+  }
 
   // Find all Stripe customers matching this email
   const customers = await stripe.customers.list({

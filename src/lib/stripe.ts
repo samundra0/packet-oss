@@ -21,6 +21,19 @@ export async function getStripe(): Promise<Stripe> {
   return stripeInstance;
 }
 
+/**
+ * Like getStripe, but returns null instead of throwing when
+ * STRIPE_SECRET_KEY is not configured. Use in OSS flows where
+ * Stripe is optional.
+ */
+export async function getStripeOrNull(): Promise<Stripe | null> {
+  try {
+    return await getStripe();
+  } catch {
+    return null;
+  }
+}
+
 
 /**
  * Get the Stripe webhook signing secret (async, DB-backed).

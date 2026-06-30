@@ -165,3 +165,16 @@ export async function getApiKey(): Promise<string> {
   if (!key) throw new Error("HOSTEDAI_API_KEY is not set — configure in Platform Settings or .env.local");
   return key;
 }
+
+/**
+ * Check if hosted.ai is configured (has both API URL and key).
+ * Non-throwing — returns false instead of erroring.
+ */
+export async function hasHostedAiConfig(): Promise<boolean> {
+  try {
+    await Promise.all([getApiUrl(), getApiKey()]);
+    return true;
+  } catch {
+    return false;
+  }
+}

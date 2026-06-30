@@ -13,7 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { resolveAllTeamsForEmail } from "@/lib/customer-resolver";
 import {
   ROLE_PERMISSIONS,
@@ -51,7 +51,27 @@ export async function GET(request: NextRequest) {
   }
 
   const lower = payload.email.toLowerCase();
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+
+  if (!stripe) {
+    // No Stripe — return the customer's own account from local cache
+    const cached = await prisma.customerCache.findFirst({
+      where: { email: lower, isDeleted: false },
+      select: { id: true, email: true, name: true, teamId: true },
+    });
+    if (!cached) return NextResponse.json({ accounts: [] });
+    return NextResponse.json({
+      accounts: [{
+        id: cached.id,
+        email: cached.email,
+        name: cached.name,
+        teamId: cached.teamId,
+        isOwner: true,
+        isCurrent: payload.customerId === cached.id,
+      }],
+      currentAccountId: payload.customerId,
+    });
+  }
 
   // Source 1: explicit team_memberships
   const user = await prisma.user.findUnique({

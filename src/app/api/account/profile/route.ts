@@ -39,10 +39,13 @@ export async function PUT(request: NextRequest) {
   const { payload, stripe } = auth;
 
   try {
+    if (!stripe) {
+      return NextResponse.json({ success: true, message: "Profile update not available (no payment processor configured)" });
+    }
+
     const body = await request.json();
     const { name, company, phone, jobTitle, website, timezone, useCase } = body;
 
-    // Update customer in Stripe
     const updatedCustomer = await stripe.customers.update(payload.customerId, {
       name: name || undefined,
       phone: phone || undefined,

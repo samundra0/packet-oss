@@ -22,7 +22,7 @@
 // gets the right account context automatically.
 
 import type Stripe from "stripe";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { prisma } from "@/lib/prisma";
 import {
   resolveAllTeamsForEmail,
@@ -99,8 +99,30 @@ export async function resolveOperatingContext({
   jwtCustomerId?: string;
   activeAccountId?: string;
 }): Promise<OperatingContext | null> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
   const lower = email.toLowerCase();
+
+  // No Stripe — resolve from local cache
+  if (!stripe && jwtCustomerId) {
+    const cached = await prisma.customerCache.findUnique({ where: { id: jwtCustomerId } });
+    if (!cached) return null;
+    return {
+      customer: {
+        id: cached.id, email: cached.email, name: cached.name, metadata: { ...(cached.teamId ? { hostedai_team_id: cached.teamId } : {}) },
+        balance: 0, created: Math.floor((cached.stripeCreatedAt?.getTime() || Date.now()) / 1000),
+        currency: "usd", delinquent: null, description: null, discount: null,
+        invoice_prefix: "", invoice_settings: {}, livemode: false,
+        next_invoice_sequence: null, phone: null, preferred_locales: [],
+        shipping: null, tax_exempt: "none", tax_ids: null, default_source: null,
+        object: "customer",
+      } as unknown as Stripe.Customer,
+      accountId: cached.id,
+      allTeamIds: cached.teamId ? [cached.teamId] : [],
+      allCustomerIds: [cached.id],
+      monthlyCustomerIds: [],
+    };
+  }
+  if (!stripe) return null;
 
   // Always try to resolve the user's own Stripe customer(s) first. We need
   // this anyway for suspension checks even when operating in another account.

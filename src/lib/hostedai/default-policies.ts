@@ -60,19 +60,12 @@ async function fetchDefaultPoliciesFromAPI(): Promise<DefaultPolicies | null> {
   try {
     console.log("[DefaultPolicies] Fetching from hosted.ai API...");
 
-    // Scope to the `general` nature. The ariel HAI release split policies into
-    // general/baremetal natures, so the unscoped /policy/defaults now returns
-    // TWO defaults per type (general + baremetal). This parser maps purely by
-    // `type` ("last wins"), which would silently resolve a mix of general and
-    // baremetal IDs depending on response order — and a baremetal policy ID
-    // sent into a team's general policy set is rejected by ariel
-    // (400 "invalid policy id general resource policy"), which surfaced as a
-    // 500 on signup/checkout/webhook team creation (PA-279). The `?nature=general`
-    // filter returns only the five general-nature defaults. Titan (pre-ariel)
-    // returns one default per type and ignores the unknown query param.
+    // Fetch all default policies. The API returns both general and baremetal
+    // policies. The parser below prefers general (non-baremetal) policies and
+    // skips baremetal ones when a general one already exists for that type.
     const response = await hostedaiRequest<PolicyDefault[]>(
       "GET",
-      "/policy/defaults?nature=general"
+      "/policy/defaults"
     );
 
     if (!response || !Array.isArray(response)) {
@@ -80,24 +73,39 @@ async function fetchDefaultPoliciesFromAPI(): Promise<DefaultPolicies | null> {
       return null;
     }
 
-    // Transform array response to our object format
+    // Transform array response, preferring general (non-baremetal) policies
+    // The API returns both general and baremetal defaults. Baremetal policies
+    // have "Baremetal" in their name — we skip those when a general one exists.
     const policies: Partial<DefaultPolicies> = {};
+    const seenKeys = new Set<string>();
 
     for (const policy of response) {
       const key = mapPolicyType(policy.type);
-      if (key) {
-        policies[key] = policy.id;
-        console.log(`[DefaultPolicies] Mapped ${policy.type} -> ${key}: ${policy.id} (${policy.name})`);
+      if (!key) continue;
+      const isBaremetal = policy.name?.toLowerCase().includes("baremetal");
+      // If we already have a general policy for this key, skip baremetal ones
+      if (seenKeys.has(key) && isBaremetal) {
+        console.log(`[DefaultPolicies] Skipping baremetal ${policy.type}: ${policy.id} (${policy.name})`);
+        continue;
       }
+      policies[key] = policy.id;
+      seenKeys.add(key);
+      console.log(`[DefaultPolicies] Mapped ${policy.type} -> ${key}: ${policy.id} (${policy.name})`);
     }
 
-    // Validate we got all required policies
-    const requiredKeys: (keyof DefaultPolicies)[] = ["pricing", "resource", "service", "instanceType", "image"];
+    // Validate we got all required policies (resource is optional — API may not have one)
+    const optionalKeys: (keyof DefaultPolicies)[] = ["resource"];
+    const requiredKeys: (keyof DefaultPolicies)[] = ["pricing", "service", "instanceType", "image"];
     const missingKeys = requiredKeys.filter(key => !policies[key]);
 
     if (missingKeys.length > 0) {
       console.error(`[DefaultPolicies] Missing required policies: ${missingKeys.join(", ")}`);
       return null;
+    }
+
+    // Fill missing optional policies with empty string (API uses its own defaults)
+    for (const key of optionalKeys) {
+      if (!policies[key]) policies[key] = "";
     }
 
     console.log("[DefaultPolicies] ✅ Successfully fetched all default policies");

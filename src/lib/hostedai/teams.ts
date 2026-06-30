@@ -58,39 +58,39 @@ export async function createTeam(params: CreateTeamParams): Promise<Team> {
   // Sanitize team name to remove special characters that hosted.ai doesn't accept
   const sanitizedTeamName = sanitizeName(params.name);
 
-  const postData = {
-    color: params.color || "#6366F1", // Must be UPPERCASE hex
+  const postData: Record<string, unknown> = {
+    color: params.color || "#6366F1",
     description: params.description || "",
-    // Titan: flat top-level policy keys
-    image_policy_id: params.image_policy_id,
-    instance_type_policy_id: params.instance_type_policy_id,
     members: params.members.map((m) => ({
       email: m.email,
-      // Sanitize member name to remove special characters (e.g., + from email aliases)
       name: sanitizeName(m.name || m.email.split("@")[0]),
-      role: m.role, // API uses 'role' field (not 'role_id')
-      send_email_invite: m.send_email_invite ?? false, // Default to no invite email
-      ...(m.password && { password: m.password }), // Include password if provided
-      ...(m.pre_onboard !== undefined && { pre_onboard: m.pre_onboard }), // Include pre_onboard if provided
+      role: m.role,
+      send_email_invite: m.send_email_invite ?? false,
+      ...(m.password && { password: m.password }),
+      ...(m.pre_onboard !== undefined && { pre_onboard: m.pre_onboard }),
     })),
     name: sanitizedTeamName,
-    pricing_policy_id: params.pricing_policy_id,
-    resource_policy_id: params.resource_policy_id,
-    service_policy_id: params.service_policy_id,
-    // Ariel: the same policy IDs nested under `general`, gated by
-    // has_general_policies. Ariel removed the flat top-level keys above and
-    // hard-rejects team creation unless one of has_general/baremetal_policies
-    // is set. Titan ignores these unknown fields (plain json.Decode), so this
-    // body is compatible with both backends — see HAI Ariel compat sweep.
-    has_general_policies: true,
-    general: {
-      resource_policy_id: params.resource_policy_id,
-      service_policy_id: params.service_policy_id,
-      pricing_policy_id: params.pricing_policy_id,
-      image_policy_id: params.image_policy_id,
-      instance_type_policy_id: params.instance_type_policy_id,
-    },
   };
+
+  // Always include flat policy IDs when provided
+  if (params.pricing_policy_id) postData.pricing_policy_id = params.pricing_policy_id;
+  if (params.resource_policy_id) postData.resource_policy_id = params.resource_policy_id;
+  if (params.service_policy_id) postData.service_policy_id = params.service_policy_id;
+  if (params.image_policy_id) postData.image_policy_id = params.image_policy_id;
+  if (params.instance_type_policy_id) postData.instance_type_policy_id = params.instance_type_policy_id;
+
+  // Send general block only when we have a resource policy ID (Ariel HAI format)
+  // Otherwise use Titan (flat) format which doesn't require resource_policy_id
+  if (params.resource_policy_id) {
+    postData.has_general_policies = true;
+    postData.general = {
+      resource_policy_id: params.resource_policy_id,
+      ...(params.pricing_policy_id && { pricing_policy_id: params.pricing_policy_id }),
+      ...(params.service_policy_id && { service_policy_id: params.service_policy_id }),
+      ...(params.image_policy_id && { image_policy_id: params.image_policy_id }),
+      ...(params.instance_type_policy_id && { instance_type_policy_id: params.instance_type_policy_id }),
+    };
+  }
 
   return hostedaiRequest<Team>("POST", "/team", postData);
 }

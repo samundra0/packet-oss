@@ -10,7 +10,7 @@
  */
 
 import Stripe from "stripe";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 
 export interface ResolvedCustomer {
   /** The primary (hourly) Stripe customer — used for wallet, team ownership */
@@ -35,7 +35,8 @@ export async function resolveAllTeamsForEmail(
   email: string,
   jwtCustomerId?: string
 ): Promise<ResolvedCustomer | null> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  if (!stripe) return null;
 
   // Fetch all Stripe customers with this email
   const allCustomers = await stripe.customers.list({

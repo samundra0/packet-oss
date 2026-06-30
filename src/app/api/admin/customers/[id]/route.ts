@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken } from "@/lib/admin";
-import { getStripe } from "@/lib/stripe";
+import { getStripe, getStripeOrNull } from "@/lib/stripe";
 import { createOneTimeLogin, createTeam, suspendTeam, unsuspendTeam, terminateTeam, syncTeamsToDefaultPolicy, ensureDefaultPolicies, ensureRoles } from "@/lib/hostedai";
 import { sendEmail } from "@/lib/email";
 import {
@@ -74,6 +74,115 @@ export async function POST(
 
   const { id: customerId } = await params;
   const { action, amount, description, reason, reasonNote } = await request.json();
+
+  // ── login-as: no Stripe needed, handle early ──────────────────────────
+  if (action === "login-as") {
+    const cached = await prisma.customerCache.findUnique({ where: { id: customerId } });
+    const email = cached?.email;
+    if (!email) {
+      return NextResponse.json({ error: "Customer has no email" }, { status: 400 });
+    }
+    const token = generateAdminBypassToken(email.toLowerCase(), customerId, session.email);
+    const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
+    logAdminActivity(
+      session.email,
+      "customer_viewed",
+      `Generated "Login as" link for ${email}`,
+      { customerId, customerEmail: email, action: "login-as" }
+    ).catch(() => {});
+    return NextResponse.json({ success: true, url: dashboardUrl });
+  }
+
+  // ── send-credentials: no Stripe needed in OSS, handle early ──────────
+  if (action === "send-credentials") {
+    const cached = await prisma.customerCache.findUnique({ where: { id: customerId } });
+    if (!cached?.email) {
+      return NextResponse.json({ error: "Customer not found" }, { status: 404 });
+    }
+    const name = cached.name || cached.email.split("@")[0] || "Customer";
+    const token = generateCustomerToken(cached.email.toLowerCase(), customerId);
+    const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
+    try {
+      await sendCredentialsEmail({ to: cached.email, customerName: name, dashboardUrl });
+      await logAdminActivity(session.email, "customer_viewed", `Sent login credentials to ${cached.email}`, { customerId, customerEmail: cached.email });
+      return NextResponse.json({ success: true, message: "Credentials sent" });
+    } catch (err) {
+      return NextResponse.json({ error: `Failed to send: ${err instanceof Error ? err.message : "unknown"}` }, { status: 500 });
+    }
+  }
+
+  // ── Non-Stripe actions: handle before Stripe init ─────────────────┐
+  if (action === "toggle-bare-metal" || action === "hostedai-login") {
+    const cached = await prisma.customerCache.findUnique({ where: { id: customerId } });
+    if (action === "toggle-bare-metal") {
+      const existing = await prisma.customerSettings.findUnique({ where: { stripeCustomerId: customerId } });
+      const newValue = !(existing?.bareMetalEnabled ?? false);
+      await prisma.customerSettings.upsert({
+        where: { stripeCustomerId: customerId },
+        update: { bareMetalEnabled: newValue },
+        create: { stripeCustomerId: customerId, bareMetalEnabled: newValue },
+      });
+      const email = cached?.email || customerId;
+      await logAdminActivity(session.email, "customer_viewed", `${newValue ? "Enabled" : "Disabled"} bare metal access for ${email}`, { customerId, customerEmail: email, bareMetalEnabled: newValue });
+      return NextResponse.json({ success: true, message: `Bare metal ${newValue ? "enabled" : "disabled"} for ${email}`, bareMetalEnabled: newValue });
+    }
+    if (action === "hostedai-login") {
+      if (!cached?.email) return NextResponse.json({ error: "Customer has no email" }, { status: 400 });
+      if (!cached?.teamId) return NextResponse.json({ error: "Customer has no hosted.ai team" }, { status: 400 });
+      try {
+        const haiRoles = await ensureRoles();
+        const otl = await createOneTimeLogin({ email: cached.email, send_email_invite: false, teamId: cached.teamId, roleId: haiRoles.teamAdmin, userName: cached.name || cached.email.split("@")[0] });
+        await logAdminActivity(session.email, "customer_viewed", `Generated hosted.ai login link for ${cached.email}`, { customerId, customerEmail: cached.email, teamId: cached.teamId, action: "hostedai-login" });
+        return NextResponse.json({ success: true, url: otl.url });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return NextResponse.json({ error: `Failed to generate login: ${msg}` }, { status: 500 });
+      }
+    }
+  }
+
+  // ── adjust-credits / set-balance: use local cache when no Stripe ──
+  if (action === "adjust-credits" || action === "set-balance") {
+    const stripe = await getStripeOrNull();
+    if (stripe) {
+      // Stripe available — let the main block handle it
+    } else {
+      // No Stripe — store balance in customer_cache.balance_cents
+      const cached = await prisma.customerCache.findUnique({ where: { id: customerId } });
+      if (!cached) return NextResponse.json({ error: "Customer not found" }, { status: 404 });
+
+      if (action === "adjust-credits") {
+        const deltaDollars = parseFloat(amount);
+        if (isNaN(deltaDollars) || deltaDollars === 0) {
+          return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
+        }
+        const deltaCents = Math.round(deltaDollars * 100);
+        if (!reason) return NextResponse.json({ error: "Reason is required" }, { status: 400 });
+        const currentBalance = cached.balanceCents || 0;
+        // Stripe convention: positive = debt, negative = credit.
+        // Adding credit means making balance more negative.
+        const newBalance = currentBalance - deltaCents;
+        await prisma.customerCache.update({ where: { id: customerId }, data: { balanceCents: newBalance } });
+        const reasonLabel = reason === "other" ? (reasonNote || "Other") : reason.replace(/_/g, " ");
+        await logAdminActivity(session.email, "wallet_adjustment", `${deltaCents >= 0 ? "Added" : "Subtracted"} $${Math.abs(deltaDollars).toFixed(2)} ${deltaCents >= 0 ? "to" : "from"} ${cached.email || customerId} — ${reasonLabel}${reasonNote && reason !== "other" ? `: ${reasonNote}` : ""}`, { customerId, customerEmail: cached.email, deltaCents, reason, reasonNote: reasonNote || null });
+        return NextResponse.json({ success: true, message: `Balance adjusted by $${Math.abs(deltaDollars).toFixed(2)}`, newBalance });
+      }
+
+      if (action === "set-balance") {
+        const targetDollars = parseFloat(amount);
+        if (isNaN(targetDollars) || targetDollars < 0) return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
+        if (!reason) return NextResponse.json({ error: "Reason is required" }, { status: 400 });
+        const targetCents = Math.round(targetDollars * 100);
+        const currentBalance = cached.balanceCents || 0;
+        // Stripe stores positive = debt, so credit balance = -credit. A "$600 credit" means balance = -60000.
+        const stripeBalance = -targetCents;
+        await prisma.customerCache.update({ where: { id: customerId }, data: { balanceCents: stripeBalance } });
+        const reasonLabel = reason === "other" ? (reasonNote || "Other") : reason.replace(/_/g, " ");
+        await logAdminActivity(session.email, "wallet_adjustment", `Set balance to $${targetDollars.toFixed(2)} for ${cached.email || customerId} (was $${(currentBalance / 100).toFixed(2)}) — ${reasonLabel}${reasonNote && reason !== "other" ? `: ${reasonNote}` : ""}`, { customerId, customerEmail: cached.email, previousBalance: currentBalance, newBalance: stripeBalance, reason, reasonNote: reasonNote || null, method: "set_balance" });
+        return NextResponse.json({ success: true, message: `Balance set to $${targetDollars.toFixed(2)}`, newBalance: stripeBalance });
+      }
+    }
+  }
 
   try {
     const stripe = await getStripe();
@@ -468,7 +577,7 @@ export async function POST(
       }
 
       case "set-balance": {
-        // Set the wallet to an absolute amount (in dollars)
+        if (!stripe) return NextResponse.json({ error: "Payment processor not configured" }, { status: 400 });
         const targetDollars = parseFloat(amount);
         if (isNaN(targetDollars) || targetDollars < 0) {
           return NextResponse.json({ error: "Invalid amount - must be a positive number" }, { status: 400 });
@@ -536,116 +645,6 @@ export async function POST(
         });
       }
 
-      case "login-as": {
-        if (!customer.email) {
-          return NextResponse.json({ error: "Customer has no email" }, { status: 400 });
-        }
-
-        // Generate a dashboard token for this customer that bypasses 2FA, tagged
-        // with the acting admin so the dashboard shows an impersonation banner
-        // and the login is attributed to the admin (not "system").
-        const token = generateAdminBypassToken(customer.email.toLowerCase(), customerId, session.email);
-        const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}`;
-
-        console.log(`Admin ${session.email} generated login-as link for ${customer.email}`);
-
-        // Log login-as action
-        await logAdminActivity(
-          session.email,
-          "customer_viewed",
-          `Generated "Login as" link for ${customer.email}`,
-          { customerId, customerEmail: customer.email, action: "login-as" }
-        );
-
-        return NextResponse.json({
-          success: true,
-          url: dashboardUrl,
-        });
-      }
-
-      case "toggle-bare-metal": {
-        const existing = await prisma.customerSettings.findUnique({
-          where: { stripeCustomerId: customerId },
-        });
-        const newValue = !(existing?.bareMetalEnabled ?? false);
-
-        await prisma.customerSettings.upsert({
-          where: { stripeCustomerId: customerId },
-          update: { bareMetalEnabled: newValue },
-          create: { stripeCustomerId: customerId, bareMetalEnabled: newValue },
-        });
-
-        await logAdminActivity(
-          session.email,
-          "customer_viewed",
-          `${newValue ? "Enabled" : "Disabled"} bare metal access for ${customer.email || customerId}`,
-          { customerId, customerEmail: customer.email, bareMetalEnabled: newValue }
-        );
-
-        return NextResponse.json({
-          success: true,
-          message: `Bare metal ${newValue ? "enabled" : "disabled"} for ${customer.email}`,
-          bareMetalEnabled: newValue,
-        });
-      }
-
-      case "hostedai-login": {
-        if (!customer.email) {
-          return NextResponse.json({ error: "Customer has no email" }, { status: 400 });
-        }
-
-        if (!teamId) {
-          return NextResponse.json({ error: "Customer has no hosted.ai team" }, { status: 400 });
-        }
-
-        // Generate OTL for hosted.ai admin dashboard
-        try {
-          const haiRoles = await ensureRoles();
-          const otl = await createOneTimeLogin({
-            email: customer.email,
-            send_email_invite: false,
-            teamId: teamId,
-            roleId: haiRoles.teamAdmin,
-            userName: customer.name || customer.email.split("@")[0],
-          });
-
-          console.log(`Admin ${session.email} generated hosted.ai OTL for ${customer.email}`);
-
-          // Log hosted.ai login
-          await logAdminActivity(
-            session.email,
-            "customer_viewed",
-            `Generated hosted.ai login link for ${customer.email}`,
-            { customerId, customerEmail: customer.email, teamId, action: "hostedai-login" }
-          );
-
-          return NextResponse.json({
-            success: true,
-            url: otl.url,
-          });
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          console.error(`Failed to generate OTL for ${customer.email}:`, errorMessage);
-
-          // Check for specific error codes from hosted.ai API
-          if (errorMessage.includes("12330015") || errorMessage.includes("failed to process team")) {
-            return NextResponse.json({
-              error: `Team ${teamId} does not exist on hosted.ai. The customer may need a new team created.`,
-            }, { status: 400 });
-          }
-
-          if (errorMessage.includes("12330009") || errorMessage.includes("user details are required")) {
-            return NextResponse.json({
-              error: "Failed to generate login link: user details required by hosted.ai API",
-            }, { status: 400 });
-          }
-
-          return NextResponse.json({
-            error: `Failed to generate hosted.ai login: ${errorMessage}`,
-          }, { status: 500 });
-        }
-      }
-
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
@@ -674,9 +673,21 @@ export async function DELETE(
   const { id: customerId } = await params;
 
   try {
-    const stripe = await getStripe();
-    const customer = await stripe.customers.retrieve(customerId);
+    // ── No Stripe: just delete from local cache ──
+    const stripe = await getStripeOrNull();
+    if (!stripe) {
+      const cached = await prisma.customerCache.findUnique({ where: { id: customerId } });
+      const email = cached?.email || "unknown";
+      const teamId = cached?.teamId;
+      if (teamId) {
+        try { await terminateTeam(teamId); } catch { /* skip */ }
+      }
+      await prisma.customerCache.delete({ where: { id: customerId } }).catch(() => {});
+      await logAdminActivity(session.email, "customer_viewed", `Deleted customer ${email} (${customerId})`, { customerId, customerEmail: email, teamId, action: "delete-customer" });
+      return NextResponse.json({ success: true, message: `Customer ${email} deleted successfully` });
+    }
 
+    const customer = await stripe.customers.retrieve(customerId);
     if ("deleted" in customer && customer.deleted) {
       return NextResponse.json({ error: "Customer already deleted" }, { status: 404 });
     }
@@ -687,11 +698,7 @@ export async function DELETE(
     const teamId = customer.metadata?.hostedai_team_id;
 
     // 1. Cancel any active subscriptions
-    const subscriptions = await stripe.subscriptions.list({
-      customer: customerId,
-      status: "active",
-    });
-
+    const subscriptions = await stripe.subscriptions.list({ customer: customerId, status: "active" });
     for (const sub of subscriptions.data) {
       await stripe.subscriptions.cancel(sub.id);
       console.log(`Canceled subscription ${sub.id} for customer ${customerId}`);
@@ -704,7 +711,6 @@ export async function DELETE(
         console.log(`Terminated hosted.ai team ${teamId} for customer ${customerId}`);
       } catch (teamError) {
         console.error(`Failed to terminate team ${teamId}:`, teamError);
-        // Continue with deletion even if team termination fails
       }
     }
 
@@ -713,18 +719,8 @@ export async function DELETE(
     markCustomerCacheDeleted(customerId).catch(() => {});
     console.log(`Deleted Stripe customer ${customerId}`);
 
-    // Log the deletion
-    await logAdminActivity(
-      session.email,
-      "customer_viewed", // Reusing type
-      `Deleted customer ${customerEmail} (${customerId})`,
-      { customerId, customerEmail, teamId, action: "delete-customer" }
-    );
-
-    return NextResponse.json({
-      success: true,
-      message: `Customer ${customerEmail} deleted successfully`,
-    });
+    await logAdminActivity(session.email, "customer_viewed", `Deleted customer ${customer.email} (${customerId})`, { customerId, customerEmail, teamId, action: "delete-customer" });
+    return NextResponse.json({ success: true, message: `Customer ${customer.email} deleted successfully` });
   } catch (error) {
     console.error("Customer delete error:", error);
     const errorMessage = error instanceof Error ? error.message : String(error);

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { cacheCustomer } from "@/lib/customer-cache";
 import type Stripe from "stripe";
 import {
@@ -302,29 +302,31 @@ export async function processReferralReward(claimId: string): Promise<void> {
   const refereeCustomerId = claim.refereeCustomerId;
   const rewardAmount = settings.rewardAmountCents;
 
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
 
-  try {
-    // Credit the referrer
-    await stripe.customers.createBalanceTransaction(referrerCustomerId, {
-      amount: -rewardAmount,
-      currency: "usd",
-      description: `Referral reward: ${claim.refereeEmail} signed up with your code`,
-    });
-  } catch (err) {
-    console.error(`Failed to credit referrer ${referrerCustomerId}:`, err);
-    // Don't throw — continue to credit referee
-  }
+  if (stripe) {
+    try {
+      // Credit the referrer
+      await stripe.customers.createBalanceTransaction(referrerCustomerId, {
+        amount: -rewardAmount,
+        currency: "usd",
+        description: `Referral reward: ${claim.refereeEmail} signed up with your code`,
+      });
+    } catch (err) {
+      console.error(`Failed to credit referrer ${referrerCustomerId}:`, err);
+      // Don't throw — continue to credit referee
+    }
 
-  try {
-    // Credit the referee
-    await stripe.customers.createBalanceTransaction(refereeCustomerId, {
-      amount: -rewardAmount,
-      currency: "usd",
-      description: "Referral bonus: Welcome reward for using a referral code",
-    });
-  } catch (err) {
-    console.error(`Failed to credit referee ${refereeCustomerId}:`, err);
+    try {
+      // Credit the referee
+      await stripe.customers.createBalanceTransaction(refereeCustomerId, {
+        amount: -rewardAmount,
+        currency: "usd",
+        description: "Referral bonus: Welcome reward for using a referral code",
+      });
+    } catch (err) {
+      console.error(`Failed to credit referee ${refereeCustomerId}:`, err);
+    }
   }
 }
 
@@ -348,22 +350,24 @@ export async function getAllReferralClaims(
     orderBy: { createdAt: "desc" },
   });
 
-  // Fetch referrer emails from Stripe
-  const stripe = await getStripe();
+  // Fetch referrer emails from Stripe (optional — skip if not configured)
+  const stripe = await getStripeOrNull();
   const claimsWithDetails: ReferralClaimWithDetails[] = [];
 
   for (const claim of claims) {
     let referrerEmail = "Unknown";
-    try {
-      const customer = await stripe.customers.retrieve(
-        claim.referralCode.stripeCustomerId
-      );
-      if (customer && !customer.deleted && "email" in customer) {
-        cacheCustomer(customer as Stripe.Customer).catch(() => {});
-        referrerEmail = customer.email || "Unknown";
+    if (stripe) {
+      try {
+        const customer = await stripe.customers.retrieve(
+          claim.referralCode.stripeCustomerId
+        );
+        if (customer && !customer.deleted && "email" in customer) {
+          cacheCustomer(customer as Stripe.Customer).catch(() => {});
+          referrerEmail = customer.email || "Unknown";
+        }
+      } catch {
+        // Ignore errors fetching customer
       }
-    } catch {
-      // Ignore errors fetching customer
     }
 
     claimsWithDetails.push({
@@ -467,19 +471,21 @@ export async function validateReferralCode(
     }
   }
 
-  // Get referrer email for display
-  const stripe = await getStripe();
+  // Get referrer email for display (optional — skip if Stripe not configured)
+  const stripe = await getStripeOrNull();
   let referrerEmail = "A friend";
-  try {
-    const customer = await stripe.customers.retrieve(
-      referralCode.stripeCustomerId
-    );
-    if (customer && !customer.deleted && "email" in customer) {
-      cacheCustomer(customer as Stripe.Customer).catch(() => {});
-      referrerEmail = customer.email || "A friend";
+  if (stripe) {
+    try {
+      const customer = await stripe.customers.retrieve(
+        referralCode.stripeCustomerId
+      );
+      if (customer && !customer.deleted && "email" in customer) {
+        cacheCustomer(customer as Stripe.Customer).catch(() => {});
+        referrerEmail = customer.email || "A friend";
+      }
+    } catch {
+      // Ignore
     }
-  } catch {
-    // Ignore
   }
 
   return { valid: true, referrerEmail };

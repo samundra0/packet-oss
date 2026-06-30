@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import type {
   VoucherData,
   VoucherWithRedemptions,
@@ -218,7 +218,8 @@ export async function processVoucherRedemption(
 
     // Credit Stripe balance AFTER DB transaction succeeds
     // If this fails, the redemption is recorded but credit not applied — recoverable via admin
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) throw new Error("Voucher redemption requires a payment processor to be configured.");
     await stripe.customers.createBalanceTransaction(stripeCustomerId, {
       amount: -creditCents, // Negative = credit
       currency: "usd",

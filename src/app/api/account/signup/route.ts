@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { prisma } from "@/lib/prisma";
+import crypto from "crypto";
 import { getSetting } from "@/lib/settings";
 import { rateLimit, getClientIp } from "@/lib/ratelimit";
 import { generateCustomerToken } from "@/lib/customer-auth";
@@ -14,6 +15,7 @@ import {
   syncTeamsToDefaultPolicy,
   ensureDefaultPolicies,
   ensureRoles,
+  hasHostedAiConfig,
 } from "@/lib/hostedai";
 import { logAccountCreated, logApiKeyCreated } from "@/lib/activity";
 import { sendOnboardingEvent } from "@/lib/email/onboarding-events";
@@ -22,7 +24,6 @@ import { getBrandName, getDashboardUrl, getCompanyName } from "@/lib/branding";
 import { sendLoginEmailForCustomer } from "@/lib/customer-login-email";
 import { isBlockedDomain } from "@/lib/email-blocklist";
 import { embargoCheck } from "@/lib/embargo";
-import crypto from "crypto";
 
 const FREE_TRIAL_TOKENS = 10000;
 
@@ -211,32 +212,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const stripe = await getStripe();
-
-    // Check if customer already exists
-    const existingCustomers = await stripe.customers.list({
-      email: customerEmail,
-      limit: 1,
-    });
-
-    if (existingCustomers.data.length > 0) {
-      // Customer already exists — send them a login link instead of creating
-      // a duplicate account. The response is deliberately identical to the
-      // new-account path so we don't leak account existence.
-      console.log(`[Signup] Existing customer found for ${customerEmail}, sending login link instead`);
-      try {
-        await sendLoginEmailForCustomer(customerEmail, {
-          inviteToken: typeof inviteToken === "string" ? inviteToken : undefined,
-        });
-      } catch (loginEmailError) {
-        console.error(`[Signup] Failed to send login email for existing customer ${customerEmail}:`, loginEmailError);
-      }
-      return NextResponse.json({
-        success: true,
-        message: "Account created! Check your email for your dashboard link and API key.",
-        redirect: `${process.env.NEXT_PUBLIC_APP_URL}/success?type=existing&email=${encodeURIComponent(customerEmail)}${inviteSuffix}`,
-      });
-    }
+    // Resolve customer ID: use Stripe if configured, otherwise generate a synthetic ID
+    const stripe = await getStripeOrNull();
+    const hasStripe = stripe !== null;
+    const customerId = hasStripe ? null : `oss_${crypto.randomBytes(16).toString("hex")}`;
 
     // Create customer name from email
     const rawName = customerEmail.split("@")[0];
@@ -244,106 +223,168 @@ export async function POST(request: NextRequest) {
 
     console.log(`=== FREE SIGNUP: Creating account for ${customerEmail}${gpu ? ` (from GPU: ${gpu})` : ""} ===`);
 
-    // Create Stripe customer (no charge, no balance credit)
-    const signupSource = gpu ? `gpu-${gpu}` : "direct";
-    const stripeCustomer = await stripe.customers.create({
-      email: customerEmail,
-      name: customerName,
-      metadata: {
-        billing_type: "free",
-        free_tokens_limit: FREE_TRIAL_TOKENS.toString(),
-        source: getBrandName(),
-        signup_type: "free",
-        signup_source: signupSource,
-        ...(gpu ? { signup_gpu: gpu } : {}),
-        ...(plan ? { signup_plan: plan } : {}),
-        // UTM attribution (first-touch, from localStorage)
-        ...(utm?.utm_source ? { utm_source: String(utm.utm_source).slice(0, 200) } : {}),
-        ...(utm?.utm_medium ? { utm_medium: String(utm.utm_medium).slice(0, 200) } : {}),
-        ...(utm?.utm_campaign ? { utm_campaign: String(utm.utm_campaign).slice(0, 200) } : {}),
-        ...(utm?.utm_content ? { utm_content: String(utm.utm_content).slice(0, 200) } : {}),
-        ...(utm?.utm_term ? { utm_term: String(utm.utm_term).slice(0, 200) } : {}),
-        ...(utm?.landing_page ? { landing_page: String(utm.landing_page).slice(0, 500) } : {}),
-        ...(utm?.referrer ? { referrer: String(utm.referrer).slice(0, 500) } : {}),
-      },
-    });
-    cacheCustomer(stripeCustomer).catch(() => {});
-    console.log(`✅ Created Stripe customer: ${stripeCustomer.id}`);
+    let customerCacheId: string;
 
-    // Create hosted.ai team for free trial user (same as paid users)
-    const generatedPassword = generateSecurePassword();
-    const teamName = `${customerName}-free-${Date.now()}`;
-
-    let team: { id: string; name: string };
-    try {
-      // Await policies and roles from the API (not sync fallback) so team
-      // creation never uses stale staging UUIDs on cold start.
-      const [policies, roles] = await Promise.all([
-        ensureDefaultPolicies(),
-        ensureRoles(),
-      ]);
-
-      team = await createTeam({
-        name: teamName,
-        description: `${getBrandName()} - Free Trial`,
-        color: "#6366F1",
-        members: [
-          {
-            email: customerEmail,
-            name: customerName,
-            role: roles.teamAdmin,
-            send_email_invite: false,
-            password: generatedPassword,
-            pre_onboard: true,
-          },
-        ],
-        pricing_policy_id: policies.pricing,
-        resource_policy_id: policies.resource,
-        service_policy_id: policies.service,
-        instance_type_policy_id: policies.instanceType,
-        image_policy_id: policies.image,
-      });
-      console.log(`✅ Created hosted.ai team ${team.id} for free trial`);
-
-      // CRITICAL: Add team to resource policy's teams array
-      // Without this, the team cannot access GPU pools (error: "unable to retrieve resource access permissions")
-      try {
-        await syncTeamsToDefaultPolicy([team.id]);
-        console.log(`✅ Added team ${team.id} to default resource policy`);
-      } catch (policyError) {
-        console.error(`⚠️ WARNING: Failed to add team to resource policy:`, policyError);
-        // Don't throw - team is created, they just might have access issues until manually fixed
-      }
-    } catch (teamError) {
-      console.error("❌ FATAL: Failed to create hosted.ai team for free trial:", teamError);
-      throw new Error(`Failed to create hosted.ai team: ${teamError instanceof Error ? teamError.message : String(teamError)}`);
-    }
-
-    // Create one-time login token (roles already fetched above)
-    try {
-      const signupRoles = await ensureRoles();
-      await createOneTimeLogin({
+    if (hasStripe) {
+      // Check if customer already exists in Stripe
+      const existingCustomers = await stripe.customers.list({
         email: customerEmail,
-        send_email_invite: false,
-        teamId: team.id,
-        roleId: signupRoles.teamAdmin,
+        limit: 1,
       });
-      console.log(`✅ Created OTL for ${customerEmail}`);
-    } catch (otlError) {
-      console.error("❌ WARNING: Failed to create OTL (non-fatal):", otlError);
+
+      if (existingCustomers.data.length > 0) {
+        console.log(`[Signup] Existing customer found for ${customerEmail}, sending login link instead`);
+        try {
+          await sendLoginEmailForCustomer(customerEmail, {
+            inviteToken: typeof inviteToken === "string" ? inviteToken : undefined,
+          });
+        } catch (loginEmailError) {
+          console.error(`[Signup] Failed to send login email for existing customer ${customerEmail}:`, loginEmailError);
+        }
+        return NextResponse.json({
+          success: true,
+          message: "Account created! Check your email for your dashboard link and API key.",
+          redirect: `${process.env.NEXT_PUBLIC_APP_URL}/?signup=success&email=${encodeURIComponent(customerEmail)}`,
+        });
+      }
+
+      // Create Stripe customer
+      const signupSource = gpu ? `gpu-${gpu}` : "direct";
+      const stripeCustomer = await stripe.customers.create({
+        email: customerEmail,
+        name: customerName,
+        metadata: {
+          billing_type: "free",
+          free_tokens_limit: FREE_TRIAL_TOKENS.toString(),
+          source: getBrandName(),
+          signup_type: "free",
+          signup_source: signupSource,
+          ...(gpu ? { signup_gpu: gpu } : {}),
+          ...(plan ? { signup_plan: plan } : {}),
+          ...(utm?.utm_source ? { utm_source: String(utm.utm_source).slice(0, 200) } : {}),
+          ...(utm?.utm_medium ? { utm_medium: String(utm.utm_medium).slice(0, 200) } : {}),
+          ...(utm?.utm_campaign ? { utm_campaign: String(utm.utm_campaign).slice(0, 200) } : {}),
+          ...(utm?.utm_content ? { utm_content: String(utm.utm_content).slice(0, 200) } : {}),
+          ...(utm?.utm_term ? { utm_term: String(utm.utm_term).slice(0, 200) } : {}),
+          ...(utm?.landing_page ? { landing_page: String(utm.landing_page).slice(0, 500) } : {}),
+          ...(utm?.referrer ? { referrer: String(utm.referrer).slice(0, 500) } : {}),
+        },
+      });
+      cacheCustomer(stripeCustomer).catch(() => {});
+      customerCacheId = stripeCustomer.id;
+      console.log(`✅ Created Stripe customer: ${stripeCustomer.id}`);
+    } else {
+      // No Stripe — check local cache for existing email, then create synthetic ID
+      const existing = await prisma.customerCache.findFirst({
+        where: { email: customerEmail, isDeleted: false },
+      });
+      if (existing) {
+        console.log(`[Signup] Existing OSS customer found for ${customerEmail}, redirecting to login`);
+        return NextResponse.json({
+          success: true,
+          message: "Account created! Check your email for your dashboard link and API key.",
+          redirect: `${process.env.NEXT_PUBLIC_APP_URL}/?signup=success&email=${encodeURIComponent(customerEmail)}`,
+        });
+      }
+      customerCacheId = customerId!;
+      await prisma.customerCache.upsert({
+        where: { id: customerCacheId },
+        update: { email: customerEmail, name: customerName, billingType: "free", isDeleted: false, lastSyncedAt: new Date() },
+        create: {
+          id: customerCacheId,
+          email: customerEmail,
+          name: customerName,
+          billingType: "free",
+          stripeCreatedAt: new Date(),
+          isDeleted: false,
+          lastSyncedAt: new Date(),
+        },
+      });
+      console.log(`✅ Created OSS customer: ${customerCacheId}`);
     }
 
-    // Update Stripe customer with hosted.ai team ID
-    const updatedCustomer = await stripe.customers.update(stripeCustomer.id, {
-      metadata: {
-        hostedai_team_id: team.id,
-        billing_type: "free",
-        free_tokens_limit: FREE_TRIAL_TOKENS.toString(),
-        ...(gpu ? { signup_gpu: gpu } : {}),
-        ...(plan ? { signup_plan: plan } : {}),
-      },
-    });
-    cacheCustomer(updatedCustomer as import("stripe").default.Customer).catch(() => {});
+    // Create hosted.ai team if configured; otherwise skip
+    const hasHostedAi = await hasHostedAiConfig();
+    let team: { id: string; name: string } | null = null;
+
+    if (hasHostedAi) {
+      const generatedPassword = generateSecurePassword();
+      const teamName = `${customerName}-free-${Date.now()}`;
+
+      try {
+        const [policies, roles] = await Promise.all([
+          ensureDefaultPolicies(),
+          ensureRoles(),
+        ]);
+
+        team = await createTeam({
+          name: teamName,
+          description: `${getBrandName()} - Free Trial`,
+          color: "#6366F1",
+          members: [
+            {
+              email: customerEmail,
+              name: customerName,
+              role: roles.teamAdmin,
+              send_email_invite: false,
+              password: generatedPassword,
+              pre_onboard: true,
+            },
+          ],
+          pricing_policy_id: policies.pricing,
+          resource_policy_id: policies.resource,
+          service_policy_id: policies.service,
+          instance_type_policy_id: policies.instanceType,
+          image_policy_id: policies.image,
+        });
+        console.log(`✅ Created hosted.ai team ${team.id} for free trial`);
+
+        try {
+          await syncTeamsToDefaultPolicy([team.id]);
+          console.log(`✅ Added team ${team.id} to default resource policy`);
+        } catch (policyError) {
+          console.error(`⚠️ WARNING: Failed to add team to resource policy:`, policyError);
+        }
+      } catch (teamError) {
+        console.error("⚠️ WARNING: Failed to create hosted.ai team (non-fatal):", teamError);
+      }
+
+      if (team) {
+        try {
+          const signupRoles = await ensureRoles();
+          await createOneTimeLogin({
+            email: customerEmail,
+            send_email_invite: false,
+            teamId: team.id,
+            roleId: signupRoles.teamAdmin,
+          });
+          console.log(`✅ Created OTL for ${customerEmail}`);
+        } catch (otlError) {
+          console.error("❌ WARNING: Failed to create OTL (non-fatal):", otlError);
+        }
+      }
+    } else {
+      console.log(`⚠️ hosted.ai not configured — skipping team creation for ${customerEmail}`);
+    }
+
+    // Store team ID in customer cache (Stripe metadata or local)
+    if (team) {
+      await prisma.customerCache.update({ where: { id: customerCacheId }, data: { teamId: team.id } }).catch(() => {});
+    }
+    if (hasStripe && team) {
+      try {
+        const updatedCustomer = await stripe!.customers.update(customerCacheId, {
+          metadata: {
+            hostedai_team_id: team.id,
+            billing_type: "free",
+            free_tokens_limit: FREE_TRIAL_TOKENS.toString(),
+            ...(gpu ? { signup_gpu: gpu } : {}),
+            ...(plan ? { signup_plan: plan } : {}),
+          },
+        });
+        cacheCustomer(updatedCustomer as import("stripe").default.Customer).catch(() => {});
+      } catch { /* Stripe update non-fatal */ }
+    }
 
     // Generate API key for Token Factory
     const { key, keyHash, keyPrefix } = generateApiKey();
@@ -354,8 +395,8 @@ export async function POST(request: NextRequest) {
         name: "Default API Key",
         keyPrefix,
         keyHash,
-        stripeCustomerId: stripeCustomer.id,
-        teamId: team.id, // Use real team ID
+        stripeCustomerId: customerCacheId,
+        teamId: team?.id || "",
         scopes: "*",
       },
     });
@@ -369,7 +410,7 @@ export async function POST(request: NextRequest) {
         const userAgent = request.headers.get("user-agent") || null;
         await prisma.tosAcceptance.create({
           data: {
-            stripeCustomerId: stripeCustomer.id,
+            stripeCustomerId: customerCacheId,
             tosVersion,
             ipAddress,
             userAgent,
@@ -382,7 +423,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate dashboard URL with token (carry deep-link intent in the signed claim)
-    const token = generateCustomerToken(customerEmail, stripeCustomer.id, {
+    const token = generateCustomerToken(customerEmail, customerCacheId, {
       next: typeof next === "string" ? next : undefined,
     });
     const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}${inviteSuffix}`;
@@ -405,7 +446,7 @@ export async function POST(request: NextRequest) {
     try {
       await prisma.customerLifecycle.create({
         data: {
-          stripeCustomerId: stripeCustomer.id,
+          stripeCustomerId: customerCacheId,
           email: customerEmail,
           signedUpAt: new Date(),
           currentBillingType: "free",
@@ -424,7 +465,7 @@ export async function POST(request: NextRequest) {
       if (sessionId) {
         await prisma.pageView.updateMany({
           where: { sessionId: String(sessionId) },
-          data: { convertedCustomerId: stripeCustomer.id },
+          data: { convertedCustomerId: customerCacheId },
         });
       }
       console.log(`✅ Created CustomerLifecycle for ${customerEmail}`);
@@ -441,7 +482,7 @@ export async function POST(request: NextRequest) {
         await prisma.dripEnrollment.create({
           data: {
             sequenceId: dripSequence.id,
-            stripeCustomerId: stripeCustomer.id,
+            stripeCustomerId: customerCacheId,
             email: customerEmail,
             customerName,
             metadata: JSON.stringify({ gpu: gpu || null, plan: plan || null }),
@@ -454,8 +495,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Log activity events
-    logAccountCreated(stripeCustomer.id, customerEmail, gpu ? `free-gpu-${gpu}` : "free").catch(() => {});
-    logApiKeyCreated(stripeCustomer.id, "Default API Key").catch(() => {});
+    logAccountCreated(customerCacheId, customerEmail, gpu ? `free-gpu-${gpu}` : "free").catch(() => {});
+    logApiKeyCreated(customerCacheId, "Default API Key").catch(() => {});
 
     // Sync to Pipedrive (async, don't block response — Pro only)
     const gpuDisplayName = gpu ? (GPU_DISPLAY_NAMES[gpu] || gpu.toUpperCase()) : "";
@@ -466,7 +507,7 @@ export async function POST(request: NextRequest) {
           email: customerEmail,
           productName: gpu ? `Free Signup (${gpuDisplayName})` : "Free Signup",
           billingType: "free",
-          stripeCustomerId: stripeCustomer.id,
+          stripeCustomerId: customerCacheId,
         })
       ).catch((err) => console.error("[Pipedrive] Customer sync failed:", err));
     }
@@ -479,7 +520,7 @@ export async function POST(request: NextRequest) {
       email: customerEmail,
       name: customerName,
       metadata: {
-        "Stripe Customer ID": stripeCustomer.id,
+        "Customer ID": customerCacheId,
         "Team ID": team?.id || "unknown",
         "Billing Type": "free_trial",
         "Free Tokens": FREE_TRIAL_TOKENS,
@@ -495,7 +536,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       message: "Account created! Check your email for your dashboard link and API key.",
-      redirect: `${process.env.NEXT_PUBLIC_APP_URL}/success?type=free&email=${encodeURIComponent(customerEmail)}${inviteSuffix}`,
+      redirect: `${process.env.NEXT_PUBLIC_APP_URL}/?signup=success&email=${encodeURIComponent(customerEmail)}`,
     });
   } catch (error) {
     console.error("Signup error:", error);

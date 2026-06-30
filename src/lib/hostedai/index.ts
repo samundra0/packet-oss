@@ -23,6 +23,7 @@ export {
   clearCache,
   getApiUrl,
   getApiKey,
+  hasHostedAiConfig,
 } from "./client";
 
 // Re-export team functions

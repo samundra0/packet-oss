@@ -76,8 +76,13 @@ export async function getResourcePolicyTeams(): Promise<PolicyTeam[]> {
     return policyTeamsCache;
   }
 
-  const policy = await getDefaultResourcePolicy();
-  policyTeamsCache = policy.teams || [];
+  try {
+    const policy = await getDefaultResourcePolicy();
+    policyTeamsCache = policy.teams || [];
+  } catch (err) {
+    console.error("[AdminCache] Failed to fetch resource policy teams:", err);
+    policyTeamsCache = [];
+  }
   policyTeamsTime = Date.now();
   return policyTeamsCache;
 }

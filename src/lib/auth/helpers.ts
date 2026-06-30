@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken, type CustomerTokenPayload } from "./customer";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { resolveOperatingContext } from "./account-resolver";
 import { findSuspension } from "@/lib/customer-suspension";
 import {
@@ -8,6 +8,7 @@ import {
   type ResolvedMembership,
 } from "./membership";
 import { can as canPure, type Permission } from "./role-permissions";
+import { prisma } from "@/lib/prisma";
 import type Stripe from "stripe";
 
 /**
@@ -27,7 +28,7 @@ export interface AuthenticatedCustomer {
   teamId: string | undefined;
   /** All team IDs across all Stripe customers for this email */
   allTeamIds: string[];
-  stripe: Stripe;
+  stripe: Stripe | null;
   /** stripe_customer_id of the account this request is acting on (de-facto account_id) */
   accountId: string;
   /** Resolved membership (role, isOwner, revokedAt). Implicit when the JWT email matches customer.email but no row exists yet. */
@@ -67,39 +68,53 @@ export async function getAuthenticatedCustomer(
     );
   }
 
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
 
-  // PA-175: unified resolution. Honors JWT.activeAccountId for the multi-team
-  // case; falls back to user's own Stripe customer; falls back to team-only
-  // (invitee with no own Stripe customer) lookup via team_membership.
-  const ctx = await resolveOperatingContext({
-    email: payload.email,
-    jwtCustomerId: payload.customerId,
-    activeAccountId: payload.activeAccountId,
-  });
+  let customer: Stripe.Customer;
+  let teamId: string | undefined;
+  let accountId: string;
+  let allTeamIds: string[];
 
-  if (!ctx) {
-    return NextResponse.json(
-      { error: "Customer not found" },
-      { status: 404 }
-    );
+  if (stripe) {
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+
+    if (!ctx) {
+      return NextResponse.json({ error: "Customer not found" }, { status: 404 });
+    }
+
+    const suspension = await findSuspension(ctx.allCustomerIds);
+    if (suspension) {
+      console.warn(`[Auth] Blocked suspended customer ${payload.email} (${ctx.accountId})`);
+      return NextResponse.json({ error: "This account has been suspended. Contact support." }, { status: 403 });
+    }
+
+    customer = ctx.customer;
+    teamId = customer.metadata?.hostedai_team_id || ctx.allTeamIds[0] || undefined;
+    accountId = ctx.accountId;
+    allTeamIds = ctx.allTeamIds;
+  } else {
+    // No Stripe — build minimal context from local cache
+    const cached = await prisma.customerCache.findUnique({ where: { id: payload.customerId } });
+    if (!cached) {
+      return NextResponse.json({ error: "Customer not found" }, { status: 404 });
+    }
+    customer = {
+      id: cached.id, email: cached.email, name: cached.name, metadata: { ...(cached.teamId ? { hostedai_team_id: cached.teamId } : {}) },
+      balance: 0, created: Math.floor((cached.stripeCreatedAt?.getTime() || Date.now()) / 1000),
+      currency: "usd", delinquent: null, description: null, discount: null,
+      invoice_prefix: "", invoice_settings: {}, livemode: false,
+      next_invoice_sequence: null, phone: null, preferred_locales: [],
+      shipping: null, tax_exempt: "none", tax_ids: null, default_source: null,
+      object: "customer",
+    } as unknown as Stripe.Customer;
+    teamId = cached.teamId || undefined;
+    accountId = cached.id;
+    allTeamIds = [cached.id];
   }
-
-  // Block suspended customers (fraud lockout). Checks all linked Stripe
-  // customer IDs since one suspended account locks the whole email out
-  // for the entire duration of any still-valid JWT.
-  const suspension = await findSuspension(ctx.allCustomerIds);
-  if (suspension) {
-    console.warn(`[Auth] Blocked suspended customer ${payload.email} (${ctx.accountId})`);
-    return NextResponse.json(
-      { error: "This account has been suspended. Contact support." },
-      { status: 403 }
-    );
-  }
-
-  const customer = ctx.customer;
-  const teamId = customer.metadata?.hostedai_team_id || ctx.allTeamIds[0] || undefined;
-  const accountId = ctx.accountId;
 
   const customerEmail =
     typeof customer.email === "string" ? customer.email : null;
@@ -142,7 +157,7 @@ export async function getAuthenticatedCustomer(
     payload,
     customer,
     teamId,
-    allTeamIds: ctx.allTeamIds,
+    allTeamIds,
     stripe,
     accountId,
     membership,

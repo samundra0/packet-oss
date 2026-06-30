@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { verifyCustomerToken, type CustomerTokenPayload } from "@/lib/customer-auth";
 import {
   createCustomerSession,
@@ -55,287 +55,154 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
 
-    // PA-175: unified resolution. Honors JWT.activeAccountId for the multi-team
-    // case; falls back to user's own Stripe customer; falls back to team-only
-    // (invitee with no own Stripe customer) lookup via team_membership.
-    const ctx = await resolveOperatingContext({
-      email: payload.email,
-      jwtCustomerId: payload.customerId,
-      activeAccountId: payload.activeAccountId,
-    });
-    if (!ctx) {
-      return NextResponse.json(
-        { error: "Account not found" },
-        { status: 404 }
-      );
-    }
+    // Resolve customer: try Stripe operating context, fall back to local cache
+    let customer: Stripe.Customer | null = null;
+    let billingType: string | undefined;
+    let teamId: string | undefined;
+    let monthlyCustomerIds: string[] = [];
+    let allTeamIds: string[] = [];
+    let allCustomerIds: string[] = [];
 
-    const customer = ctx.customer;
-    const billingType = customer.metadata?.billing_type;
-    const teamId = customer.metadata?.hostedai_team_id;
-    const monthlyCustomerIds = ctx.monthlyCustomerIds;
-    console.log(`[Verify] Resolved ${payload.email}: account=${customer.id}, teams=[${ctx.allTeamIds.join(",")}], monthly=[${monthlyCustomerIds.join(",")}]`);
-
-    // Block suspended customers (fraud lockout). Checks all linked customer
-    // IDs since one suspended account locks the whole email out.
-    const suspension = await findSuspension(ctx.allCustomerIds);
-    if (suspension) {
-      console.warn(`[Verify] Blocked suspended customer ${payload.email} (${customer.id})`);
-      return NextResponse.json(
-        { error: "This account has been suspended. Contact support." },
-        { status: 403 }
-      );
-    }
-
-    // Get wallet balance for hourly customers
-    let wallet = null;
-    let transactions: Array<{
-      id: string;
-      amount: number;
-      amountFormatted: string;
-      description: string;
-      created: number;
-      type: "credit" | "debit";
-    }> = [];
-
-    // ── Parallel fetch: wallet, transactions, subscriptions, payments, invoices ──
-    // Use the already-retrieved customer for wallet balance (avoid duplicate Stripe call)
-    const availableBalance = -(customer.balance || 0); // Flip sign: positive = credit
-
-    const [walletTxns, subsFromPrimary, payments, invoices, ...monthlySubResults] = await Promise.all([
-      getWalletTransactions(customer.id, 100),
-      stripe.subscriptions.list({ customer: customer.id, status: "active", limit: 10 }),
-      stripe.paymentIntents.list({ customer: customer.id, limit: 50 }),
-      stripe.invoices.list({ customer: customer.id, limit: 50, status: "paid" }),
-      ...monthlyCustomerIds.map((monthlyId) =>
-        stripe.subscriptions.list({ customer: monthlyId, status: "active", limit: 10 }).catch((err) => {
-          console.error(`Failed to fetch subscriptions from linked monthly customer ${monthlyId}:`, err);
-          return { data: [] as Stripe.Subscription[] };
-        })
-      ),
-    ]);
-
-    // Build wallet info from already-retrieved customer
-    {
-      const displayBalance = Math.max(0, availableBalance);
-      wallet = {
-        balance: displayBalance,
-        balanceFormatted: formatCentsForUser(availableBalance),
-        currency: "usd",
-      };
-
-      const userFacingTxns = walletTxns.filter((txn) => {
-        const metaType = txn.metadata?.type;
-        if (metaType === "invoice_balance_hold" || metaType === "invoice_balance_restore") return false;
-        const desc = (txn.description || "").toLowerCase();
-        if (desc.includes("temporary hold for invoice") || desc.includes("restore after invoice")) return false;
-        return true;
+    if (stripe) {
+      const ctx = await resolveOperatingContext({
+        email: payload.email,
+        jwtCustomerId: payload.customerId,
+        activeAccountId: payload.activeAccountId,
       });
+      if (!ctx) {
+        return NextResponse.json({ error: "Account not found" }, { status: 404 });
+      }
+      customer = ctx.customer;
+      billingType = customer.metadata?.billing_type;
+      teamId = customer.metadata?.hostedai_team_id;
+      monthlyCustomerIds = ctx.monthlyCustomerIds;
+      allTeamIds = ctx.allTeamIds;
+      allCustomerIds = ctx.allCustomerIds;
+      console.log(`[Verify] Resolved ${payload.email}: account=${customer.id}, teams=[${allTeamIds.join(",")}], monthly=[${monthlyCustomerIds.join(",")}]`);
 
-      transactions = userFacingTxns.map((txn) => ({
-        id: txn.id,
-        amount: Math.abs(txn.amount),
-        amountFormatted: formatCentsForUser(Math.abs(txn.amount)),
-        description: txn.description || "Transaction",
-        created: txn.created,
-        type: txn.amount < 0 ? "credit" : "debit",
-      }));
+      // Block suspended customers
+      const suspension = await findSuspension(allCustomerIds);
+      if (suspension) {
+        console.warn(`[Verify] Blocked suspended customer ${payload.email} (${customer.id})`);
+        return NextResponse.json({ error: "This account has been suspended. Contact support." }, { status: 403 });
+      }
+    } else {
+      // No Stripe — resolve from local customer cache
+      const cached = await prisma.customerCache.findUnique({ where: { id: payload.customerId } });
+      if (cached) {
+        customer = {
+          id: cached.id,
+          email: cached.email,
+          name: cached.name,
+          metadata: { ...(cached.teamId ? { hostedai_team_id: cached.teamId } : {}) },
+          balance: 0,
+          created: Math.floor((cached.stripeCreatedAt?.getTime() || Date.now()) / 1000),
+          currency: "usd",
+          delinquent: null,
+          description: null,
+          discount: null,
+          invoice_prefix: "",
+          invoice_settings: {},
+          livemode: false,
+          next_invoice_sequence: null,
+          phone: null,
+          preferred_locales: [],
+          shipping: null,
+          tax_exempt: "none",
+          tax_ids: null,
+          default_source: null,
+          object: "customer",
+        } as unknown as Stripe.Customer;
+        billingType = "free";
+        teamId = cached.teamId || undefined;
+      } else {
+        return NextResponse.json({ error: "Account not found" }, { status: 404 });
+      }
     }
 
-    // Build subscriptions from parallel results
+    // ── Data loading: Stripe-powered or empty ──
+    let wallet = null;
+    let transactions: Array<{ id: string; amount: number; amountFormatted: string; description: string; created: number; type: "credit" | "debit" }> = [];
     let subscription = null;
-    let subscriptions: Array<{
-      id: string;
-      status: string;
-      currentPeriodStart: number;
-      currentPeriodEnd: number;
-      cancelAtPeriodEnd: boolean;
-      productId: string | null;
-      productName: string | null;
-      poolIds: string[];
-      pricePerMonthCents: number | null;
-      stripePriceId: string | null;
-      quantity: number;
-    }> = [];
+    let subscriptions: Array<{ id: string; status: string; currentPeriodStart: number; currentPeriodEnd: number; cancelAtPeriodEnd: boolean; productId: string | null; productName: string | null; poolIds: string[]; pricePerMonthCents: number | null; stripePriceId: string | null; quantity: number }> = [];
+    let recentPayments: Array<{ id: string; amount: number; amountFormatted: string; created: number; description: string; invoicePdf: string | null }> = [];
+    let billingPortalUrl: string | null = null;
 
-    {
+    if (stripe) {
+      const availableBalance = -(customer.balance || 0);
+      const [walletTxns, subsFromPrimary, payments, invoices, ...monthlySubResults] = await Promise.all([
+        getWalletTransactions(customer.id, 100),
+        stripe.subscriptions.list({ customer: customer.id, status: "active", limit: 10 }),
+        stripe.paymentIntents.list({ customer: customer.id, limit: 50 }),
+        stripe.invoices.list({ customer: customer.id, limit: 50, status: "paid" }),
+        ...monthlyCustomerIds.map((monthlyId) =>
+          stripe.subscriptions.list({ customer: monthlyId, status: "active", limit: 10 }).catch(() => ({ data: [] as Stripe.Subscription[] }))
+        ),
+      ]);
+
+      wallet = { balance: Math.max(0, availableBalance), balanceFormatted: formatCentsForUser(availableBalance), currency: "usd" };
+      transactions = walletTxns.filter((t) => !t.metadata?.type?.startsWith("invoice_balance_")).map((t) => ({ id: t.id, amount: Math.abs(t.amount), amountFormatted: formatCentsForUser(Math.abs(t.amount)), description: t.description || "Transaction", created: t.created, type: t.amount < 0 ? "credit" : "debit" }));
+
+      // Subscriptions
       let allSubsData = [...subsFromPrimary.data];
-      for (const monthlyResult of monthlySubResults) {
-        allSubsData = [...allSubsData, ...monthlyResult.data];
-      }
-
-      // Deduplicate by subscription ID (shouldn't happen but safety)
+      for (const r of monthlySubResults) allSubsData = [...allSubsData, ...r.data];
       const subs = { data: [...new Map(allSubsData.map(s => [s.id, s])).values()] };
-
       if (subs.data.length > 0) {
-        // Backward compat: keep the singular `subscription` field for the first one
-        const firstSub = subs.data[0];
-        const firstItem = firstSub.items?.data?.[0];
-        subscription = {
-          id: firstSub.id,
-          status: firstSub.status,
-          currentPeriodStart: firstItem?.current_period_start || 0,
-          currentPeriodEnd: firstItem?.current_period_end || 0,
-          cancelAtPeriodEnd: firstSub.cancel_at_period_end,
-        };
-
-        // Collect price and product IDs from subscriptions. We match by both so
-        // grandfathered subscriptions (whose price no longer matches the current
-        // GpuProduct.stripePriceId) still resolve to a product via stripeProductId.
-        const priceIds = subs.data
-          .map((s) => s.items?.data?.[0]?.price?.id)
-          .filter((id): id is string => !!id);
-        const productIds = subs.data
-          .map((s) => {
-            const prod = s.items?.data?.[0]?.price?.product;
-            return typeof prod === "string" ? prod : prod?.id;
-          })
-          .filter((id): id is string => !!id);
-
-        const matchingProducts = priceIds.length > 0 || productIds.length > 0
-          ? await prisma.gpuProduct.findMany({
-              where: {
-                OR: [
-                  { stripePriceId: { in: priceIds } },
-                  { stripeProductId: { in: productIds } },
-                ],
-                billingType: "monthly",
-                active: true,
-              },
-            })
-          : [];
-
-        const productByPriceId = new Map(
-          matchingProducts
-            .filter((p) => p.stripePriceId)
-            .map((p) => [p.stripePriceId as string, p])
-        );
-        const productByProductId = new Map(
-          matchingProducts
-            .filter((p) => p.stripeProductId)
-            .map((p) => [p.stripeProductId as string, p])
-        );
-
-        // Build enriched subscriptions array
-        subscriptions = subs.data.map((sub) => {
-          const item = sub.items?.data?.[0];
-          const priceId = item?.price?.id || null;
-          const productIdRef = typeof item?.price?.product === "string"
-            ? item.price.product
-            : item?.price?.product?.id || null;
-          const product =
-            (priceId ? productByPriceId.get(priceId) : undefined) ??
-            (productIdRef ? productByProductId.get(productIdRef) : undefined);
-
-          let poolIds: string[] = [];
-          if (product?.poolIds) {
-            try {
-              poolIds = (JSON.parse(product.poolIds) as unknown[]).map(String);
-            } catch {
-              poolIds = [];
-            }
-          }
-
-          return {
-            id: sub.id,
-            status: sub.status,
-            currentPeriodStart: item?.current_period_start || 0,
-            currentPeriodEnd: item?.current_period_end || 0,
-            cancelAtPeriodEnd: sub.cancel_at_period_end,
-            productId: product?.id || null,
-            productName: product?.name || null,
-            poolIds,
-            pricePerMonthCents: product?.pricePerMonthCents ?? null,
-            stripePriceId: priceId,
-            quantity: item?.quantity ?? 1,
-          };
+        const first = subs.data[0];
+        const fi = first.items?.data?.[0];
+        subscription = { id: first.id, status: first.status, currentPeriodStart: fi?.current_period_start || 0, currentPeriodEnd: fi?.current_period_end || 0, cancelAtPeriodEnd: first.cancel_at_period_end };
+        const priceIds = subs.data.map((s) => s.items?.data?.[0]?.price?.id).filter(Boolean) as string[];
+        const productIds = subs.data.map((s) => { const p = s.items?.data?.[0]?.price?.product; return typeof p === "string" ? p : p?.id; }).filter(Boolean) as string[];
+        const matchingProducts = await prisma.gpuProduct.findMany({ where: { OR: [{ stripePriceId: { in: priceIds } }, { stripeProductId: { in: productIds } }], billingType: "monthly", active: true } });
+        const byPriceId = new Map(matchingProducts.filter(p => p.stripePriceId).map(p => [p.stripePriceId!, p]));
+        const byProductId = new Map(matchingProducts.filter(p => p.stripeProductId).map(p => [p.stripeProductId!, p]));
+        subscriptions = subs.data.map((s) => {
+          const item = s.items?.data?.[0];
+          const pId = item?.price?.id || null;
+          const prodRef = typeof item?.price?.product === "string" ? item.price.product : item?.price?.product?.id || null;
+          const prod = (pId ? byPriceId.get(pId) : undefined) ?? (prodRef ? byProductId.get(prodRef) : undefined);
+          return { id: s.id, status: s.status, currentPeriodStart: item?.current_period_start || 0, currentPeriodEnd: item?.current_period_end || 0, cancelAtPeriodEnd: s.cancel_at_period_end, productId: prod?.id || null, productName: prod?.name || null, poolIds: prod ? (() => { try { return JSON.parse(prod.poolIds); } catch { return []; } })() : [], pricePerMonthCents: prod?.pricePerMonthCents ?? null, stripePriceId: pId, quantity: item?.quantity ?? 1 };
         });
       }
+
+      // Payments
+      const invoicePdfMap = new Map(invoices.data.filter(i => i.metadata?.type === "wallet_payment" && i.metadata?.payment_intent_id && i.invoice_pdf).map(i => [i.metadata!.payment_intent_id!, i.invoice_pdf!]));
+      recentPayments = payments.data.filter(p => p.status === "succeeded").map(p => ({ id: p.id, amount: p.amount, amountFormatted: formatCents(p.amount), created: p.created, description: p.description || "Payment", invoicePdf: invoicePdfMap.get(p.id) || null }));
+
+      // Billing portal
+      try {
+        const portalSession = await stripe.billingPortal.sessions.create({ customer: customer.id, return_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard` });
+        billingPortalUrl = portalSession.url;
+      } catch { /* no-op */ }
+    } else {
+      const cachedBal = await prisma.customerCache.findUnique({ where: { id: customer.id }, select: { balanceCents: true } });
+      const rawBalance = cachedBal?.balanceCents || 0;
+      const displayBalance = Math.max(0, -rawBalance); // Flip: positive = credit
+      wallet = { balance: displayBalance, balanceFormatted: formatCentsForUser(displayBalance), currency: "usd" };
     }
 
-    // Build payments + invoices from parallel results above
-    const invoicePdfMap = new Map<string, string>();
-    for (const inv of invoices.data) {
-      if (inv.metadata?.type === "wallet_payment" && inv.metadata?.payment_intent_id && inv.invoice_pdf) {
-        invoicePdfMap.set(inv.metadata.payment_intent_id, inv.invoice_pdf);
-      }
-    }
-
-    const recentPayments = payments.data
-      .filter((p) => p.status === "succeeded")
-      .map((p) => ({
-        id: p.id,
-        amount: p.amount,
-        amountFormatted: formatCents(p.amount),
-        created: p.created,
-        description: p.description || "Payment",
-        invoicePdf: invoicePdfMap.get(p.id) || null,
-      }));
-
-    // ── Parallel fetch: OTL + billing portal + 2FA ──
+    // ── Parallel fetch: OTL + 2FA ──
     const verifyRoles = await ensureRoles();
-
-    // PA-175: derive the OTL role from the user's actual Packet role. Hard-
-    // coding teamAdmin destroys invited members' roles because HAI's
-    // /create-otl updates UserTeam.role_id whenever it differs from the
-    // input (models/one_time_login_tokens.go:242-244). /verify runs on every
-    // dashboard load, so the member's HAI role was being reset on every
-    // page refresh.
-    const customerEmailForOtl =
-      typeof customer.email === "string" ? customer.email : null;
-    const otlIsOwner =
-      payload.email.toLowerCase() === customer.email?.toLowerCase();
-    const otlMembership = await resolveMembership({
-      userId: payload.userId,
-      email: payload.email,
-      accountId: customer.id,
-      customerEmail: customerEmailForOtl,
-    });
-    const otlPacketRole: PacketRole | null =
-      otlMembership && isPacketRole(otlMembership.role)
-        ? otlMembership.role
-        : null;
+    const customerEmailForOtl = typeof customer.email === "string" ? customer.email : null;
+    const otlIsOwner = payload.email.toLowerCase() === customer.email?.toLowerCase();
+    const otlMembership = await resolveMembership({ userId: payload.userId, email: payload.email, accountId: customer.id, customerEmail: customerEmailForOtl }).catch(() => null);
+    const otlPacketRole: PacketRole | null = otlMembership && isPacketRole(otlMembership.role) ? otlMembership.role : null;
     const otlMembershipIsOwner = otlMembership?.isOwner ?? false;
-    const otlHaiSlug = otlPacketRole
-      ? getHaiRoleForPacketRole(otlPacketRole, otlMembershipIsOwner)
-      : otlIsOwner
-        ? "teamAdmin"
-        : "readOnlyMember";
+    const otlHaiSlug = otlPacketRole ? getHaiRoleForPacketRole(otlPacketRole, otlMembershipIsOwner) : otlIsOwner ? "teamAdmin" : "readOnlyMember";
     const otlRoleId = verifyRoles[otlHaiSlug];
 
-    // TOS version check (runs in parallel, fail-closed: if query fails, gate stays up)
     const tosVersionPromise = getSetting("TOS_VERSION").then(async (ver) => {
-      if (!ver) return { version: null, accepted: true }; // Kill switch: no version = no gate
-      const acceptance = await prisma.tosAcceptance.findFirst({
-        where: { stripeCustomerId: customer.id, tosVersion: ver },
-        select: { id: true },
-      });
+      if (!ver) return { version: null, accepted: true };
+      const acceptance = await prisma.tosAcceptance.findFirst({ where: { stripeCustomerId: customer.id, tosVersion: ver }, select: { id: true } });
       return { version: ver, accepted: !!acceptance };
-    }).catch(() => {
-      // Fail-closed: DB error means we can't confirm acceptance, gate stays up
-      return { version: "unknown", accepted: false };
-    });
+    }).catch(() => ({ version: "unknown", accepted: false }));
 
-    const [otlResult, portalSession, twoFactorStatus, tosResult] = await Promise.all([
+    const [otlResult, twoFactorStatus, tosResult] = await Promise.all([
       teamId
-        ? createOneTimeLogin({
-            email: payload.email,
-            send_email_invite: false,
-            teamId: teamId,
-            roleId: otlRoleId,
-          }).catch((error) => {
-            console.error("Failed to generate OTL:", error);
-            return null;
-          })
+        ? createOneTimeLogin({ email: payload.email, send_email_invite: false, teamId, roleId: otlRoleId }).catch(() => null)
         : Promise.resolve(null),
-      stripe.billingPortal.sessions.create({
-        customer: customer.id,
-        // PA-267: no token in the return URL — the session cookie authenticates
-        // the return to /dashboard, so the token can't leak via Stripe's redirect.
-        return_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard`,
-      }),
       getTwoFactorStatus(payload.email),
       tosVersionPromise,
     ]);
@@ -471,7 +338,7 @@ export async function POST(request: NextRequest) {
         recentPayments,
       }),
       gpuDashboardUrl,
-      billingPortalUrl: canMap["billing.view"] ? portalSession.url : null,
+      billingPortalUrl: canMap["billing.view"] ? billingPortalUrl : null,
       isOwner, // legacy field — kept for back-compat during PR 3 UI rollout
       // PA-175 PR 3: authoritative role + permission set for the UI.
       role,
