@@ -24,6 +24,22 @@ try {
   console.warn("Could not load .env.local:", err instanceof Error ? err.message : err);
 }
 
+// Fallback to data/secrets.json for auto-generated secrets (OSS). The app's
+// getSecret() resolves env → data/secrets.json → auto-generate; mirror that here
+// so the token this server verifies matches the one /api/terminal signs. Without
+// this, ADMIN_JWT_SECRET is undefined in OSS (it lives only in secrets.json) and
+// every terminal connection fails with "Server configuration error".
+try {
+  const secretsPath = path.resolve(process.cwd(), "data", "secrets.json");
+  const secrets = JSON.parse(readFileSync(secretsPath, "utf-8")) as Record<string, string>;
+  for (const [key, value] of Object.entries(secrets)) {
+    if (!process.env[key] && value) process.env[key] = value;
+  }
+  console.log("Loaded data/secrets.json successfully");
+} catch {
+  // No secrets file — env/.env.local must provide the secret, or auth will fail.
+}
+
 import { WebSocketServer, WebSocket } from "ws";
 import { Client as SSHClient, ClientChannel } from "ssh2";
 import { createServer } from "http";

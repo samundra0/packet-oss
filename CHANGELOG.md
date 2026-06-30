@@ -18,6 +18,16 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
   now resolve it via the operating-context resolver, so they work in OSS.
 
 ### Fixed
+- Web terminal works in OSS. Three bugs blocked it: (1) `getAuthenticatedCustomer`
+  set `allTeamIds` to the synthetic `oss_*` customer id instead of the hosted.ai
+  team id, so the terminal (and connection-info, pool start/stop/restart, services)
+  passed the wrong id to HAI and got "Instance not found or access denied";
+  (2) `/api/terminal` and the SSH WebSocket server read `process.env.ADMIN_JWT_SECRET`
+  directly, which is unset in OSS (the secret is auto-generated into
+  `data/secrets.json`) — both now resolve env → `data/secrets.json` so the signed
+  ws token verifies; (3) added `NEXT_PUBLIC_SSH_WS_URL` so `XTerminal` can connect
+  to the WS server directly in local dev (where there's no Apache to proxy
+  `/ssh-ws`), plus a `dev:ws` script to run the server.
 - Refreshing the dashboard after logging in via a magic link no longer kicks
   the user to "access denied — request a new link". The verify route only
   created a session cookie when none was present; a stale/dead cookie (revoked,

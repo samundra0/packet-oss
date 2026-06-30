@@ -113,7 +113,11 @@ export async function getAuthenticatedCustomer(
     } as unknown as Stripe.Customer;
     teamId = cached.teamId || undefined;
     accountId = cached.id;
-    allTeamIds = [cached.id];
+    // allTeamIds holds hosted.ai TEAM ids (consumers pass each entry to
+    // getUnifiedInstances / connection-info / pool ops). In OSS it must be the
+    // cached team id, NOT the synthetic oss_* customer id — otherwise every
+    // HAI lookup (terminal, connection-info, start/stop) misses and 404s.
+    allTeamIds = cached.teamId ? [cached.teamId] : [];
   }
 
   const customerEmail =

@@ -93,7 +93,13 @@ export default function XTerminal({
       setErrorMessage("Terminal connection requires authentication token");
       return;
     }
-    const wsUrl = `${wsProtocol}//${window.location.host}/ssh-ws?token=${encodeURIComponent(wsToken)}`;
+    // Production proxies /ssh-ws on the app host to the WS server (Apache).
+    // In local dev there's no proxy, so allow a direct override
+    // (e.g. NEXT_PUBLIC_SSH_WS_URL=ws://localhost:3002/ssh-ws).
+    const wsBase =
+      process.env.NEXT_PUBLIC_SSH_WS_URL ||
+      `${wsProtocol}//${window.location.host}/ssh-ws`;
+    const wsUrl = `${wsBase}?token=${encodeURIComponent(wsToken)}`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;

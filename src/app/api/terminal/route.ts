@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUnifiedInstances, getInstanceCredentials } from "@/lib/hostedai";
 import { getAuthenticatedCustomer } from "@/lib/auth/helpers";
+import { getSecret } from "@/lib/auth/secrets";
 import jwt from "jsonwebtoken";
 
 // GET - Generate a terminal session URL with credentials
@@ -60,7 +61,10 @@ export async function GET(request: NextRequest) {
       password: creds.password,
     };
 
-    const wsSecret = process.env.ADMIN_JWT_SECRET;
+    // Resolve the same way the WS server does (env → data/secrets.json). In OSS
+    // this is auto-generated into data/secrets.json and is NOT in process.env,
+    // so reading process.env directly would 500 with "Server configuration error".
+    const wsSecret = getSecret("ADMIN_JWT_SECRET");
     if (!wsSecret) {
       return NextResponse.json(
         { error: "Server configuration error" },
