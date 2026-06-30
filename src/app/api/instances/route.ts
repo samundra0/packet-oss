@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
+import { isDeployLocked, acquireDeployLock, releaseDeployLock } from "@/lib/deploy-lock";
 import { resolveAllTeamsForEmail } from "@/lib/customer-resolver";
 import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
@@ -281,7 +282,7 @@ export async function POST(request: NextRequest) {
     // team_id, SSH keys, predeploy lock all live there). Before this fix
     // the deploy went against the JWT user's OWN primary customer, which
     // is wrong when they're operating in a team they don't own.
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
     const ctx = await resolveOperatingContext({
       email: payload.email,
       jwtCustomerId: payload.customerId,
@@ -366,7 +367,7 @@ export async function POST(request: NextRequest) {
           teamId,
           customer,
           payload,
-          stripe: await getStripe(),
+          stripe,
         });
       }
     }
@@ -408,7 +409,7 @@ interface UnifiedCreateParams {
   teamId: string;
   customer: Stripe.Customer;
   payload: { email: string; customerId: string };
-  stripe: Stripe;
+  stripe: Stripe | null;
 }
 
 async function handleUnifiedInstanceCreate({
@@ -451,41 +452,31 @@ async function handleUnifiedInstanceCreate({
     );
   }
 
-  // DEPLOYMENT LOCK
-  const lockKey = "deploy_lock";
-  const lockTimestamp = customer.metadata?.[lockKey];
-  const now = Math.floor(Date.now() / 1000);
-
-  if (lockTimestamp) {
-    const lockTime = parseInt(lockTimestamp, 10);
-    if (now - lockTime < 60) {
-      return NextResponse.json(
-        { error: "Another GPU deployment is in progress. Please wait a moment." },
-        { status: 429 }
-      );
-    }
+  // DEPLOYMENT LOCK — backed by Stripe customer metadata (Pro) or
+  // customer_cache (OSS); see @/lib/deploy-lock.
+  if (isDeployLocked(customer)) {
+    return NextResponse.json(
+      { error: "Another GPU deployment is in progress. Please wait a moment." },
+      { status: 429 }
+    );
   }
 
-  try {
-    await stripe.customers.update(customer.id, {
-      metadata: { ...customer.metadata, [lockKey]: now.toString() },
-    });
-  } catch (lockErr) {
-    console.error("[Billing] Failed to acquire lock:", lockErr);
-  }
+  await acquireDeployLock(customer, stripe);
 
-  const clearDeployLock = async () => {
-    try {
-      const fresh = await stripe.customers.retrieve(customer.id) as Stripe.Customer;
-      cacheCustomer(fresh).catch(() => {});
-      const meta = { ...fresh.metadata };
-      delete meta[lockKey];
-      const unlocked = await stripe.customers.update(customer.id, { metadata: meta });
-      cacheCustomer(unlocked as Stripe.Customer).catch(() => {});
-    } catch (e) {
-      console.error("[Billing] Failed to release lock:", e);
-    }
-  };
+  const clearDeployLock = () => releaseDeployLock(customer, stripe);
+
+  // Monthly billing requires Stripe (subscription lookup + validation). In
+  // OSS there is no Stripe, so monthly products cannot be deployed.
+  if (
+    !stripe &&
+    (requestedBillingType === "monthly" || gpuProduct.billingType === "monthly")
+  ) {
+    await clearDeployLock();
+    return NextResponse.json(
+      { error: "Monthly billing is not available in this edition." },
+      { status: 400 }
+    );
+  }
 
   // Tracks the wallet pre-charge so the outer catch can refund if anything
   // throws between deductUsage and the createInstance try/catch — e.g. the
@@ -627,9 +618,11 @@ async function handleUnifiedInstanceCreate({
       resolvedBillingType = "monthly";
       const customerEmail = customer.email;
       if (customerEmail) {
-        const allCustomers = await stripe.customers.list({ email: customerEmail, limit: 10 });
+        // stripe is guaranteed non-null here: the monthly guard above returns
+        // early when Stripe is unavailable.
+        const allCustomers = await stripe!.customers.list({ email: customerEmail, limit: 10 });
         for (const sc of allCustomers.data) {
-          const subs = await stripe.subscriptions.list({ customer: sc.id, status: "active", limit: 20 });
+          const subs = await stripe!.subscriptions.list({ customer: sc.id, status: "active", limit: 20 });
           for (const sub of subs.data) {
             if (sub.items.data.some(item => item.price.id === gpuProduct.stripePriceId)) {
               resolvedStripeSubId = sub.id;
@@ -658,8 +651,8 @@ async function handleUnifiedInstanceCreate({
     let prepaidUntil: Date | null = null;
 
     if (isMonthlyDeploy) {
-      // Validate Stripe subscription
-      const stripeSub = await stripe.subscriptions.retrieve(resolvedStripeSubId!);
+      // Validate Stripe subscription (stripe non-null: monthly guard above).
+      const stripeSub = await stripe!.subscriptions.retrieve(resolvedStripeSubId!);
       if (stripeSub.status !== "active") {
         await clearDeployLock();
         return NextResponse.json(

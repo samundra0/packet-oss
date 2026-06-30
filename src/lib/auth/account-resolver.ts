@@ -106,9 +106,18 @@ export async function resolveOperatingContext({
   if (!stripe && jwtCustomerId) {
     const cached = await prisma.customerCache.findUnique({ where: { id: jwtCustomerId } });
     if (!cached) return null;
+    // Hydrate metadata from the stored JSON blob so keys like deploy_lock
+    // round-trip the same way they do for a real Stripe customer. teamId is
+    // layered on top from its dedicated column as the source of truth.
+    let storedMeta: Record<string, string> = {};
+    try {
+      storedMeta = cached.metadataJson ? JSON.parse(cached.metadataJson) : {};
+    } catch {
+      storedMeta = {};
+    }
     return {
       customer: {
-        id: cached.id, email: cached.email, name: cached.name, metadata: { ...(cached.teamId ? { hostedai_team_id: cached.teamId } : {}) },
+        id: cached.id, email: cached.email, name: cached.name, metadata: { ...storedMeta, ...(cached.teamId ? { hostedai_team_id: cached.teamId } : {}) },
         balance: 0, created: Math.floor((cached.stripeCreatedAt?.getTime() || Date.now()) / 1000),
         currency: "usd", delinquent: null, description: null, discount: null,
         invoice_prefix: "", invoice_settings: {}, livemode: false,

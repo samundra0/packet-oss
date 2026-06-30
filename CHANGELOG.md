@@ -2,6 +2,32 @@
 
 All notable changes to GPU Cloud Dashboard will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **OSS Stripe-free mode**: the platform now runs end-to-end with no Stripe
+  configuration. When `NEXT_PUBLIC_EDITION=oss` and `STRIPE_SECRET_KEY` is
+  unset, customer identity, wallet balance, and hosted.ai team IDs are sourced
+  from the local `customer_cache` table using synthetic `oss_*` IDs.
+- `getStripeOrNull()` / `hasHostedAiConfig()` non-throwing helpers; all
+  customer-facing `getStripe()` call sites fall back to `customer_cache`.
+- OSS signup generates `oss_*` IDs, guards duplicate emails, sets
+  `billingType: "free"`, and shows "check your email" instead of auto-login.
+
+### Fixed
+- **GPU deployment in OSS** no longer 500s. `POST /api/instances` used
+  `getStripe()` unconditionally and stored its deploy-lock in Stripe customer
+  metadata, both of which threw without Stripe. The deploy now uses
+  `getStripeOrNull()` and a shared deploy-lock (`@/lib/deploy-lock`) backed by
+  `customer_cache.metadataJson` in OSS and Stripe metadata in Pro. Monthly
+  products return a clear "not available in this edition" error in OSS.
+- The synthetic OSS customer hydrates its `metadata` from
+  `customer_cache.metadataJson`, so metadata keys round-trip like a real
+  Stripe customer.
+- hosted.ai policy resolution: dropped `?nature=general` (was filtering out the
+  resource policy), prefer general over baremetal policies, and made
+  `resource_policy_id` optional in `createTeam`.
+
 ## [0.1.2] - 2026-03-20
 
 ### Added
