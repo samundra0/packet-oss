@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCronAuth } from "@/lib/cron-auth";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { prisma } from "@/lib/prisma";
 import { getGlobalInstanceSummary, type UnifiedInstance } from "@/lib/hostedai/instances";
 import { hostedaiRequest } from "@/lib/hostedai/client";
@@ -32,7 +32,14 @@ export async function POST(request: NextRequest) {
 
     // Revenue this week = Stripe gross volume (successful charges minus refunded amounts)
     // Use calendar-day boundary to match Stripe dashboard's "last 7 days" view
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        message: "Stripe not configured (OSS edition); admin stats snapshot skipped.",
+      });
+    }
     const sevenDaysAgoMidnight = new Date(sevenDaysAgo);
     sevenDaysAgoMidnight.setUTCHours(0, 0, 0, 0);
     const sevenDaysAgoUnix = Math.floor(sevenDaysAgoMidnight.getTime() / 1000);

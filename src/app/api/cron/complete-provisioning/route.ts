@@ -29,7 +29,7 @@ import {
   getUnassignedClusterGPUs,
 } from "@/lib/gpuaas-admin";
 import { addRegionToDefaultPolicy } from "@/lib/hostedai";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { alertServerProvisioningFailed } from "@/lib/email/templates/alerts";
 
 /**
@@ -134,7 +134,16 @@ function generatePoolName(gpuModel?: string | null): string {
  */
 async function getActiveTeamIdsFromStripe(): Promise<string[]> {
   const teamIds: string[] = [];
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+
+  // OSS: no Stripe subscriptions — every cached customer's team is active.
+  if (!stripe) {
+    const cached = await prisma.customerCache.findMany({
+      where: { isDeleted: false, teamId: { not: null } },
+      select: { teamId: true },
+    });
+    return Array.from(new Set(cached.map((c) => c.teamId!).filter(Boolean)));
+  }
 
   try {
     // Get all active subscriptions with team IDs

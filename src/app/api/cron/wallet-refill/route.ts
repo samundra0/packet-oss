@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { checkAndRefillWallet } from "@/lib/wallet";
 import { verifyCronAuth } from "@/lib/cron-auth";
 
@@ -9,7 +9,14 @@ export async function GET(request: NextRequest) {
   if (authError) return authError;
 
   try {
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        message: "Stripe not configured (OSS edition); wallet refill skipped.",
+      });
+    }
 
     // Find all hourly billing customers with pagination
     const allCustomers: Array<{

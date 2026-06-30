@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripe, getStripeOrNull } from "@/lib/stripe";
 import { verifyCronAuth } from "@/lib/cron-auth";
 import {
   sendMidnightStatusEmail,
@@ -173,7 +173,14 @@ export async function POST(request: NextRequest) {
 
     console.log("[Midnight Status] Starting daily status email generation...");
 
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        message: "Stripe not configured (OSS edition); daily status email is revenue-based and skipped.",
+      });
+    }
 
     // Read from local cache instead of Stripe
     const allCustomers = await prisma.customerCache.findMany({

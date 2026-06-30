@@ -30,6 +30,12 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
 - App deployability and pool-targeted dashboard announcements resolve the
   team ID from `customer_cache` in OSS instead of erroring and silently
   falling back.
+- Stripe-dependent cron jobs no longer throw in OSS. Revenue/billing crons
+  (`admin-stats`, `check-budgets`, `check-hf-deployments`, `wallet-refill`,
+  `midnight-status-email`, `process-drip`, `fullSyncCustomerCache`) skip
+  cleanly with a `skipped: true` response. `complete-provisioning` resolves
+  active teams from `customer_cache`, and storage-alert emails resolve the
+  recipient from `customer_cache` — both keep working without Stripe.
 - hosted.ai policy resolution: dropped `?nature=general` (was filtering out the
   resource policy), prefer general over baremetal policies, and made
   `resource_policy_id` optional in `createTeam`.

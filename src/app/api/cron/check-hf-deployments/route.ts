@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCronAuth } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripe, getStripeOrNull } from "@/lib/stripe";
 import { getUnifiedInstances } from "@/lib/hostedai";
 import { getExposedServices } from "@/lib/hostedai/services";
 import { sendHfDeploymentEmail } from "@/lib/email";
@@ -46,7 +46,14 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(`[HF Cron] Found ${stuckDeployments.length} stuck deployments to check`);
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        message: "Stripe not configured (OSS edition); HF deployment check skipped.",
+      });
+    }
 
     for (const deployment of stuckDeployments) {
       try {

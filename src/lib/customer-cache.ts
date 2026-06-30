@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import type Stripe from "stripe";
 
 /**
@@ -51,7 +51,9 @@ export async function markCustomerCacheDeleted(stripeCustomerId: string): Promis
  * Safety net cron — run every 12 hours.
  */
 export async function fullSyncCustomerCache(): Promise<{ synced: number; deleted: number }> {
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  // OSS: customer_cache is the source of truth, not a mirror of Stripe.
+  if (!stripe) return { synced: 0, deleted: 0 };
   const seenIds = new Set<string>();
   let synced = 0;
 

@@ -7,7 +7,8 @@
 
 import { sendEmail } from "./client";
 import { emailLayout, emailGreeting, emailText, emailWarningBox, emailButton, emailMuted, emailSignoff, plainTextFooter } from "./utils";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
+import { prisma } from "@/lib/prisma";
 import { getBrandName, getDashboardUrl } from "@/lib/branding";
 import { loadTemplate } from "./template-loader";
 
@@ -25,13 +26,21 @@ export async function sendStorageAlert(params: StorageAlertParams): Promise<void
 
   let email: string;
   try {
-    const stripe = await getStripe();
-    const customer = await stripe.customers.retrieve(stripeCustomerId);
-    if (customer.deleted || !customer.email) {
+    const stripe = await getStripeOrNull();
+    let resolved: string | null = null;
+    if (stripe) {
+      const customer = await stripe.customers.retrieve(stripeCustomerId);
+      if (!customer.deleted) resolved = customer.email;
+    } else {
+      // OSS: customer email lives in customer_cache.
+      const cached = await prisma.customerCache.findUnique({ where: { id: stripeCustomerId } });
+      resolved = cached?.email ?? null;
+    }
+    if (!resolved) {
       console.warn(`[Storage Alert] No email for customer ${stripeCustomerId}`);
       return;
     }
-    email = customer.email;
+    email = resolved;
   } catch (err) {
     console.error(`[Storage Alert] Failed to look up customer ${stripeCustomerId}:`, err);
     return;

@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripe, getStripeOrNull } from "@/lib/stripe";
 import { cacheCustomer } from "@/lib/customer-cache";
 import { generateCustomerToken, generateUnsubscribeToken } from "@/lib/customer-auth";
 import { resolvePrimaryCustomer } from "@/lib/customer-resolver";
@@ -161,6 +161,17 @@ export async function POST(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Drip campaigns issue Stripe wallet credits and read Stripe conversion
+  // state; without Stripe there is nothing to process.
+  const dripStripe = await getStripeOrNull();
+  if (!dripStripe) {
+    return NextResponse.json({
+      success: true,
+      skipped: true,
+      message: "Stripe not configured (OSS edition); drip processing skipped.",
+    });
   }
 
   const now = new Date();

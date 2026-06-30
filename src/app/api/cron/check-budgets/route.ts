@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripe, getStripeOrNull } from "@/lib/stripe";
 import { getPoolSubscriptions, podAction } from "@/lib/hostedai";
 import { sendBudgetAlertEmail, sendAutoShutdownNotificationEmail } from "@/lib/email";
 import { verifyCronAuth } from "@/lib/cron-auth";
@@ -47,7 +47,14 @@ export async function POST(request: NextRequest) {
 
     console.log(`[Budget Check] Found ${budgetSettings.length} customers with budget limits`);
 
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        message: "Stripe not configured (OSS edition); budget check skipped.",
+      });
+    }
     const results: BudgetCheckResult[] = [];
 
     // Process each customer
