@@ -7,15 +7,29 @@ import type Stripe from "stripe";
  * Fire-and-forget — call after any Stripe customer interaction.
  */
 export async function cacheCustomer(customer: Stripe.Customer): Promise<void> {
+  // Billing fields sourced from the (Stripe) customer object.
+  const billingFields = {
+    balanceCents: customer.balance || 0,
+    billingType: customer.metadata?.billing_type || null,
+    teamId: customer.metadata?.hostedai_team_id || null,
+    productId: customer.metadata?.gpu_product_id || customer.metadata?.packet_product_id || null,
+  };
+
+  // In OSS (no Stripe) the customer_cache row IS the source of truth for these
+  // billing fields — the wallet balance comes from admin adjustments and
+  // wallet deductions, the plan/team are set at signup. The synthetic customer
+  // object passed here does NOT carry them (balance is always 0), so writing
+  // them on update would wipe a customer's wallet/plan on the next dashboard
+  // load. So in OSS we only refresh identity (email/name) on update; billing
+  // fields are seeded once on create.
+  const stripe = await getStripeOrNull();
+
   await prisma.customerCache.upsert({
     where: { id: customer.id },
     update: {
       email: customer.email,
       name: customer.name,
-      balanceCents: customer.balance || 0,
-      billingType: customer.metadata?.billing_type || null,
-      teamId: customer.metadata?.hostedai_team_id || null,
-      productId: customer.metadata?.gpu_product_id || customer.metadata?.packet_product_id || null,
+      ...(stripe ? billingFields : {}),
       metadataJson: JSON.stringify(customer.metadata || {}),
       isDeleted: false,
       lastSyncedAt: new Date(),
@@ -25,10 +39,7 @@ export async function cacheCustomer(customer: Stripe.Customer): Promise<void> {
       email: customer.email,
       name: customer.name,
       stripeCreatedAt: new Date(customer.created * 1000),
-      balanceCents: customer.balance || 0,
-      billingType: customer.metadata?.billing_type || null,
-      teamId: customer.metadata?.hostedai_team_id || null,
-      productId: customer.metadata?.gpu_product_id || customer.metadata?.packet_product_id || null,
+      ...billingFields,
       metadataJson: JSON.stringify(customer.metadata || {}),
       isDeleted: false,
       lastSyncedAt: new Date(),

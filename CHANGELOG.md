@@ -18,6 +18,11 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
   now resolve it via the operating-context resolver, so they work in OSS.
 
 ### Fixed
+- Admin-adjusted wallet balances no longer reset to $0 when the customer logs
+  in or loads the dashboard. `cacheCustomer()` was overwriting the cache's
+  authoritative `balanceCents` (and `billingType`/`teamId`) with the synthetic
+  OSS customer's hardcoded `balance: 0` on every request. In OSS those fields
+  are now only seeded on create and never clobbered on update.
 - `refundDeployment()` now credits the local `customer_cache` wallet in OSS
   (previously it silently no-opped without Stripe, so failed deploys and
   early terminations were never refunded). Pool-subscription early-termination
