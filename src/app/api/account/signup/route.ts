@@ -428,19 +428,20 @@ export async function POST(request: NextRequest) {
     });
     const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?token=${token}${inviteSuffix}`;
 
-    // Send welcome email with API key (personalized for GPU visitors)
-    try {
-      await sendWelcomeAccountEmail({
-        to: customerEmail,
-        customerName,
-        dashboardUrl,
-        apiKey: key,
-        gpu: gpu || undefined,
-      });
-      console.log(`✅ Sent welcome email to ${customerEmail}`);
-    } catch (emailError) {
-      console.error("❌ WARNING: Failed to send welcome email (non-fatal):", emailError);
-    }
+    // Send welcome email with API key (personalized for GPU visitors).
+    // Fire-and-forget: never block the signup response on SMTP. A slow or
+    // unreachable mail server would otherwise hang the request for the full
+    // retry/backoff window (~60s), leaving the UI spinning even though the
+    // account was already created.
+    sendWelcomeAccountEmail({
+      to: customerEmail,
+      customerName,
+      dashboardUrl,
+      apiKey: key,
+      gpu: gpu || undefined,
+    })
+      .then(() => console.log(`✅ Sent welcome email to ${customerEmail}`))
+      .catch((emailError) => console.error("❌ WARNING: Failed to send welcome email (non-fatal):", emailError));
 
     // Create CustomerLifecycle record (marketing attribution + milestone tracking)
     try {

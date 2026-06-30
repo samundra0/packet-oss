@@ -18,6 +18,10 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
   now resolve it via the operating-context resolver, so they work in OSS.
 
 ### Fixed
+- Signup no longer hangs (UI spinning ~60s). The welcome email was sent with
+  `await`, so a slow/unreachable SMTP server blocked the HTTP response for the
+  full retry/backoff window even though the account was already created. The
+  welcome email is now fire-and-forget, so signup returns immediately.
 - Customers can launch GPUs again. Two bugs blocked the launch modal in OSS:
   (1) the entitlement filter dropped all hourly products because the OSS
   customer's `billing_type` was unset — the account resolver now surfaces
