@@ -130,6 +130,28 @@ export async function validateAndRotateSession(refreshToken: string): Promise<Se
 }
 
 /**
+ * Read-only liveness check: true if the refresh token maps to a live
+ * (unexpired, unrevoked) session row. Unlike validateAndRotateSession this does
+ * NOT roll the window or touch the DB. Used at login to decide whether a fresh
+ * magic-link verify should mint a new session — a dead or absent cookie must
+ * not block session creation, or the next page refresh has nothing to refresh
+ * against and the user gets bounced to "request a new link".
+ */
+export async function hasLiveSession(refreshToken: string): Promise<boolean> {
+  let payload: RefreshPayload;
+  try {
+    payload = jwt.verify(refreshToken, getJwtSecret(), { algorithms: ["HS256"] }) as RefreshPayload;
+  } catch {
+    return false;
+  }
+  if (payload.type !== "customer-refresh" || !payload.jti) return false;
+  const row = await prisma.customerSession.findUnique({
+    where: { tokenHash: hashSessionToken(payload.jti) },
+  });
+  return !!row && isSessionLive(row, Date.now());
+}
+
+/**
  * Re-sign the refresh token for the SAME session (same jti, same absolute
  * expiry) with a new activeAccountId. Used by account-switch so the switched
  * workspace survives a later cookie-backed access-token refresh. Returns null if

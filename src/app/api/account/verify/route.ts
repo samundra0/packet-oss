@@ -5,6 +5,7 @@ import {
   createCustomerSession,
   buildSessionCookie,
   isEphemeralToken,
+  hasLiveSession,
   SESSION_COOKIE_NAME,
 } from "@/lib/auth/customer-session";
 import { resolveOperatingContext } from "@/lib/auth/account-resolver";
@@ -295,11 +296,17 @@ export async function POST(request: NextRequest) {
     // Only persist once 2FA is satisfied — never create a session for a token
     // still pending its TOTP step (the magic-link token before verification).
     const twoFactorSatisfied = !twoFactorStatus.enabled || payload.twoFactorVerified === true;
+    // Mint a session unless one already EXISTS AND IS LIVE. A stale/dead cookie
+    // (revoked, expired, or left over from a deleted customer) must not block
+    // creation — otherwise the next refresh validates the dead cookie, 401s,
+    // and the user is bounced to "request a new link".
+    const existingSession = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+    const hasValidSession = existingSession ? await hasLiveSession(existingSession) : false;
     let sessionRefreshToken: string | null = null;
     if (
       !isEphemeralToken(payload) &&
       twoFactorSatisfied &&
-      !request.cookies.get(SESSION_COOKIE_NAME)?.value
+      !hasValidSession
     ) {
       try {
         sessionRefreshToken = await createCustomerSession({

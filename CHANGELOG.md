@@ -18,6 +18,13 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
   now resolve it via the operating-context resolver, so they work in OSS.
 
 ### Fixed
+- Refreshing the dashboard after logging in via a magic link no longer kicks
+  the user to "access denied — request a new link". The verify route only
+  created a session cookie when none was present; a stale/dead cookie (revoked,
+  expired, or left from a deleted account) made it skip session creation, so
+  the next refresh validated the dead cookie and 401'd. Verify now mints a
+  fresh session unless an existing cookie is actually live (new read-only
+  `hasLiveSession()` helper).
 - Signup no longer hangs (UI spinning ~60s). The welcome email was sent with
   `await`, so a slow/unreachable SMTP server blocked the HTTP response for the
   full retry/backoff window even though the account was already created. The
