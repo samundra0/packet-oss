@@ -52,7 +52,10 @@ export async function GET(request: NextRequest) {
       }
       if (await isTicketClosed(ticket)) continue;
 
-      const articles = await getTicketArticles(ticket.id);
+      const articles = (await getTicketArticles(ticket.id)) as Array<{
+        internal?: boolean;
+        sender?: string;
+      }>;
       const publicArticles = articles.filter((a) => !a.internal);
       const lastArticle = publicArticles[publicArticles.length - 1];
       if (lastArticle && lastArticle.sender !== "Customer") {
