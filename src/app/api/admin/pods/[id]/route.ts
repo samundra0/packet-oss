@@ -47,13 +47,18 @@ export async function GET(
     let subscription = null;
     let teamId = null;
 
-    // Try to find the team from Stripe customer
+    // Find the team from the Stripe customer (Pro) or customer_cache (OSS).
     if (metadata.stripeCustomerId) {
-      const { getStripe } = await import("@/lib/stripe");
-      const stripe = await getStripe();
-      const customer = await stripe.customers.retrieve(metadata.stripeCustomerId);
-      if (customer && !("deleted" in customer)) {
-        teamId = customer.metadata?.hostedai_team_id;
+      const { getStripeOrNull } = await import("@/lib/stripe");
+      const stripe = await getStripeOrNull();
+      if (stripe) {
+        const customer = await stripe.customers.retrieve(metadata.stripeCustomerId);
+        if (customer && !("deleted" in customer)) {
+          teamId = customer.metadata?.hostedai_team_id;
+        }
+      } else {
+        const cached = await prisma.customerCache.findUnique({ where: { id: metadata.stripeCustomerId } });
+        teamId = cached?.teamId ?? null;
       }
     }
 

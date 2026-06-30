@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
+import { underConstructionResponse } from "@/lib/oss-gate";
 import { gatePermission } from "@/lib/auth/gate";
 import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 
@@ -26,7 +27,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) return underConstructionResponse();
 
     // PA-175: resolve the OPERATING account. Invited Team Admin / Finance
     // Manager need to open the team Owner's Stripe portal (the billing

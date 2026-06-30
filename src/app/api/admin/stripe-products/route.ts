@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { verifySessionToken } from "@/lib/admin";
 
 export async function GET(request: NextRequest) {
@@ -15,7 +15,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    // OSS: no Stripe products exist.
+    if (!stripe) return NextResponse.json({ success: true, data: [] });
 
     // Fetch all active Stripe products
     const products = await stripe.products.list({

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { getSharedVolumes, getPoolSubscriptions, deleteSharedVolume } from "@/lib/hostedai";
 import { checkAndRefillWallet, WALLET_CONFIG } from "@/lib/wallet";
 import { getStoragePricePerGBHourCents, getStoppedInstanceRatePercent } from "@/lib/pricing";
@@ -39,7 +39,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const stripe = await getStripe();
+  const stripe = await getStripeOrNull();
+  // OSS: billing sync is Stripe-based (balance charges/refills). Skip cleanly.
+  if (!stripe) {
+    return NextResponse.json({
+      success: true,
+      skipped: true,
+      message: "Stripe not configured (OSS edition); billing sync skipped.",
+    });
+  }
   const now = new Date();
   const podResults: PodBillingResult[] = [];
   const customerRefills: Map<string, { refilled: boolean; amount?: number }> = new Map();

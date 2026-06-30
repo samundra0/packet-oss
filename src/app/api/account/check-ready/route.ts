@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { generateCustomerToken } from "@/lib/customer-auth";
 
 export async function GET(request: NextRequest) {
@@ -13,7 +13,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    // OSS: no Stripe checkout sessions exist; signup doesn't use this flow.
+    if (!stripe) return NextResponse.json({ ready: false });
     const session = await stripe.checkout.sessions.retrieve(sessionId);
 
     if (!session || !session.customer_email) {

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { unsubscribeFromPool, getPoolSubscriptions, deleteInstance, getUnifiedInstanceDetail } from "@/lib/hostedai";
 import { logGPUTerminated } from "@/lib/activity";
+import { refundDeployment, deductUsage } from "@/lib/wallet";
 import { prisma } from "@/lib/prisma";
 import { sendGpuTerminatedEmail } from "@/lib/email";
 import { generateCustomerToken } from "@/lib/customer-auth";
@@ -176,7 +177,11 @@ export async function DELETE(
     // PA-175: resolve the OPERATING account. An invited Team Admin / Member
     // terminating a team pod must hit the team owner's wallet for refund,
     // not their own.
-    const stripe = await getStripe();
+    // Legacy pool-subscription billing used Stripe balance transactions for
+    // early-termination refunds/charges. OSS has no Stripe; the balance
+    // adjustments below are skipped (this legacy flow is unused in OSS, which
+    // only creates unified instances) while termination still proceeds.
+    const stripe = await getStripeOrNull();
     const ctx = await resolveOperatingContext({
       email: payload.email,
       jwtCustomerId: payload.customerId,
@@ -238,12 +243,18 @@ export async function DELETE(
 
             if (creditBackCents > 0) {
               const unusedMins = Math.round(unusedMs / 60000);
-              await stripe.customers.createBalanceTransaction(ctx.accountId, {
-                amount: -creditBackCents,
-                currency: "usd",
-                description: `GPU early termination credit: ${unusedMins} mins unused`,
-                metadata: { instance_id: id },
-              });
+              const desc = `GPU early termination credit: ${unusedMins} mins unused`;
+              if (stripe) {
+                await stripe.customers.createBalanceTransaction(ctx.accountId, {
+                  amount: -creditBackCents,
+                  currency: "usd",
+                  description: desc,
+                  metadata: { instance_id: id },
+                });
+              } else {
+                // OSS: credit the local wallet.
+                await refundDeployment(ctx.accountId, creditBackCents, desc);
+              }
               console.log(`[Billing] Credited back $${(creditBackCents / 100).toFixed(2)} for early termination`);
             }
           } else {
@@ -253,12 +264,18 @@ export async function DELETE(
               const finalChargeCents = Math.round(unbilledHours * hourlyRateCents);
               if (finalChargeCents > 0) {
                 const unbilledMins = Math.round(unbilledHours * 60);
-                await stripe.customers.createBalanceTransaction(ctx.accountId, {
-                  amount: finalChargeCents,
-                  currency: "usd",
-                  description: `GPU final usage: ${unbilledMins} mins after prepaid period`,
-                  metadata: { instance_id: id },
-                });
+                const desc = `GPU final usage: ${unbilledMins} mins after prepaid period`;
+                if (stripe) {
+                  await stripe.customers.createBalanceTransaction(ctx.accountId, {
+                    amount: finalChargeCents,
+                    currency: "usd",
+                    description: desc,
+                    metadata: { instance_id: id },
+                  });
+                } else {
+                  // OSS: debit the local wallet.
+                  await deductUsage(ctx.accountId, unbilledHours, desc, hourlyRateCents, `terminate_${id}`);
+                }
                 console.log(`[Billing] Charged $${(finalChargeCents / 100).toFixed(2)} for final unbilled usage`);
               }
             }
@@ -373,7 +390,7 @@ export async function DELETE(
 
           if (creditBackCents > 0) {
             const unusedMins = Math.round(unusedMs / 60000);
-            await stripe.customers.createBalanceTransaction(ctx.accountId, {
+            await stripe?.customers.createBalanceTransaction(ctx.accountId, {
               amount: -creditBackCents, // Negative amount = credit
               currency: "usd",
               description: `GPU early termination credit: ${unusedMins} mins unused`,
@@ -398,7 +415,7 @@ export async function DELETE(
 
             if (finalChargeCents > 0) {
               const unbilledMins = Math.round(unbilledHours * 60);
-              await stripe.customers.createBalanceTransaction(ctx.accountId, {
+              await stripe?.customers.createBalanceTransaction(ctx.accountId, {
                 amount: finalChargeCents,
                 currency: "usd",
                 description: `GPU final usage: ${unbilledMins} mins after prepaid period`,

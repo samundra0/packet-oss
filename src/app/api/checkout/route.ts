@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
+import { underConstructionResponse } from "@/lib/oss-gate";
 import { prisma } from "@/lib/prisma";
 import { rateLimit, getClientIp } from "@/lib/ratelimit";
 import { validateVoucherPublic } from "@/lib/voucher";
@@ -87,7 +88,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Product not found" }, { status: 404 });
     }
 
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) return underConstructionResponse();
 
     // Check if customer already exists (search ALL customers with this email)
     const existingCustomers = await stripe.customers.list({

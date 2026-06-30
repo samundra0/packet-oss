@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken, generateCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   createInstance,
   getServiceProvisioningInfo,
@@ -18,7 +18,6 @@ import { runStartupScript } from "@/lib/startup-script-runner";
 import { WORKSPACE_SETUP_SCRIPT } from "@/lib/startup-scripts";
 import { gatePermission } from "@/lib/auth/gate";
 import { randomBytes } from "crypto";
-import Stripe from "stripe";
 import { z } from "zod";
 
 const restoreSnapshotSchema = z.object({
@@ -83,10 +82,18 @@ export async function POST(
     }
 
     // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(
-      payload.customerId
-    )) as Stripe.Customer;
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    if (!ctx) {
+      return NextResponse.json(
+        { error: "No team associated with this account" },
+        { status: 400 }
+      );
+    }
+    const customer = ctx.customer;
 
     const teamId = customer.metadata?.hostedai_team_id;
     if (!teamId) {

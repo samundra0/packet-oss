@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken } from "@/lib/admin";
-import { getStripe, getStripeOrNull } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
+import { underConstructionResponse } from "@/lib/oss-gate";
 import { createOneTimeLogin, createTeam, suspendTeam, unsuspendTeam, terminateTeam, syncTeamsToDefaultPolicy, ensureDefaultPolicies, ensureRoles } from "@/lib/hostedai";
 import { sendEmail } from "@/lib/email";
 import {
@@ -185,7 +186,11 @@ export async function POST(
   }
 
   try {
-    const stripe = await getStripe();
+    // OSS-supported actions (login-as, send-credentials, toggle-bare-metal,
+    // hostedai-login, adjust-credits, set-balance) are handled in the cache
+    // branches above. Any remaining action is a Stripe-only flow.
+    const stripe = await getStripeOrNull();
+    if (!stripe) return underConstructionResponse();
     const customer = await stripe.customers.retrieve(customerId);
 
     if ("deleted" in customer && customer.deleted) {

@@ -6,13 +6,12 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import {
   getScenarioCompatibleServices,
   getServiceCompatibleRegions,
 } from "@/lib/hostedai";
 import { prisma } from "@/lib/prisma";
-import Stripe from "stripe";
 
 export async function GET(request: NextRequest) {
   try {
@@ -31,9 +30,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "categoryId is required" }, { status: 400 });
     }
 
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(payload.customerId)) as Stripe.Customer;
-    const teamId = customer.metadata?.hostedai_team_id;
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    const teamId = ctx?.customer.metadata?.hostedai_team_id;
     if (!teamId) {
       return NextResponse.json({ error: "No team associated" }, { status: 400 });
     }

@@ -4,6 +4,25 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Stripe-only features now degrade gracefully in OSS instead of 500ing.
+  Customer-facing billing flows (checkout, wallet top-up, billing portal,
+  voucher redemption) return a friendly "currently under construction"
+  response, and the **Stripe billing-portal button is hidden** (desktop and
+  mobile) in the OSS edition.
+- Admin Stripe-only endpoints behave cleanly without Stripe: `stripe-products`
+  returns an empty list, `business-metrics` returns zeroed metrics, and
+  customer admin actions that require Stripe return "under construction".
+- GPU instance routes that only needed Stripe to look up a team ID
+  (`category-check`, `from-snapshot`, pool-subscription `snapshot/prepare`)
+  now resolve it via the operating-context resolver, so they work in OSS.
+
+### Fixed
+- `refundDeployment()` now credits the local `customer_cache` wallet in OSS
+  (previously it silently no-opped without Stripe, so failed deploys and
+  early terminations were never refunded). Pool-subscription early-termination
+  credit/charge reconciliation routes through the OSS wallet accordingly.
+
 ### Added
 - **OSS Stripe-free mode**: the platform now runs end-to-end with no Stripe
   configuration. When `NEXT_PUBLIC_EDITION=oss` and `STRIPE_SECRET_KEY` is

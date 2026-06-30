@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { resolveOperatingContext } from "@/lib/auth/account-resolver";
 import { getPoolSubscriptions, getConnectionInfo, getAllPools, getStorageBlocks } from "@/lib/hostedai";
 import { getStoragePricePerGBHourCents } from "@/lib/pricing";
-import Stripe from "stripe";
 import { spawn } from "child_process";
 import { validateSSHParams } from "@/lib/ssh-validation";
 
@@ -98,10 +97,13 @@ export async function GET(
 
     const { id: subscriptionId } = await params;
 
-    // Get customer to find team ID
-    const stripe = await getStripe();
-    const customer = (await stripe.customers.retrieve(payload.customerId)) as Stripe.Customer;
-    const teamId = customer.metadata?.hostedai_team_id;
+    // Resolve the operating account to find the team ID (Stripe or OSS cache).
+    const ctx = await resolveOperatingContext({
+      email: payload.email,
+      jwtCustomerId: payload.customerId,
+      activeAccountId: payload.activeAccountId,
+    });
+    const teamId = ctx?.customer.metadata?.hostedai_team_id;
 
     if (!teamId) {
       return NextResponse.json({ error: "No team associated with this account" }, { status: 400 });

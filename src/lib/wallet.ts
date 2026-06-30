@@ -393,25 +393,35 @@ export async function refundDeployment(
   description: string
 ): Promise<{ success: boolean; error?: string }> {
   const stripe = await getStripeOrNull();
-  if (!stripe) return { success: false, error: "Payment processor not configured" };
 
   if (amountCents <= 0) {
     return { success: true };
   }
 
   try {
-    // Credit the customer's balance (negative amount = credit)
-    await stripe.customers.createBalanceTransaction(customerId, {
-      amount: -amountCents, // Negative = credit to customer
-      currency: "usd",
-      description,
-      metadata: {
-        type: "deployment_refund",
-        refund_time: new Date().toISOString(),
-      },
-    });
+    if (stripe) {
+      // Credit the customer's balance (negative amount = credit)
+      await stripe.customers.createBalanceTransaction(customerId, {
+        amount: -amountCents, // Negative = credit to customer
+        currency: "usd",
+        description,
+        metadata: {
+          type: "deployment_refund",
+          refund_time: new Date().toISOString(),
+        },
+      });
 
-    console.log(`[Wallet] Refunded $${(amountCents / 100).toFixed(2)} to ${customerId}: ${description}`);
+      console.log(`[Wallet] Refunded $${(amountCents / 100).toFixed(2)} to ${customerId}: ${description}`);
+      return { success: true };
+    }
+
+    // ── No Stripe: credit the local cache (Stripe convention: negative = credit) ──
+    const { prisma } = await import("@/lib/prisma");
+    const cached = await prisma.customerCache.findUnique({ where: { id: customerId }, select: { balanceCents: true } });
+    const currentBalance = cached?.balanceCents || 0;
+    const newBalance = currentBalance - amountCents; // Subtract debt = add credit
+    await prisma.customerCache.update({ where: { id: customerId }, data: { balanceCents: newBalance } });
+    console.log(`[Wallet] Refunded $${(amountCents / 100).toFixed(2)} to ${customerId} (local cache): ${description}`);
     return { success: true };
   } catch (error) {
     console.error("Refund error:", error);

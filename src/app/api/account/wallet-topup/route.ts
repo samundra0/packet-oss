@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken, generateCustomerToken } from "@/lib/customer-auth";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
+import { underConstructionResponse } from "@/lib/oss-gate";
 import { validateVoucher } from "@/lib/voucher";
 import { gatePermission } from "@/lib/auth/gate";
 
@@ -33,7 +34,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
     }
 
-    const stripe = await getStripe();
+    const stripe = await getStripeOrNull();
+    if (!stripe) return underConstructionResponse();
 
     // Verify customer exists and is hourly billing
     const customer = await stripe.customers.retrieve(payload.customerId);

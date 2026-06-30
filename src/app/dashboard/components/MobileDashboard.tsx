@@ -4,6 +4,7 @@ import React from "react";
 import Link from "next/link";
 import { BrandLogo } from "@/components/BrandLogo";
 import { getLogoUrl } from "@/lib/branding-client";
+import { isPro } from "@/lib/edition";
 
 interface MobileHeaderProps {
   /** Wallet balance pill. Omitted (undefined) for users without billing.view (PA-271). */
@@ -271,8 +272,9 @@ export function MobileMenuSheet({
 
             <div className="my-4 border-t border-[var(--line)]" />
 
-            {/* PA-271: Stripe Portal is billing-only — mirror the desktop gate */}
-            {check("billing.view") && (
+            {/* PA-271: Stripe Portal is billing-only — mirror the desktop gate.
+                Pro only; OSS has no Stripe customer portal. */}
+            {isPro() && check("billing.view") && (
             <button
               onClick={onBillingPortal}
               disabled={billingPortalLoading}

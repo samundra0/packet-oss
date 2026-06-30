@@ -979,7 +979,8 @@ export function DashboardContent() {
 
         {/* Footer Links */}
         <div className="p-4 border-t border-[var(--line)] space-y-1">
-          {data.can?.["billing.view"] && (
+          {/* Stripe billing portal — Pro only; OSS has no Stripe customer portal. */}
+          {isPro() && data.can?.["billing.view"] && (
             <button
               onClick={openBillingPortal}
               disabled={billingPortalLoading}
