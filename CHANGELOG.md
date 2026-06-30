@@ -18,6 +18,14 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
   now resolve it via the operating-context resolver, so they work in OSS.
 
 ### Fixed
+- Customers can launch GPUs again. Two bugs blocked the launch modal in OSS:
+  (1) the entitlement filter dropped all hourly products because the OSS
+  customer's `billing_type` was unset — the account resolver now surfaces
+  `billing_type` (default `"free"`) so wallet-based customers are entitled;
+  (2) GPU category creation failed with HAI error "invalid scenario name"
+  because the scenario name template contained a colon — scenario names are
+  now sanitized to HAI's allowed character set (letters, numbers, spaces,
+  underscores, hyphens).
 - Admin-adjusted wallet balances no longer reset to $0 when the customer logs
   in or loads the dashboard. `cacheCustomer()` was overwriting the cache's
   authoritative `balanceCents` (and `billingType`/`teamId`) with the synthetic

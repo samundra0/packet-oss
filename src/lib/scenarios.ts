@@ -26,6 +26,20 @@ const GPU_SCENARIO_KEY = "packet_gpu_scenario_id"; // DEPRECATED: kept for migra
 const APPS_SCENARIO_KEY = "packet_apps_scenario_id";
 
 /**
+ * HAI scenario names allow only letters, numbers, spaces, underscores, and
+ * hyphens (error 12230001 "invalid scenario name" otherwise). Normalize an
+ * arbitrary name — e.g. the old `Packet GPU: ${name}` template's colon, or a
+ * category like "L4 (24GB)" — into a valid one.
+ */
+export function sanitizeScenarioName(name: string): string {
+  return name
+    .replace(/[^A-Za-z0-9 _-]+/g, "-") // invalid runs → hyphen
+    .replace(/\s+/g, " ") // collapse whitespace
+    .replace(/-+/g, "-") // collapse repeated hyphens
+    .trim();
+}
+
+/**
  * Find an existing scenario by name via the HAI list endpoint.
  * Returns the scenario ID if found, null otherwise.
  */
@@ -166,7 +180,7 @@ export async function createCategoryScenario(
   categoryName: string,
   categorySlug: string
 ): Promise<string | null> {
-  const scenarioName = `Packet GPU: ${categoryName}`;
+  const scenarioName = sanitizeScenarioName(`Packet GPU - ${categoryName}`);
   try {
     const result = await createScenario({
       name: scenarioName,

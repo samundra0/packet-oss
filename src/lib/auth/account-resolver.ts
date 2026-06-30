@@ -115,9 +115,14 @@ export async function resolveOperatingContext({
     } catch {
       storedMeta = {};
     }
+    // OSS has no Stripe billing tiers — every customer is on the free/hourly
+    // wallet model. Surface billing_type (default "free") so entitlement checks
+    // (e.g. launch-options) treat the customer as wallet-enabled; otherwise
+    // hourly products are filtered out and the launch modal shows nothing.
+    const billingType = cached.billingType || storedMeta.billing_type || "free";
     return {
       customer: {
-        id: cached.id, email: cached.email, name: cached.name, metadata: { ...storedMeta, ...(cached.teamId ? { hostedai_team_id: cached.teamId } : {}) },
+        id: cached.id, email: cached.email, name: cached.name, metadata: { ...storedMeta, billing_type: billingType, ...(cached.teamId ? { hostedai_team_id: cached.teamId } : {}) },
         balance: 0, created: Math.floor((cached.stripeCreatedAt?.getTime() || Date.now()) / 1000),
         currency: "usd", delinquent: null, description: null, discount: null,
         invoice_prefix: "", invoice_settings: {}, livemode: false,
