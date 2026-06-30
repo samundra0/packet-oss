@@ -24,6 +24,12 @@ All notable changes to GPU Cloud Dashboard will be documented in this file.
 - The synthetic OSS customer hydrates its `metadata` from
   `customer_cache.metadataJson`, so metadata keys round-trip like a real
   Stripe customer.
+- Account switching (`/api/session/switch-account`) no longer throws an
+  unhandled 500 in OSS; the implicit-owner fallback resolves account identity
+  from `customer_cache` when Stripe is absent.
+- App deployability and pool-targeted dashboard announcements resolve the
+  team ID from `customer_cache` in OSS instead of erroring and silently
+  falling back.
 - hosted.ai policy resolution: dropped `?nature=general` (was filtering out the
   resource policy), prefer general over baremetal policies, and made
   `resource_policy_id` optional in `createTeam`.

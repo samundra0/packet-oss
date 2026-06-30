@@ -16,7 +16,7 @@ import {
   SESSION_COOKIE_NAME,
 } from "@/lib/auth/customer-session";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import type Stripe from "stripe";
 import { materializeImplicitOwner } from "@/lib/auth/membership";
 
@@ -53,28 +53,40 @@ export async function POST(request: NextRequest) {
       : null;
 
   // Implicit-Owner fallback: no team_membership row yet, but the user owns
-  // this Stripe customer by email match. Materialize the row + User on the fly.
+  // this account by email match. Materialize the row + User on the fly.
+  // Account identity comes from Stripe (Pro) or customer_cache (OSS).
   if (!membership) {
-    const stripe = await getStripe();
-    let customer: Stripe.Customer | null;
-    try {
-      customer = (await stripe.customers.retrieve(
-        targetAccountId,
-      )) as Stripe.Customer;
-      if (customer.deleted) customer = null;
-    } catch {
-      customer = null;
+    const stripe = await getStripeOrNull();
+    let ownerEmail: string | null = null;
+    let ownerName: string | null = null;
+
+    if (stripe) {
+      try {
+        const customer = (await stripe.customers.retrieve(
+          targetAccountId,
+        )) as Stripe.Customer;
+        if (!customer.deleted) {
+          ownerEmail = typeof customer.email === "string" ? customer.email : null;
+          ownerName = typeof customer.name === "string" ? customer.name : null;
+        }
+      } catch {
+        ownerEmail = null;
+      }
+    } else {
+      const cached = await prisma.customerCache.findUnique({
+        where: { id: targetAccountId },
+      });
+      if (cached && !cached.isDeleted) {
+        ownerEmail = cached.email;
+        ownerName = cached.name;
+      }
     }
-    if (
-      customer &&
-      typeof customer.email === "string" &&
-      customer.email.toLowerCase() === lower
-    ) {
+
+    if (ownerEmail && ownerEmail.toLowerCase() === lower) {
       const materialized = await materializeImplicitOwner({
         email: payload.email,
         accountId: targetAccountId,
-        displayName:
-          typeof customer.name === "string" ? customer.name : null,
+        displayName: ownerName,
       });
       user = await prisma.user.findUnique({ where: { email: lower } });
       membership = await prisma.teamMembership.findUnique({

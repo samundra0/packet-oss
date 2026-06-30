@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyCustomerToken } from "@/lib/customer-auth";
 import { prisma } from "@/lib/prisma";
-import { getStripe } from "@/lib/stripe";
+import { getStripeOrNull } from "@/lib/stripe";
 import { getPoolSubscriptions } from "@/lib/hostedai";
 
 export async function GET(request: NextRequest) {
@@ -86,11 +86,17 @@ function formatAnnouncement(a: {
 
 async function getCustomerPoolIds(customerId: string): Promise<number[]> {
   try {
-    const stripe = await getStripe();
-    const customer = await stripe.customers.retrieve(customerId);
-    if ("deleted" in customer && customer.deleted) return [];
-
-    const teamId = customer.metadata?.hostedai_team_id;
+    const stripe = await getStripeOrNull();
+    let teamId: string | null = null;
+    if (stripe) {
+      const customer = await stripe.customers.retrieve(customerId);
+      if ("deleted" in customer && customer.deleted) return [];
+      teamId = customer.metadata?.hostedai_team_id ?? null;
+    } else {
+      // OSS: team association lives in customer_cache.
+      const cached = await prisma.customerCache.findUnique({ where: { id: customerId } });
+      teamId = cached?.teamId ?? null;
+    }
     if (!teamId) return [];
 
     const subscriptions = await getPoolSubscriptions(teamId);
