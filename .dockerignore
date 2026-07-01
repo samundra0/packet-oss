@@ -2,6 +2,9 @@
 .git
 .gitignore
 
+# Dockerfile itself doesn't need to be in the build context
+docker/Dockerfile
+
 # Node
 node_modules
 
