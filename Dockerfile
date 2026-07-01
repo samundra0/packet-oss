@@ -60,6 +60,15 @@ RUN node_modules/.bin/esbuild src/server/ssh-websocket.ts \
       --external:cpu-features \
       --outfile=ws-server.js
 
+# Bundle the Prisma seed script so it runs with plain node (no tsx in runner).
+# @prisma/client is already in the runner's node_modules — keep it external.
+RUN node_modules/.bin/esbuild prisma/seed.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --external:@prisma/client \
+      --outfile=seed.js
+
 # ── prod-deps (flat / hoisted node_modules — no pnpm symlinks) ───────────────
 # node-linker=hoisted produces a standard flat node_modules layout that can be
 # selectively copied into the runner without knowing pnpm's virtual store paths.
@@ -91,6 +100,9 @@ COPY --from=prod-deps --chown=appuser:appgroup /app/node_modules/prisma         
 COPY --from=prod-deps --chown=appuser:appgroup /app/node_modules/@prisma          ./node_modules/@prisma
 COPY --from=prod-deps --chown=appuser:appgroup /app/node_modules/.prisma          ./node_modules/.prisma
 COPY --from=builder   --chown=appuser:appgroup /app/prisma                        ./prisma
+
+# ── Seed script ──
+COPY --from=builder --chown=appuser:appgroup /app/seed.js ./seed.js
 
 # ── WebSocket server + native deps ──
 # ssh2 / cpu-features and their pure-JS deps (asn1, bcrypt-pbkdf) are external
