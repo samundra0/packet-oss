@@ -1,0 +1,81 @@
+# GPU Cloud Dashboard — Docker Compose
+#
+# Quick start:
+#   cp .env.example .env.local
+#   # Edit .env.local — set DATABASE_URL to: mysql://gpucloud:gpucloud@db:3306/gpucloud
+#   docker compose up -d
+#
+# The app is available at http://localhost:3000
+# Admin login: http://localhost:3000/admin/login  (first run → auto-bootstrap)
+#
+# To rebuild after code changes:
+#   docker compose build app ws && docker compose up -d app ws
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: gpucloud
+      MARIADB_USER: gpucloud
+      MARIADB_PASSWORD: gpucloud
+      MARIADB_ROOT_PASSWORD: rootpassword
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+        NEXT_PUBLIC_EDITION: oss
+        NEXT_PUBLIC_BRAND_NAME: ${NEXT_PUBLIC_BRAND_NAME:-}
+        NEXT_PUBLIC_PRIMARY_COLOR: ${NEXT_PUBLIC_PRIMARY_COLOR:-}
+        NEXT_PUBLIC_ACCENT_COLOR: ${NEXT_PUBLIC_ACCENT_COLOR:-}
+    restart: unless-stopped
+    command: app
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: mysql://gpucloud:gpucloud@db:3306/gpucloud
+    volumes:
+      # Persist file-based state (admins, secrets, invite tokens)
+      - app_data:/app/data
+      # Persist uploaded branding assets (logos, favicons)
+      - branding:/app/public/branding
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ws:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ws
+    ports:
+      - "${SSH_WS_PORT:-3002}:3002"
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: mysql://gpucloud:gpucloud@db:3306/gpucloud
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      - app
+
+volumes:
+  db_data:
+  app_data:
+  branding:

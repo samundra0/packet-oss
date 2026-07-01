@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+
+# Next.js build output (rebuilt inside Docker)
+.next
+
+# Local env (injected at runtime via env_file)
+.env.local
+.env*.local
+
+# Runtime state (mounted as volumes in production)
+data/
+logs/
+public/branding/
+
+# Dev / test artifacts
+tests/
+playwright-report/
+coverage/
+
+# Session/conversation dumps
+SESSION-DUMP.md
+CONVERSATION-DUMP.md
+AGENTS.md
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
